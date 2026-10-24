@@ -462,7 +462,31 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
             _wait(lambda: dialog.original_position is not None, 20)
             assert dialog.original_position.index == 3, 'Original VFR cover marker did not match the known yellow frame'
             assert dialog.timeline.original_index == 3
-            dialog.timeline.setValue(4)
+            slider = dialog.timeline
+            _, groove, handle = slider._geometry()
+            def slider_position(index):
+                span = max(1, groove.width() - handle.width())
+                x = groove.x() + handle.width() / 2 + span * index / slider.maximum()
+                return QPoint(round(x), handle.center().y())
+            device = QTest.createTouchDevice()
+            touch = QTest.touchEvent(slider, device, False)
+            last = handle.center()
+            touch.press(0, last, slider).commit()
+            QCoreApplication.processEvents()
+            shown_while_pressed = []
+            try:
+                assert slider.isSliderDown(), 'Touch begin did not capture the cover timeline'
+                for index in (1, 2, 4):
+                    last = slider_position(index)
+                    touch.move(0, last, slider).commit()
+                    _wait(lambda index=index: dialog.selected_frame_index == index
+                          and dialog.displayed_frame_index == index and dialog.save_button.isEnabled(), 8)
+                    assert slider.isSliderDown(), 'Finger was released before preview changed'
+                    shown_while_pressed.append(dialog.displayed_frame_index)
+            finally:
+                touch.release(0, last, slider).commit()
+                QCoreApplication.processEvents()
+            assert shown_while_pressed == [1, 2, 4] and not slider.isSliderDown()
             _wait(lambda: dialog.selected_frame_index == 4 and dialog.save_button.isEnabled(), 20)
             assert abs(dialog.metadata.frames[4].pts_seconds - .44) < .000001
             dialog.grab().save(str(report_dir / 'cover-editor.png'))
@@ -508,7 +532,8 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
         return {'vfr_index': 4, 'pts_milliseconds': 440, 'full_size': [320, 240],
                 'copy_preserves_originals_and_video_bytes': True, 'cancel_no_changes': True,
                 'save_mode_prompt_after_save': True, 'maximize_button_available': True,
-                'original_cover_marker_frame': 3}
+                'original_cover_marker_frame': 3,
+                'touch_scrub_updates_before_release': shown_while_pressed}
 
 
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import threading
+import time
 
-from PySide6.QtCore import QObject, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
+from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
+from PySide6.QtGui import QColor, QEventPoint, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel, QPushButton,
     QRadioButton, QSlider, QSizePolicy, QStyle, QStyleOptionSlider, QVBoxLayout,
@@ -200,6 +201,10 @@ class CoverTimelineSlider(QSlider):
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.original_index = None
+        self._touch_active = False
+        self._touch_point_id = None
+        self._suppress_touch_mouse_until = 0.0
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setTracking(True)
         self.setMinimumHeight(30)
 
@@ -218,10 +223,87 @@ class CoverTimelineSlider(QSlider):
 
     def _value_at(self, position):
         option, groove, handle = self._geometry()
-        span = max(1, groove.width() - handle.width())
-        offset = round(position.x() - groove.x() - handle.width() / 2)
+        horizontal = self.orientation() == Qt.Orientation.Horizontal
+        groove_start = groove.x() if horizontal else groove.y()
+        groove_length = groove.width() if horizontal else groove.height()
+        handle_length = handle.width() if horizontal else handle.height()
+        coordinate = position.x() if horizontal else position.y()
+        span = max(1, groove_length - handle_length)
+        offset = round(coordinate - groove_start - handle_length / 2)
+        # QTouchEvent positions are widget-local logical pixels, as are these
+        # style rectangles. Multiplying by the display scale would mis-seek.
         return QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), max(0, min(span, offset)),
                                               span, option.upsideDown)
+
+    def _finish_touch(self):
+        was_active = self._touch_active
+        self._touch_active = False
+        self._touch_point_id = None
+        self._suppress_touch_mouse_until = time.monotonic() + .8
+        if was_active:
+            self.setSliderDown(False)
+
+    def event(self, event):
+        kind = event.type()
+        if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove):
+            synthesized = event.source() != Qt.MouseEventSource.MouseEventNotSynthesized
+            if synthesized and (self._touch_active or time.monotonic() < self._suppress_touch_mouse_until):
+                event.accept()
+                return True
+            if self._touch_active:
+                if kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+                    # A real mouse can take over immediately. Its following
+                    # move/release belongs to QSlider's ordinary mouse path.
+                    self._finish_touch()
+                else:
+                    # Hover or an unrelated mouse release must not end the
+                    # finger-owned slider drag or replace its position.
+                    event.accept()
+                    return True
+        if kind not in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+                        QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            if kind in (QEvent.Type.EnabledChange, QEvent.Type.WindowDeactivate) and self._touch_active:
+                self._finish_touch()
+            return super().event(event)
+
+        event.accept()
+        if kind == QEvent.Type.TouchCancel:
+            self._finish_touch()
+            return True
+        points = event.points()
+        if kind == QEvent.Type.TouchBegin:
+            if not self.isEnabled() or len(points) != 1:
+                self._finish_touch()
+                return True
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self._touch_active = True
+            self._touch_point_id = points[0].id()
+            self._suppress_touch_mouse_until = time.monotonic() + .8
+            self.setSliderDown(True)
+            self.setSliderPosition(self._value_at(points[0].position()))
+            return True
+        if not self._touch_active:
+            # A canceled sequence may still deliver an Update/End. Consume it
+            # without moving the handle or starting a new drag.
+            return True
+        if len(points) != 1 or points[0].id() != self._touch_point_id:
+            self._finish_touch()
+            return True
+        self.setSliderPosition(self._value_at(points[0].position()))
+        if kind == QEvent.Type.TouchEnd or points[0].state() == QEventPoint.State.Released:
+            self._finish_touch()
+        return True
+
+    def hideEvent(self, event):
+        if self._touch_active:
+            self._finish_touch()
+        super().hideEvent(event)
+
+    def focusOutEvent(self, event):
+        if self._touch_active:
+            self._finish_touch()
+        super().focusOutEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
@@ -235,21 +317,29 @@ class CoverTimelineSlider(QSlider):
         if self.original_index is None or self.maximum() <= self.minimum():
             return
         option, groove, handle = self._geometry()
-        span = max(1, groove.width() - handle.width())
+        horizontal = self.orientation() == Qt.Orientation.Horizontal
+        span = max(1, (groove.width() - handle.width()) if horizontal else (groove.height() - handle.height()))
         offset = QStyle.sliderPositionFromValue(self.minimum(), self.maximum(), self.original_index,
                                                 span, option.upsideDown)
-        x = groove.x() + handle.width() / 2 + offset
-        center = groove.center().y()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         color = QColor("#8cc7db")
         painter.setPen(QPen(color, 2))
-        painter.drawLine(QPointF(x, max(2, center - 11)), QPointF(x, min(self.height() - 2, center + 9)))
+        if horizontal:
+            x = groove.x() + handle.width() / 2 + offset
+            center = groove.center().y()
+            painter.drawLine(QPointF(x, max(2, center - 11)), QPointF(x, min(self.height() - 2, center + 9)))
+            triangle = [QPointF(x - 4, max(1, center - 13)), QPointF(x + 4, max(1, center - 13)),
+                        QPointF(x, max(6, center - 7))]
+        else:
+            y = groove.y() + handle.height() / 2 + offset
+            center = groove.center().x()
+            painter.drawLine(QPointF(max(2, center - 11), y), QPointF(min(self.width() - 2, center + 9), y))
+            triangle = [QPointF(max(1, center - 13), y - 4), QPointF(max(1, center - 13), y + 4),
+                        QPointF(max(6, center - 7), y)]
         painter.setBrush(color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawPolygon(QPolygonF([QPointF(x - 4, max(1, center - 13)),
-                                       QPointF(x + 4, max(1, center - 13)),
-                                       QPointF(x, max(6, center - 7))]))
+        painter.drawPolygon(QPolygonF(triangle))
 
 
 class SaveModeDialog(QDialog):

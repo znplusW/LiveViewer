@@ -12,11 +12,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QKeyEvent, QMouseEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QTouchEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QGroupBox
 
-from livegallery.cover_editor import EditorDialog, SaveModeDialog
+from livegallery.cover_editor import CoverTimelineSlider, EditorDialog, SaveModeDialog
 from livegallery.cover_preview import PreviewSession
 from livegallery.frame_reader import FrameCancelled, FrameReader
 from livegallery.frame_tools import resolve_frame_tools
@@ -475,6 +475,29 @@ class CoverEditorTests(unittest.TestCase):
             self.assertGreater(len(shown), 3)
         finally:
             QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, pos=last_position)
+        # Now exercise the native Qt touch route on the actual cached decoder,
+        # not Qt's fallback synthesized mouse events.
+        slider.setValue(0)
+        self.wait(lambda: self.dialog.displayed_frame_index == 0)
+        device = QTest.createTouchDevice()
+        touch = QTest.touchEvent(slider, device, False)
+        _, groove, handle = slider._geometry()
+        touch.press(0, handle.center(), slider).commit()
+        self.app.processEvents()
+        touch_frames = set()
+        last_position = handle.center()
+        for index in (1, 2, 4, 6):
+            x = groove.x() + handle.width() / 2 + (groove.width() - handle.width()) * index / slider.maximum()
+            last_position = QPoint(round(x), handle.center().y())
+            touch.move(0, last_position, slider).commit()
+            self.app.processEvents()
+            self.wait(lambda: self.dialog.selected_frame_index == index and self.dialog.displayed_frame_index == index)
+            self.assertTrue(slider.isSliderDown(), "finger ended before preview update")
+            touch_frames.add(self.dialog.displayed_frame_index)
+        self.assertGreater(len(touch_frames), 3)
+        touch.release(0, last_position, slider).commit()
+        self.app.processEvents()
+        self.assertFalse(slider.isSliderDown())
         self.choose_save(cancel=True)
         self.assertEqual(slider.original_index, 4)
         self.assert_originals()
@@ -502,6 +525,127 @@ class CoverEditorTests(unittest.TestCase):
             self.assertEqual(decoded.size, (self.dialog.metadata.width, self.dialog.metadata.height))
         self.assertEqual(result.video_path.read_bytes(), self.original_video)
         self.assert_originals()
+
+
+class CoverTimelineTouchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.slider = CoverTimelineSlider()
+        self.slider.setRange(0, 99)
+        self.slider.resize(500, 60)
+        self.slider.show()
+        self.slider.activateWindow()
+        self.slider.setFocus()
+        self.app.processEvents()
+        self.device = QTest.createTouchDevice()
+        self.sequence = QTest.touchEvent(self.slider, self.device, False)
+
+    def tearDown(self):
+        QApplication.sendEvent(self.slider, QTouchEvent(QEvent.Type.TouchCancel, self.device))
+        self.slider.close()
+        self.slider.deleteLater()
+        self.app.processEvents()
+
+    def position(self, value):
+        option, groove, handle = self.slider._geometry()
+        horizontal = self.slider.orientation() == Qt.Orientation.Horizontal
+        length = (groove.width() - handle.width()) if horizontal else (groove.height() - handle.height())
+        fraction = value / self.slider.maximum()
+        if option.upsideDown:
+            fraction = 1 - fraction
+        if horizontal:
+            return QPoint(round(groove.x() + handle.width() / 2 + length * fraction), handle.center().y())
+        return QPoint(handle.center().x(), round(groove.y() + handle.height() / 2 + length * fraction))
+
+    def touch(self, method, position):
+        getattr(self.sequence, method)(0, position, self.slider).commit()
+        self.app.processEvents()
+
+    def synthetic_click(self, position):
+        for kind, button, buttons in ((QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton),
+                                      (QEvent.Type.MouseButtonRelease, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton)):
+            event = QMouseEvent(kind, QPointF(position), QPointF(position),
+                                QPointF(self.slider.mapToGlobal(position)), button, buttons,
+                                Qt.KeyboardModifier.NoModifier, Qt.MouseEventSource.MouseEventSynthesizedByQt)
+            QApplication.sendEvent(self.slider, event)
+        self.app.processEvents()
+
+    def test_touch_updates_value_while_contact_is_down_and_retains_final_end_position(self):
+        self.touch("press", self.position(10))
+        self.assertTrue(self.slider.isSliderDown())
+        self.assertAlmostEqual(self.slider.value(), 10, delta=1)
+        for value in (25, 50, 75):
+            self.touch("move", self.position(value))
+            self.assertTrue(self.slider.isSliderDown())
+            self.assertAlmostEqual(self.slider.value(), value, delta=1)
+        self.touch("release", self.position(85))
+        self.assertFalse(self.slider.isSliderDown())
+        self.assertAlmostEqual(self.slider.value(), 85, delta=1)
+        self.synthetic_click(self.position(5))
+        self.assertAlmostEqual(self.slider.value(), 85, delta=1)
+        QTest.mouseClick(self.slider, Qt.MouseButton.LeftButton, pos=self.position(15))
+        self.assertAlmostEqual(self.slider.value(), 15, delta=1)
+
+    def test_touch_cancel_rejects_late_updates_and_real_mouse_takes_over_immediately(self):
+        self.touch("press", self.position(20))
+        self.touch("move", self.position(40))
+        QApplication.sendEvent(self.slider, QTouchEvent(QEvent.Type.TouchCancel, self.device))
+        self.assertFalse(self.slider.isSliderDown())
+        value = self.slider.value()
+        self.touch("move", self.position(90))
+        self.touch("release", self.position(95))
+        self.assertEqual(self.slider.value(), value)
+        self.synthetic_click(self.position(0))
+        self.assertEqual(self.slider.value(), value)
+        QTest.mouseClick(self.slider, Qt.MouseButton.LeftButton, pos=self.position(65))
+        self.assertAlmostEqual(self.slider.value(), 65, delta=1)
+        self.touch("press", self.position(30))
+        QTest.mouseClick(self.slider, Qt.MouseButton.LeftButton, pos=self.position(70))
+        self.assertFalse(self.slider.isSliderDown())
+        self.assertAlmostEqual(self.slider.value(), 70, delta=1)
+        self.touch("release", self.position(5))
+        self.assertAlmostEqual(self.slider.value(), 70, delta=1)
+
+    def test_touch_mapping_handles_resize_vertical_inversion_and_logical_dpi(self):
+        for orientation, size in ((Qt.Orientation.Horizontal, (360, 50)),
+                                  (Qt.Orientation.Horizontal, (790, 60)),
+                                  (Qt.Orientation.Vertical, (60, 430))):
+            self.slider.setOrientation(orientation)
+            self.slider.resize(*size)
+            self.app.processEvents()
+            for inverted in (False, True):
+                self.slider.setInvertedAppearance(inverted)
+                with patch.object(self.slider, "devicePixelRatioF", return_value=2.0):
+                    self.touch("press", self.position(15))
+                    self.touch("move", self.position(85))
+                    self.assertTrue(self.slider.isSliderDown())
+                    self.assertAlmostEqual(self.slider.value(), 85, delta=1)
+                    self.touch("release", self.position(50))
+                    self.assertAlmostEqual(self.slider.value(), 50, delta=1)
+                self.slider.set_original_index(35)
+                self.slider.grab()
+        self.slider.setOrientation(Qt.Orientation.Horizontal)
+        self.slider.setInvertedAppearance(False)
+        self.slider.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.app.processEvents()
+        self.touch("press", self.position(20))
+        self.touch("release", self.position(80))
+        self.assertAlmostEqual(self.slider.value(), 80, delta=1)
+
+    def test_touch_clamps_at_ends_and_focus_loss_cancels_future_movement(self):
+        self.touch("press", self.position(40))
+        self.touch("move", QPoint(-300, self.slider.height() // 2))
+        self.assertEqual(self.slider.value(), 0)
+        self.touch("move", QPoint(self.slider.width() + 300, self.slider.height() // 2))
+        self.assertEqual(self.slider.value(), 99)
+        QApplication.sendEvent(self.slider, QEvent(QEvent.Type.WindowDeactivate))
+        self.assertFalse(self.slider.isSliderDown())
+        self.touch("release", self.position(0))
+        self.assertEqual(self.slider.value(), 99)
+
 
 
 if __name__ == "__main__":
