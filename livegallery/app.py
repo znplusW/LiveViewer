@@ -73,6 +73,9 @@ QGroupBox::title { color: #dfc59b; subcontrol-origin: margin; left: 12px; paddin
 QCheckBox { spacing: 9px; padding: 4px; }
 QCheckBox::indicator { width: 17px; height: 17px; border: 1px solid #586678; border-radius: 3px; background: #202833; }
 QCheckBox::indicator:checked { background: #d8ae6b; border: 3px solid #d8ae6b; }
+QRadioButton { spacing: 9px; padding: 4px; }
+QRadioButton::indicator { width: 17px; height: 17px; border: 1px solid #586678; border-radius: 9px; background: #202833; }
+QRadioButton::indicator:checked { background: #d8ae6b; border-color: #d8ae6b; }
 QMenu { background: #202833; border: 1px solid #465260; padding: 6px; }
 QMenu::item { padding: 8px 22px; border-radius: 4px; }
 QMenu::item:selected { background: #4a3d29; }

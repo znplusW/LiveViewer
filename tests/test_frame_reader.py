@@ -1,7 +1,9 @@
 """Exact video-frame identity, VFR timestamps, orientation and cancellation."""
 from pathlib import Path
+import json
 import shutil
 import subprocess
+import struct
 import sys
 import tempfile
 import threading
@@ -19,6 +21,35 @@ from livegallery.frame_tools import resolve_frame_tools
 FIXTURES = Path(__file__).resolve().parent / 'fixtures'
 VFR_TIMES = (0, 40, 160, 200, 440, 480, 760)
 VFR_COLORS = ('#d43d35', '#42bd51', '#3568d4', '#e2d63c', '#cf42c2', '#3fc2d1', '#df8d32')
+
+
+def _add_clean_aperture(source: Path, destination: Path, width: int, height: int):
+    """Add a real MOV clap atom; moov-at-end keeps media chunk offsets intact."""
+    content = bytearray(source.read_bytes())
+    def children(start, end):
+        while start + 8 <= end:
+            size, kind = struct.unpack_from('>I4s', content, start)
+            if size < 8 or start + size > end:
+                raise ValueError('Invalid synthetic MOV atom')
+            yield start, size, kind
+            start += size
+    parents = []
+    start, end = 0, len(content)
+    for wanted in (b'moov', b'trak', b'mdia', b'minf', b'stbl', b'stsd'):
+        atom = next(item for item in children(start, end) if item[2] == wanted)
+        if wanted == b'moov':
+            assert atom[0] + atom[1] == len(content), 'Fixture moov must follow all media data'
+        parents.append(atom)
+        start, end = atom[0] + 8, atom[0] + atom[1]
+    # stsd full-box flags and entry count precede the visual sample entry.
+    entry = next(item for item in children(start + 8, end) if item[2] in (b'hvc1', b'hev1'))
+    parents.append(entry)
+    insertion = entry[0] + entry[1]
+    clap = struct.pack('>I4sIIIIiIiI', 40, b'clap', width, 1, height, 1, 0, 1, 0, 1)
+    for position, size, _kind in parents:
+        struct.pack_into('>I', content, position, size + len(clap))
+    content[insertion:insertion] = clap
+    destination.write_bytes(content)
 
 
 class ExactFrameTests(unittest.TestCase):
@@ -70,6 +101,48 @@ class ExactFrameTests(unittest.TestCase):
             self.assertGreater(min(yellow[:2]), yellow[2] + 60)
             self.assertGreater(red[0], max(red[1:]) + 40)
             self.assertGreater(blue[2], max(blue[:2]) + 40)
+
+    def test_decoded_clean_aperture_size_overrides_coded_stream_size_before_rotation(self):
+        document = {'streams': [{'width': 1920, 'height': 1440, 'codec_name': 'hevc',
+                                 'avg_frame_rate': '24/1', 'side_data_list': [{'rotation': -90}]}],
+                    'frames': [{'width': 1744, 'height': 1308, 'best_effort_timestamp_time': '0',
+                                'pkt_duration_time': '0.041667'}]}
+        reader = FrameReader(FIXTURES / 'Live_HEVC.MOV')
+        with patch.object(reader, '_run', return_value=json.dumps(document).encode()):
+            with reader:
+                self.assertEqual((reader.metadata.width, reader.metadata.height), (1308, 1744))
+        # MOV clean aperture is separate from codec cropping: ffprobe's
+        # decoded frame can remain full-sized while the CLI applies this crop.
+        document['frames'][0].update(width=1920, height=1440)
+        document['streams'][0]['side_data_list'].append(
+            {'crop_left': 88, 'crop_right': 88, 'crop_top': 66, 'crop_bottom': 66})
+        reader = FrameReader(FIXTURES / 'Live_HEVC.MOV')
+        with patch.object(reader, '_run', return_value=json.dumps(document).encode()):
+            with reader:
+                self.assertEqual((reader.metadata.width, reader.metadata.height), (1308, 1744))
+        document['frames'][0].pop('width')
+        document['frames'][0].pop('height')
+        document['streams'][0]['side_data_list'].pop()
+        reader = FrameReader(FIXTURES / 'Live_HEVC.MOV')
+        with patch.object(reader, '_run', return_value=json.dumps(document).encode()):
+            with reader:
+                self.assertEqual((reader.metadata.width, reader.metadata.height), (1440, 1920))
+        document['streams'][0]['side_data_list'].append({'crop_left': -1})
+        reader = FrameReader(FIXTURES / 'Live_HEVC.MOV')
+        with patch.object(reader, '_run', return_value=json.dumps(document).encode()):
+            with self.assertRaisesRegex(ValueError, '裁切'):
+                reader.open()
+        reader.close()
+
+    def test_real_mov_container_crop_and_rotation_match_export_dimensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'cropped-portrait.mov'
+            _add_clean_aperture(FIXTURES / 'Portrait_HEVC.MOV', path, 608, 388)
+            with FrameReader(path) as reader:
+                self.assertEqual(reader.frame_count, 21)
+                self.assertEqual((reader.metadata.width, reader.metadata.height), (388, 608))
+                image = reader.export(0)
+                self.assertEqual(image.size, (388, 608))
 
     def test_invalid_indices_source_change_and_reader_lifecycle(self):
         with tempfile.TemporaryDirectory() as temporary:

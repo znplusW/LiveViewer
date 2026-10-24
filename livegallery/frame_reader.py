@@ -172,7 +172,8 @@ class FrameReader:
                    '-show_frames', '-show_streams', '-show_format', '-show_entries',
                    'frame=best_effort_timestamp_time,pkt_duration_time,duration_time,width,height:'
                    'stream=width,height,codec_name,avg_frame_rate,duration:stream_tags=rotate:'
-                   'stream_side_data=rotation:format=duration', '-of', 'json', str(self.path)]
+                   'stream_side_data=rotation,crop_left,crop_right,crop_top,crop_bottom:format=duration',
+                   '-of', 'json', str(self.path)]
         document = json.loads(self._run(command, MAX_PROBE_BYTES))
         streams, frames = document.get('streams', []), document.get('frames', [])
         if not streams or not frames:
@@ -180,13 +181,27 @@ class FrameReader:
         if len(frames) > MAX_FRAMES:
             raise ValueError(f"视频超过 {MAX_FRAMES:,} 帧，暂不支持在封面编辑器中读取。")
         stream = streams[0]
-        width, height = int(stream.get('width', 0)), int(stream.get('height', 0))
+        # A MOV clean-aperture crop can leave the stream's coded size larger
+        # than each decoded frame. The editor must report the pixels exported
+        # by FFmpeg, before applying the stream's display rotation.
+        width = int(frames[0].get('width') or stream.get('width', 0))
+        height = int(frames[0].get('height') or stream.get('height', 0))
         if width < 1 or height < 1 or width * height > MAX_PIXELS:
             raise ValueError("视频画面尺寸超过读取上限。")
         rotation = _number(stream.get('tags', {}).get('rotate'), 0.0)
         for data in stream.get('side_data_list', []):
             if 'rotation' in data:
                 rotation = _number(data['rotation'], rotation)
+            # ffprobe exposes MOV clean-aperture cropping as stream side data;
+            # FFmpeg's CLI applies it automatically before display rotation.
+            # Codec-level cropping is already reflected in frame.width/height.
+            crops = [_number(data.get(name), 0) for name in ('crop_left', 'crop_right', 'crop_top', 'crop_bottom')]
+            if any(value < 0 for value in crops):
+                raise ValueError("视频裁切尺寸无效。")
+            width -= int(crops[0]) + int(crops[1])
+            height -= int(crops[2]) + int(crops[3])
+        if width < 1 or height < 1 or width * height > MAX_PIXELS:
+            raise ValueError("视频裁切尺寸无效。")
         if round(rotation) % 180 == 90:
             width, height = height, width
         fps = _fraction(stream.get('avg_frame_rate'), 0.0)
