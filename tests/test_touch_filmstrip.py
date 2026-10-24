@@ -7,9 +7,14 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QEvent, QPoint, QPointF, QSize, Qt
 from PySide6.QtGui import QContextMenuEvent, QFocusEvent, QMouseEvent, QStandardItem, QStandardItemModel, QTouchEvent, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLineEdit, QListView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QLineEdit, QListView, QStyledItemDelegate, QVBoxLayout, QWidget
 
 from livegallery.touch_filmstrip import FilmstripResizeHandle, TouchFilmstrip
+
+
+class FixedFilmTile(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        return QSize(120, 90)
 
 
 class FilmstripTouchTests(unittest.TestCase):
@@ -48,6 +53,15 @@ class FilmstripTouchTests(unittest.TestCase):
         self.app.processEvents()
 
     def test_horizontal_swipes_from_thumbnail_and_blank_space_do_not_select(self):
+        # ListMode may stretch item hit rectangles to the entire viewport on
+        # Windows. Explicit, contiguous 120x90 cells leave a real blank band
+        # below the row on every platform, without depending on font metrics.
+        self.strip.setViewMode(QListView.ViewMode.IconMode)
+        self.strip.setItemDelegate(FixedFilmTile(self.strip))
+        self.strip.doItemsLayout()
+        self.app.processEvents()
+        self.assertEqual(self.strip.visualRect(self.model.index(0, 0)).size(), QSize(120, 90))
+        self.assertGreater(self.strip.viewport().height(), 96)
         self.assertGreater(self.strip.horizontalScrollBar().maximum(), 10000)
         self.strip.setCurrentIndex(self.model.index(0, 0))
         selected = self.strip.currentIndex()
@@ -60,9 +74,7 @@ class FilmstripTouchTests(unittest.TestCase):
         self.assertGreater(after_left, 0)
         self.assertEqual(self.strip.currentIndex(), selected)
         self.assertEqual(self.clicked, [])
-        blank = next(QPoint(x, self.strip.viewport().height() - 6)
-                     for x in range(40, 200)
-                     if not self.strip.indexAt(QPoint(x, self.strip.viewport().height() - 6)).isValid())
+        blank = QPoint(80, self.strip.viewport().height() - 6)
         self.assertFalse(self.strip.indexAt(blank).isValid())
         self.touch('press', blank)
         self.touch('move', blank + QPoint(60, 0))
