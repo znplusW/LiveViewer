@@ -86,10 +86,10 @@ class CoverSource:
     @classmethod
     def capture(cls, item: MediaItem, cancel_event=None) -> "CoverSource":
         if item.video_path is None:
-            raise CoverSaveError("此项目没有对应视频，无法更改头图。")
+            raise CoverSaveError("此项目没有对应视频，无法更改封面图。")
         image, video = Path(item.image_path), Path(item.video_path)
         if image.suffix.casefold() not in (".jpg", ".jpeg", ".heic"):
-            raise CoverSaveError("目前仅支持 JPG、JPEG 和 HEIC 头图。")
+            raise CoverSaveError("目前仅支持 JPG、JPEG 和 HEIC 封面图。")
         if image.parent.resolve() != video.parent.resolve():
             raise CoverSaveError("图片和视频必须位于同一文件夹。")
         if image.stem.casefold() != video.stem.casefold():

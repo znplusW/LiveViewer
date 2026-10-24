@@ -163,6 +163,34 @@ class ExactFrameTests(unittest.TestCase):
             with self.assertRaises(FrameCancelled):
                 reader.open()
 
+    def test_fork_reuses_verified_index_without_probe_and_has_independent_lifetime(self):
+        with FrameReader(FIXTURES / 'Live_H264.MOV') as reader:
+            # A probe in fork.open would invoke this stub. Cached immutable
+            # metadata should need no subprocess until an actual frame read.
+            with patch.object(reader, '_run', side_effect=AssertionError('re-probed primary')):
+                fork = reader.fork()
+            with patch.object(fork, '_run', side_effect=AssertionError('re-probed fork')):
+                self.assertIs(fork.open(), reader.metadata)
+            self.assertIsNot(fork._lock, reader._lock)
+            self.assertEqual(fork.export(9).size, (640, 420))
+            fork.close()
+            self.assertEqual(reader.export(0).size, (640, 420))
+            with self.assertRaises(FrameCancelled):
+                fork.open()
+
+    def test_fork_rejects_source_changes_before_or_after_creation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'source.mov'
+            shutil.copy2(FIXTURES / 'Live_H264.MOV', path)
+            with FrameReader(path) as reader:
+                fork = reader.fork()
+                path.write_bytes(path.read_bytes() + b'changed')
+                with self.assertRaisesRegex(OSError, '已变化'):
+                    reader.fork()
+                with self.assertRaisesRegex(OSError, '已变化'):
+                    fork.open()
+                fork.close()
+
     def test_persistent_cancel_event_can_be_cleared_for_a_new_request(self):
         event = threading.Event()
         reader = FrameReader(FIXTURES / 'Live_H264.MOV', cancel_event=event)

@@ -115,7 +115,7 @@ class FrameReader:
     def _verify_source(self):
         self._check_cancelled()
         if self._signature is not None and self._file_signature() != self._signature:
-            raise OSError("视频文件已变化，请重新打开封面编辑器。")
+            raise OSError("视频文件已变化，请重新打开封面图编辑器。")
 
     def _run(self, arguments, output_limit):
         self._check_cancelled()
@@ -179,7 +179,7 @@ class FrameReader:
         if not streams or not frames:
             raise ValueError("视频中没有可读取的画面。")
         if len(frames) > MAX_FRAMES:
-            raise ValueError(f"视频超过 {MAX_FRAMES:,} 帧，暂不支持在封面编辑器中读取。")
+            raise ValueError(f"视频超过 {MAX_FRAMES:,} 帧，暂不支持在封面图编辑器中读取。")
         stream = streams[0]
         # A MOV clean-aperture crop can leave the stream's coded size larger
         # than each decoded frame. The editor must report the pixels exported
@@ -225,9 +225,9 @@ class FrameReader:
             records.append(FrameInfo(index, max(0.0, timestamp - start), max(0.0, interval)))
         duration = records[-1].pts_seconds + records[-1].duration_seconds
         if duration > MAX_DURATION_SECONDS:
-            raise ValueError("视频超过 10 分钟，暂不支持在封面编辑器中读取。")
+            raise ValueError("视频超过 10 分钟，暂不支持在封面图编辑器中读取。")
         if self._file_signature() != signature:
-            raise OSError("视频文件已变化，请重新打开封面编辑器。")
+            raise OSError("视频文件已变化，请重新打开封面图编辑器。")
         self._signature = signature
         self._metadata = VideoMetadata(width, height, rotation, tuple(records), duration,
                                        str(stream.get('codec_name', '')), start, estimated)
@@ -273,6 +273,26 @@ class FrameReader:
 
     def export(self, index: int) -> Image.Image:
         return self._read(index)
+
+    def fork(self, *, cancel_event=None) -> "FrameReader":
+        """Reuse this verified immutable index with independent decode state.
+
+        The editor's preview cache may need another worker, but re-running
+        ffprobe there would decode the video twice before its first preview.
+        No process, cancellation generation or closed flag is shared.
+        """
+        self.open()
+        self._verify_source()
+        with self._lock:
+            if self._closed:
+                raise FrameCancelled("已取消视频读取。")
+            metadata, signature, tools = self._metadata, self._signature, self._tools
+        result = FrameReader(self.path, ffmpeg=self._tool_arguments[0], ffprobe=self._tool_arguments[1],
+                             cancel_event=cancel_event)
+        result._metadata = metadata
+        result._signature = signature
+        result._tools = tools
+        return result
 
     def cancel_current(self):
         with self._lock:

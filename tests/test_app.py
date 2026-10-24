@@ -115,6 +115,77 @@ class WindowTests(unittest.TestCase):
         self.assertIs(self.window.content.currentWidget(), self.window.viewer)
         self.assertEqual(self.window._displayed_item.id, "live-id")
 
+    def test_filmstrip_top_arrow_hides_and_existing_controls_restore_in_fullscreen(self):
+        self.show_live_item()
+        if not self.window.strip_button.isChecked():
+            self.window.strip_button.click()
+        self.assertTrue(self.window.film.isVisible())
+        self.assertEqual(self.window.collapse_strip_button.accessibleName(), "隐藏胶片条")
+        self.window.collapse_strip_button.click()
+        self.assertFalse(self.window.film.isVisible())
+        self.assertFalse(self.window.strip_button.isChecked())
+        self.assertFalse(self.window.preferences.filmstrip_visible)
+        self.assertFalse(self.window._remembered_strip)
+        self.window.strip_button.click()
+        self.assertTrue(self.window.film.isVisible())
+        self.window._toggle_fullscreen()
+        self.assertTrue(self.window.collapse_strip_button.isVisible())
+        self.window.collapse_strip_button.click()
+        self.assertFalse(self.window.film.isVisible())
+        self.assertTrue(self.window._fullscreen_active)
+        self.window._toggle_strip_shortcut()
+        self.assertTrue(self.window.film.isVisible())
+        self.assertTrue(self.window.strip_button.isChecked())
+
+    def test_reveal_selects_current_image_on_worker_and_coalesces_duplicate_clicks(self):
+        item = self.show_live_item()
+        started, release = threading.Event(), threading.Event()
+        calls = []
+        gui_thread = threading.get_ident()
+        def reveal(path):
+            calls.append((path, threading.get_ident()))
+            started.set()
+            release.wait(2)
+            return True
+        with patch('livegallery.app.reveal_in_folder', side_effect=reveal):
+            self.window._open_image_folder(item)
+            self.assertTrue(started.wait(1))
+            self.window._open_image_folder(item)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], item.image_path)
+            self.assertNotEqual(calls[0][1], gui_thread)
+            self.assertTrue(self.window._reveal_pending)
+            release.set()
+            self.wait_until(lambda: not self.window._reveal_pending)
+            self.window._reveal_thread.join(1)
+
+    def test_reveal_failure_is_reported_on_gui_thread(self):
+        item = self.show_live_item()
+        with patch('livegallery.app.reveal_in_folder', side_effect=OSError('无法定位测试图片')), \
+                patch.object(self.window, '_open_error') as error:
+            self.window._open_image_folder(item)
+            self.wait_until(lambda: not self.window._reveal_pending)
+            error.assert_called_once_with('无法定位测试图片')
+            self.window._reveal_thread.join(1)
+
+    def test_reveal_result_after_window_close_does_not_touch_deleted_widgets(self):
+        item = self.show_live_item()
+        entered, release = threading.Event(), threading.Event()
+        def reveal(_path):
+            entered.set()
+            release.wait(2)
+            raise OSError('late failure')
+        with patch('livegallery.app.reveal_in_folder', side_effect=reveal), \
+                patch.object(self.window, '_open_error') as error:
+            self.window._open_image_folder(item)
+            self.assertTrue(entered.wait(1))
+            self.window.close()
+            self.assertTrue(self.window.wait_for_shutdown(5))
+            release.set()
+            self.window._reveal_thread.join(1)
+            self.application.processEvents()
+            error.assert_not_called()
+
     def test_pair_revision_rejects_old_automatic_result_after_manual_selection(self):
         first = self.picture("same.jpg")
         second = self.picture("same.jpeg")

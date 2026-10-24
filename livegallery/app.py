@@ -28,6 +28,7 @@ from .jobs import JobQueue
 from .library import _identifier, natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
+from .reveal_file import reveal_in_folder
 from .settings import Preferences, app_directory, data_directory
 from .system_open import enumerate_apps, open_with
 from .touch_grid import OverviewGrid
@@ -101,6 +102,10 @@ def _decode(path: Path, edge: int | None):
 class _ScanSignals(QObject):
     progress = Signal(int, int)
     complete = Signal(int, object, object)
+
+
+class _RevealSignals(QObject):
+    finished = Signal(str)
 
 
 class FilenameField(QLineEdit):
@@ -302,7 +307,7 @@ class SettingsDialog(QDialog):
         self.portable = QCheckBox("完全便携：设置和缓存跟随软件文件夹")
         self.portable.setChecked((app_directory() / "portable.flag").exists())
         storage.addRow(self.portable)
-        portable_note = QLabel("便携模式切换后重启生效；现有缓存不会自动搬运。仅确认更改头图时写入照片目录。")
+        portable_note = QLabel("便携模式切换后重启生效；现有缓存不会自动搬运。仅确认更改封面图时写入照片目录。")
         portable_note.setWordWrap(True)
         portable_note.setObjectName("muted")
         storage.addRow(portable_note)
@@ -360,6 +365,10 @@ class MainWindow(QMainWindow):
         self._scan_signals = _ScanSignals(self)
         self._scan_signals.progress.connect(self._scan_progress)
         self._scan_signals.complete.connect(self._scan_complete)
+        self._reveal_signals = _RevealSignals(self)
+        self._reveal_signals.finished.connect(self._reveal_finished)
+        self._reveal_pending = False
+        self._reveal_thread = None
         self._scan_cancel = threading.Event()
         self._scan_generation = 0
         self._epoch = 0
@@ -527,7 +536,7 @@ class MainWindow(QMainWindow):
         self.tree.setIndentation(16)
         self.tree.itemClicked.connect(self._directory_selected)
         side.addWidget(self.tree)
-        side_note = QLabel("仅在保存头图时更改文件\n分析和缓存只存放在本机")
+        side_note = QLabel("仅在保存封面图时更改文件\n分析和缓存只存放在本机")
         side_note.setObjectName("muted")
         side_note.setStyleSheet("font-size:11px;padding:5px")
         side.addWidget(side_note)
@@ -631,6 +640,18 @@ class MainWindow(QMainWindow):
         film_layout = QVBoxLayout(self.film)
         film_layout.setContentsMargins(12, 8, 12, 5)
         film_layout.setSpacing(2)
+        collapse_row = QHBoxLayout()
+        collapse_row.addStretch()
+        self.collapse_strip_button = self._button("⌄", self._hide_strip)
+        self.collapse_strip_button.setObjectName("filmCollapse")
+        self.collapse_strip_button.setFixedSize(38, 22)
+        self.collapse_strip_button.setStyleSheet("padding:0; min-height:0; font-size:18px; border-radius:5px;")
+        self.collapse_strip_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.collapse_strip_button.setToolTip("隐藏胶片条")
+        self.collapse_strip_button.setAccessibleName("隐藏胶片条")
+        collapse_row.addWidget(self.collapse_strip_button)
+        collapse_row.addStretch()
+        film_layout.addLayout(collapse_row)
         film_header = QHBoxLayout()
         self.library_label = QLabel("尚未加载照片")
         self.library_label.setObjectName("muted")
@@ -1282,6 +1303,10 @@ class MainWindow(QMainWindow):
         self.strip_button.setChecked(not self._remembered_strip)
         self._toggle_strip(self.strip_button.isChecked())
 
+    def _hide_strip(self):
+        self.strip_button.setChecked(False)
+        self._toggle_strip(False)
+
     def _toggle_grid(self, checked):
         self.viewer.stop_live()
         self._grid_mode = checked
@@ -1451,7 +1476,7 @@ class MainWindow(QMainWindow):
         self.viewer.stop_live()
         menu = QMenu(self)
         if item.is_live:
-            menu.addAction("更改头图…", lambda item=item: self._open_cover_editor(item))
+            menu.addAction("更改封面图…", lambda item=item: self._open_cover_editor(item))
         if item.is_live and len(item.candidates) > 1:
             choices = menu.addMenu("选择静态图片")
             for path in item.candidates:
@@ -1464,7 +1489,7 @@ class MainWindow(QMainWindow):
         menu.addAction("文件与配对详情", lambda item=item: self._show_details(item))
         applications = []
         self._add_open_with_menu(menu, item, applications)
-        menu.addAction("打开所在文件夹", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(item.image_path.parent))))
+        menu.addAction("打开所在文件夹", lambda item=item: self._open_image_folder(item))
         menu.addAction("打开缓存位置", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.cache.base))))
         menu.addSeparator()
         menu.addAction("重新扫描当前文件夹", self._rescan)
@@ -1553,11 +1578,11 @@ class MainWindow(QMainWindow):
         if result.created_copy:
             identifier = _identifier("live", Path(result.image_path).parent / Path(result.image_path).stem.casefold())
             updated = MediaItem(identifier, Path(result.image_path), Path(result.video_path),
-                                (Path(result.image_path),), note="已另存新的头图与 Live Photo 视频")
+                                (Path(result.image_path),), note="已另存新的封面图与 Live Photo 视频")
             self._primary_items.append(updated)
         else:
             updated = replace(original, image_path=Path(result.image_path), video_path=Path(result.video_path),
-                              pending=False, uncertain=False, note="已更新头图")
+                              pending=False, uncertain=False, note="已更新封面图")
             self._primary_items = [updated if item.id == original.id else item for item in self._primary_items]
             extras = {str(item.image_path): item for item in self._extras.get(original.id, [])}
             for path in original.candidates:
@@ -1578,7 +1603,7 @@ class MainWindow(QMainWindow):
         if row is not None:
             self._select_row(row, allow_autoplay=False)
         self._build_tree()
-        self._show_message("头图已另存，已载入新版本。" if result.created_copy else "头图已更新。")
+        self._show_message("封面图已另存，已载入新版本。" if result.created_copy else "封面图已更新。")
 
     def _invoke_other_app(self, application, item):
         self.viewer.stop_live()
@@ -1593,6 +1618,35 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "无法打开", str(error))
         else:
             self._show_message(str(error))
+
+    def _open_image_folder(self, item=None):
+        item = item or self._item_by_id(self._current_id)
+        if item is None or self._reveal_pending:
+            return
+        self._navigation_timer.stop()
+        self._navigation_target_id = None
+        self.viewer.stop_live()
+        self._keyboard_live_pressed = False
+        self._reveal_pending = True
+        path, signals = item.image_path, self._reveal_signals
+        def reveal():
+            error = ""
+            try:
+                reveal_in_folder(path)
+            except (OSError, ValueError) as failure:
+                error = str(failure)
+            if not self._closed:
+                try:
+                    signals.finished.emit(error)
+                except RuntimeError:
+                    pass  # The user closed the window before Shell returned.
+        self._reveal_thread = threading.Thread(target=reveal, name="explorer-reveal", daemon=True)
+        self._reveal_thread.start()
+
+    def _reveal_finished(self, error):
+        self._reveal_pending = False
+        if error and not self._closed:
+            self._open_error(error)
 
     def _open_with_other_app(self, item=None):
         item = item or self._item_by_id(self._current_id)

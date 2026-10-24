@@ -7,13 +7,14 @@ import platform
 import hashlib
 import shutil
 import struct
+import subprocess
 import sys
 import time
 import traceback
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QPoint, QPointF, Qt
+from PySide6.QtCore import QCoreApplication, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QImage, QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -326,6 +327,89 @@ def _check_exact_frame_reader(fixtures: Path, report_dir: Path):
     return results
 
 
+def _check_windows_explorer_selection(report_dir: Path):
+    """Request one real selection, then observe Explorer independently.
+
+    Hosted Windows desktops can lack an interactive Explorer session. A native
+    request must still succeed; the report distinguishes a verified selection
+    from a desktop that could not expose its state to Shell automation.
+    """
+    import threading
+    from PIL import Image
+    from .reveal_file import reveal_in_folder
+
+    script = r'''
+$ErrorActionPreference = 'Stop'
+$target = $env:LIVEVIEWER_REVEAL_TARGET
+$deadline = [DateTime]::UtcNow.AddSeconds(10)
+$shell = $null
+$verified = $false
+$reason = 'Explorer did not expose the selected item within the time limit.'
+try {
+    $shell = New-Object -ComObject Shell.Application
+    do {
+        $windows = $shell.Windows()
+        for ($i = 0; $i -lt $windows.Count; $i++) {
+            try {
+                $window = $windows.Item($i)
+                $items = $window.Document.SelectedItems()
+                for ($j = 0; $j -lt $items.Count; $j++) {
+                    $selectedPath = [String]($items.Item($j).Path)
+                    if ([String]::Equals($selectedPath, $target,
+                                        [StringComparison]::OrdinalIgnoreCase)) {
+                        $verified = $true
+                        $window.Quit() # Close only this owned temporary test window.
+                        break
+                    }
+                }
+                if ($verified) { break }
+            } catch { }
+        }
+        if (-not $verified) { Start-Sleep -Milliseconds 150 }
+    } until ($verified -or [DateTime]::UtcNow -ge $deadline)
+} catch {
+    $reason = 'Shell automation was unavailable on this desktop.'
+} finally {
+    if ($null -ne $shell) {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+    }
+}
+@{selection_verified=$verified; reason=$(if ($verified) {''} else {$reason})} | ConvertTo-Json -Compress
+'''
+    with tempfile.TemporaryDirectory(prefix='explorer-select-', dir=report_dir) as temporary:
+        folder = Path(temporary)
+        target = folder / '旅行,图片 01.png'
+        Image.new('RGB', (80, 60), '#486a87').save(target)
+        errors = []
+        def reveal():
+            try:
+                assert reveal_in_folder(target)
+            except Exception as error:
+                errors.append(error)
+        worker = threading.Thread(target=reveal, daemon=True)
+        worker.start()
+        _wait(lambda: not worker.is_alive(), 15)
+        if errors:
+            raise errors[0]
+        script_path = folder / 'observe-selection.ps1'
+        script_path.write_text(script, encoding='utf-8-sig')
+        environment = os.environ.copy()
+        environment['LIVEVIEWER_REVEAL_TARGET'] = str(target.resolve())
+        powershell = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        try:
+            process = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-Sta',
+                                      '-ExecutionPolicy', 'Bypass', '-File', str(script_path)],
+                                     env=environment, capture_output=True, timeout=18,
+                                     creationflags=subprocess.CREATE_NO_WINDOW)
+            content = process.stdout.decode('utf-8-sig', 'replace').strip()
+            observation = json.loads(content[content.find('{'):]) if process.returncode == 0 else {
+                'selection_verified': False, 'reason': 'Shell observation process was unavailable.'}
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            observation = {'selection_verified': False, 'reason': 'Shell observation process was unavailable.'}
+        return {'native_request_accepted': True, 'unicode_and_comma_filename': True,
+                **observation}
+
+
 def _file_digest(path: Path):
     with path.open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
@@ -360,7 +444,7 @@ def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
 
 
 def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
-    from .cover_editor import EditorDialog
+    from .cover_editor import EditorDialog, SaveModeDialog
     with tempfile.TemporaryDirectory(prefix='editor-vfr-', dir=report_dir) as temporary:
         folder = Path(temporary)
         still, video = folder / 'Editor_VFR.jpg', folder / 'Editor_VFR.MOV'
@@ -369,15 +453,37 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
         item = MediaItem('vfr-editor', still, video)
         before_image, before_video = _file_digest(still), _file_digest(video)
         dialog = EditorDialog(item, parent)
+        dialog.setModal(True)
         dialog.show()
         try:
             _wait(lambda: dialog.metadata is not None and dialog.save_button.isEnabled(), 20)
-            assert dialog.copy_choice.isChecked()
+            assert dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
+            assert not hasattr(dialog, 'copy_choice'), 'Save options still occupy the frame editor'
+            _wait(lambda: dialog.original_position is not None, 20)
+            assert dialog.original_position.index == 3, 'Original VFR cover marker did not match the known yellow frame'
+            assert dialog.timeline.original_index == 3
             dialog.timeline.setValue(4)
             _wait(lambda: dialog.selected_frame_index == 4 and dialog.save_button.isEnabled(), 20)
             assert abs(dialog.metadata.frames[4].pts_seconds - .44) < .000001
             dialog.grab().save(str(report_dir / 'cover-editor.png'))
+            choices, errors = [], []
+            def choose_copy():
+                prompt = QApplication.activeModalWidget()
+                try:
+                    assert isinstance(prompt, SaveModeDialog), 'Save mode prompt did not open'
+                    assert prompt.copy_choice.isChecked() and prompt.mode == 'copy'
+                    prompt.grab().save(str(report_dir / 'cover-save-options.png'))
+                    choices.append(prompt.mode)
+                    prompt.accept()
+                except Exception as error:
+                    errors.append(error)
+                    if prompt is not None:
+                        prompt.reject()
+            QTimer.singleShot(0, choose_copy)
             dialog._save()
+            if errors:
+                raise errors[0]
+            assert choices == ['copy'], 'Saving bypassed the copy/overwrite choice'
             _wait(lambda: dialog.saved_result is not None, 25)
             saved = dialog.saved_result
             assert saved.created_copy and saved.image_path.stem == saved.video_path.stem
@@ -392,6 +498,7 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
             dialog.close()
         before_cancel = {path.name: _file_digest(path) for path in folder.iterdir() if path.is_file()}
         cancelled = EditorDialog(item, parent)
+        cancelled.setModal(True)
         cancelled.show()
         _wait(lambda: cancelled.metadata is not None, 20)
         cancelled.reject()
@@ -399,7 +506,9 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
         after_cancel = {path.name: _file_digest(path) for path in folder.iterdir() if path.is_file()}
         assert before_cancel == after_cancel and cancelled.saved_result is None
         return {'vfr_index': 4, 'pts_milliseconds': 440, 'full_size': [320, 240],
-                'copy_preserves_originals_and_video_bytes': True, 'cancel_no_changes': True}
+                'copy_preserves_originals_and_video_bytes': True, 'cancel_no_changes': True,
+                'save_mode_prompt_after_save': True, 'maximize_button_available': True,
+                'original_cover_marker_frame': 3}
 
 
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
@@ -688,6 +797,14 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         assert window.film.isVisible() and window.strip.isVisible()
         assert not window.library_label.isVisible() and not window.analysis_label.isVisible()
         assert not any(widget.isVisible() for widget in chrome)
+        assert window.collapse_strip_button.isVisible()
+        QTest.mouseClick(window.collapse_strip_button, Qt.MouseButton.LeftButton)
+        assert not window.film.isVisible() and not window.strip_button.isChecked()
+        assert not window.preferences.filmstrip_visible and window._fullscreen_active
+        QTest.keyClick(window.viewer, Qt.Key.Key_F)
+        assert window.film.isVisible() and window.strip_button.isChecked()
+        report['checks'].append({'check': 'filmstrip_top_arrow_hides_and_shortcut_restores',
+                                 'fullscreen_stays_active': True, 'status': 'passed'})
         window.grab().save(str(report_dir / 'fullscreen-with-filmstrip.png'))
         QTest.keyClick(window.viewer, Qt.Key.Key_Escape)
         assert not window._fullscreen_active and window.header.isVisible()
@@ -725,6 +842,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
                                      'unknown_extension_handlers': applications['unknown_extension_handlers'],
                                      'apps_launched': False,
                                      'status': 'passed'})
+            reveal = _check_windows_explorer_selection(report_dir)
+            report['checks'].append({'check': 'windows_explorer_file_reveal',
+                                     **reveal, 'status': 'passed'})
 
         settings = SettingsDialog(window.preferences, window)
         assert not settings.live_key.keySequence().isEmpty()
