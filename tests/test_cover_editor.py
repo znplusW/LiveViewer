@@ -1,8 +1,10 @@
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,6 +86,9 @@ class FakeReader:
 
 
 class CoverEditorTests(unittest.TestCase):
+    REAL_SAVE_TIMEOUT = 25
+    SHUTDOWN_TIMEOUT = 25
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -105,19 +110,74 @@ class CoverEditorTests(unittest.TestCase):
 
     def tearDown(self):
         if self.dialog is not None:
-            self.dialog._worker.close()
-            self.dialog._worker.thread.join(2)
-            self.dialog.close()
+            try:
+                self.close_editor_media()
+            except AssertionError:
+                # A diagnostic timeout must not let the TemporaryDirectory
+                # finalizer delete files still owned by a live transaction.
+                self.temporary._finalizer.detach()
+                raise
+            QDialog.reject(self.dialog)
             self.dialog.deleteLater()
             self.app.processEvents()
         self.temporary.cleanup()
+
+    def editor_diagnostics(self):
+        dialog = self.dialog
+        if dialog is None:
+            return 'editor=None'
+        worker = dialog._worker
+        lines = [f'status={dialog.status_label.text()!r}; visible={dialog.isVisible()}; '
+                 f'saving={dialog._saving}; cancel_pending={dialog._cancel_pending}; '
+                 f'export_busy={dialog._export_busy}; worker_busy={worker._busy!r}; '
+                 f'worker_closing={worker._closing.is_set()}; '
+                 f'save_cancelled={worker._save_cancel.is_set()}; '
+                 f'selected={dialog.selected_frame_index}; displayed={dialog.displayed_frame_index}']
+        preview = worker._preview
+        threads = [worker.thread, *getattr(preview, '_threads', ())]
+        if dialog._export_thread is not None:
+            threads.append(dialog._export_thread)
+        frames = sys._current_frames()
+        for thread in threads:
+            lines.append(f'thread={thread.name}; alive={thread.is_alive()}; ident={thread.ident}')
+            if thread.is_alive() and thread.ident in frames:
+                lines.extend(traceback.format_stack(frames[thread.ident]))
+        work = self.folder / '.LiveViewer-work'
+        if work.exists():
+            for path in sorted(work.rglob('*')):
+                try:
+                    lines.append(f'staged={path.relative_to(self.folder)}; size={path.stat().st_size}')
+                except OSError as error:
+                    lines.append(f'staged={path}; stat_error={error}')
+        return '\n'.join(lines)
+
+    def close_editor_media(self):
+        """Pump cancellation until actual file owners exit, then allow cleanup."""
+        dialog, worker = self.dialog, self.dialog._worker
+        dialog.close()
+        deadline = time.monotonic() + self.SHUTDOWN_TIMEOUT
+        while True:
+            if not dialog.isVisible():
+                worker.close()
+            preview = worker._preview
+            wait_preview = getattr(preview, 'wait', None)
+            preview_done = wait_preview(0) if callable(wait_preview) else True
+            export = dialog._export_thread
+            if (not worker.thread.is_alive() and preview_done
+                    and (export is None or not export.is_alive())):
+                return
+            if time.monotonic() >= deadline:
+                self.fail('Editor media did not settle before fixture cleanup; '
+                          f'preserving {self.folder}\n' + self.editor_diagnostics())
+            QTest.qWait(10)
 
     def wait(self, predicate, timeout=3):
         deadline = time.monotonic() + timeout
         while not predicate() and time.monotonic() < deadline:
             QTest.qWait(10)
             time.sleep(.002)
-        self.assertTrue(predicate(), "editor did not reach expected state: " + self.dialog.status_label.text())
+        if not predicate():
+            self.fail('Editor did not reach expected state:\n' + self.editor_diagnostics())
 
     def open_dialog(self, **kwargs):
         self.dialog = EditorDialog(self.item, reader_factory=FakeReader, **kwargs)
@@ -606,6 +666,41 @@ class CoverEditorTests(unittest.TestCase):
         self.assertIsNone(dialog.saved_result)
         self.assert_originals()
 
+    def test_slow_save_close_waits_for_flush_and_releases_stage_before_cleanup(self):
+        entered, release = threading.Event(), threading.Event()
+        original_fsync = os.fsync
+        def blocked_flush(descriptor):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('test did not release the simulated slow flush')
+            original_fsync(descriptor)
+        dialog = self.open_dialog()
+        observations = []
+        try:
+            with patch('livegallery.cover_save.os.fsync', side_effect=blocked_flush):
+                self.choose_save()
+                self.wait(entered.is_set)
+                staged = list((self.folder / '.LiveViewer-work').rglob('cover.jpg'))
+                self.assertEqual(len(staged), 1)
+                before = time.monotonic()
+                dialog.close()
+                self.assertLess(time.monotonic() - before, .3)
+                self.assertTrue(dialog.isVisible())
+                self.assertTrue(dialog._cancel_pending)
+                def release_after_observation():
+                    observations.append((dialog._worker.thread.is_alive(), staged[0].is_file(),
+                                         dialog.isVisible(), dialog._worker._save_cancel.is_set()))
+                    release.set()
+                QTimer.singleShot(80, release_after_observation)
+                self.close_editor_media()
+        finally:
+            release.set()
+        self.assertEqual(observations, [(True, True, True, True)])
+        self.assertFalse(dialog._worker.thread.is_alive())
+        self.assertTrue(FakeReader.instances[0].closed)
+        self.assertFalse(list((self.folder / '.LiveViewer-work').rglob('cover.jpg')))
+        self.assert_originals()
+
     def test_external_mutation_during_edit_is_rejected_by_save(self):
         dialog = self.open_dialog()
         self.video.write_bytes(self.original_video + b"external change")
@@ -696,7 +791,8 @@ class CoverEditorTests(unittest.TestCase):
         self.wait(lambda: self.dialog.save_button.isEnabled())
         self.assertIn("0.440 秒", self.dialog.position_label.text())
         self.choose_save()
-        self.wait(lambda: self.dialog.result() == QDialog.DialogCode.Accepted)
+        self.wait(lambda: self.dialog.result() == QDialog.DialogCode.Accepted,
+                  timeout=self.REAL_SAVE_TIMEOUT)
         result = self.dialog.saved_result
         with Image.open(result.image_path) as decoded:
             decoded.load()

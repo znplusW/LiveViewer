@@ -34,6 +34,33 @@ jobs:
           python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
       - name: Fetch and validate pinned LGPL frame tools
         run: python scripts/fetch_frame_tools.py
+      - name: Preflight Windows filmstrip touch interactions
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          New-Item -ItemType Directory -Force 'reports' | Out-Null
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_touch_filmstrip.py', '-v' -PassThru -RedirectStandardOutput 'reports/preflight-touch-filmstrip.stdout.log' -RedirectStandardError 'reports/preflight-touch-filmstrip.stderr.log'
+          $finished = $process.WaitForExit(150000)
+          if (-not $finished) { Stop-Process -Id $process.Id -Force }
+          $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
+          Get-Content 'reports/preflight-touch-filmstrip.stdout.log', 'reports/preflight-touch-filmstrip.stderr.log' | Tee-Object -FilePath 'reports/preflight-touch-filmstrip.log'
+          if (-not $finished) { throw 'Filmstrip interaction preflight timed out' }
+          if ($testExitCode -ne 0) { throw "Filmstrip interaction preflight failed with exit code $testExitCode" }
+      - name: Preflight Windows cover editor lifecycle and interactions
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          if (-not (Test-Path 'tests/fixtures/VFR_PAIR.MOV')) { throw 'Committed VFR preflight fixture is absent' }
+          New-Item -ItemType Directory -Force 'reports' | Out-Null
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_cover_editor.py', '-v' -PassThru -RedirectStandardOutput 'reports/preflight-cover-editor.stdout.log' -RedirectStandardError 'reports/preflight-cover-editor.stderr.log'
+          $finished = $process.WaitForExit(150000)
+          if (-not $finished) { Stop-Process -Id $process.Id -Force }
+          $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
+          Get-Content 'reports/preflight-cover-editor.stdout.log', 'reports/preflight-cover-editor.stderr.log' | Tee-Object -FilePath 'reports/preflight-cover-editor.log'
+          if (-not $finished) { throw 'Cover editor interaction preflight timed out' }
+          if ($testExitCode -ne 0) { throw "Cover editor interaction preflight failed with exit code $testExitCode" }
       - name: Build private HEIC encoder from pinned sources
         run: python scripts/build_heic_encoder.py
       - name: Prepare and verify media fixtures
