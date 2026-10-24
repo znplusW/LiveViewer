@@ -199,6 +199,9 @@ class MainWindow(QMainWindow):
         self._scan_generation = 0
         self._epoch = 0
         self._closed = False
+        self._shutdown_complete = threading.Event()
+        self._shutdown_error = None
+        self._shutdown_thread = None
         self.folder: Path | None = None
         self._primary_items: list[MediaItem] = []
         self._extras: dict[str, list[MediaItem]] = {}
@@ -1230,6 +1233,9 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def closeEvent(self, event):
+        if self._closed:
+            super().closeEvent(event)
+            return
         self._save_preferences()
         self._closed = True
         self._scan_cancel.set()
@@ -1239,11 +1245,27 @@ class MainWindow(QMainWindow):
         self._chrome_timer.stop()
         self.jobs.close()
         QApplication.instance().removeEventFilter(self)
-        # Decoder cancellation must not wait for a slow media file on the UI
-        # thread. SQLite writes are committed per operation; its connection is
-        # intentionally kept alive while any already-running worker finishes.
-        threading.Thread(target=close_video_probe, name="decoder-shutdown", daemon=True).start()
+        # Running media tasks can still hold the database, especially on
+        # Windows where an open SQLite file cannot be removed. Cancel isolated
+        # decoding first, join workers off the GUI thread, then close the cache.
+        def shutdown():
+            try:
+                try:
+                    close_video_probe()
+                finally:
+                    self.jobs.wait()
+                    self.cache.close()
+            except Exception as error:
+                self._shutdown_error = str(error)
+            finally:
+                self._shutdown_complete.set()
+        self._shutdown_thread = threading.Thread(target=shutdown, name="media-shutdown", daemon=True)
+        self._shutdown_thread.start()
         super().closeEvent(event)
+
+    def wait_for_shutdown(self, timeout: float | None = None) -> bool:
+        """Let tests and non-GUI callers wait until media/database handles close."""
+        return self._shutdown_complete.wait(timeout) and self._shutdown_error is None
 
 
 def run(folder: Path | None = None, screenshot: Path | None = None) -> int:
@@ -1286,4 +1308,6 @@ def run(folder: Path | None = None, screenshot: Path | None = None) -> int:
         QTimer.singleShot(0, lambda: window.load_folder(initial))
     elif screenshot is not None:
         QTimer.singleShot(900, capture)
-    return application.exec()
+    result = application.exec()
+    window.wait_for_shutdown(3.0)
+    return result

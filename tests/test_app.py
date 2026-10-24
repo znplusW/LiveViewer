@@ -3,6 +3,7 @@
 import os
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -36,16 +37,31 @@ class WindowTests(unittest.TestCase):
 
     def tearDown(self):
         self.window.close()
-        for _ in range(100):
-            if not self.window.jobs._pending:
-                break
-            QTest.qWait(10)
-        if not self.window.jobs._pending:
-            self.window.cache.close()
+        self.assertTrue(self.window.wait_for_shutdown(5.0), self.window._shutdown_error)
         self.window.deleteLater()
         self.application.processEvents()
         self.environment.stop()
         self.temporary.cleanup()
+
+    def test_close_is_nonblocking_and_cache_closes_after_running_worker_exits(self):
+        started, release = threading.Event(), threading.Event()
+        observations = []
+        def active_job():
+            started.set()
+            release.wait(3)
+            observations.append(self.window.cache._closed)
+        self.window.jobs.submit("shutdown-held-worker", active_job, 0)
+        self.assertTrue(started.wait(1))
+        before = time.monotonic()
+        try:
+            self.window.close()
+            self.assertLess(time.monotonic() - before, 0.5)
+            self.assertFalse(self.window.wait_for_shutdown(0.02))
+        finally:
+            release.set()
+        self.assertTrue(self.window.wait_for_shutdown(3))
+        self.assertEqual(observations, [False])
+        self.assertTrue(self.window.cache._closed)
 
     def picture(self, name):
         target = self.base / "photos" / name

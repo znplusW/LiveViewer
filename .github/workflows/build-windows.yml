@@ -50,10 +50,18 @@ jobs:
       - name: Test frozen application and media decoding
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath '.\dist\LiveViewer\LiveViewer.exe' -ArgumentList '--self-test', '--fixtures', 'tests/fixtures', '--report-dir', 'reports/frozen' -Wait -PassThru
+          $process = Start-Process -FilePath '.\dist\LiveViewer\LiveViewer.exe' -ArgumentList '--self-test', '--fixtures', 'tests/fixtures', '--report-dir', 'reports/frozen' -PassThru
+          if (-not $process.WaitForExit(120000)) { Stop-Process -Id $process.Id -Force; throw "Frozen media test timed out" }
           if ($process.ExitCode -ne 0) { throw "Frozen application test failed with exit code $($process.ExitCode)" }
           $report = Get-Content -Raw 'reports/frozen/self-test.json' | ConvertFrom-Json
           if ($report.status -cne 'passed') { throw "Frozen test report status: $($report.status)" }
+      - name: Verify normal Windows desktop startup
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath '.\dist\LiveViewer\LiveViewer.exe' -ArgumentList '--folder', 'tests/fixtures', '--screenshot', 'reports/frozen/windows-desktop.png' -PassThru
+          if (-not $process.WaitForExit(45000)) { Stop-Process -Id $process.Id -Force; throw "Desktop startup timed out" }
+          if ($process.ExitCode -ne 0) { throw "Desktop startup failed" }
+          if (-not (Test-Path 'reports/frozen/windows-desktop.png')) { throw "Desktop preview was not produced" }
       - name: Create portable and source archives with checksums
         run: python scripts/build_windows.py --archive-only
       - name: Upload portable application and corresponding source

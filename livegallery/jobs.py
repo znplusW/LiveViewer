@@ -2,6 +2,7 @@
 import itertools
 import queue
 import threading
+import time
 from PySide6.QtCore import QObject, Signal
 
 
@@ -15,15 +16,20 @@ class JobQueue(QObject):
         self._closed = threading.Event()
         self._pending = set()
         self._lock = threading.Lock()
+        self._threads = []
         for number in range(workers):
-            threading.Thread(target=self._work, name=f'media-{number}', daemon=True).start()
+            worker = threading.Thread(target=self._work, name=f'media-{number}', daemon=True)
+            self._threads.append(worker)
+            worker.start()
 
     def submit(self, key, function, priority=5):
         with self._lock:
             if key in self._pending or self._closed.is_set():
                 return False
             self._pending.add(key)
-        self._queue.put((priority, next(self._counter), key, function))
+            # Enqueue under the same lock as close() so a submission cannot
+            # appear after shutdown has already drained the queue.
+            self._queue.put((priority, next(self._counter), key, function))
         return True
 
     def _work(self):
@@ -46,10 +52,27 @@ class JobQueue(QObject):
                 self.finished.emit(key, result, error)
 
     def close(self):
-        self._closed.set()
-        while True:
-            try:
-                self._queue.get_nowait()
-                self._queue.task_done()
-            except queue.Empty:
-                break
+        """Stop accepting work and discard queued jobs without blocking the UI."""
+        with self._lock:
+            self._closed.set()
+            while True:
+                try:
+                    _, _, key, _ = self._queue.get_nowait()
+                    self._pending.discard(key)
+                    self._queue.task_done()
+                except queue.Empty:
+                    break
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait for running workers, using one timeout for the entire queue.
+
+        Call close() first. A false result means a worker is still using its
+        resources; its cache/database must remain open until a later wait ends.
+        """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        for worker in self._threads:
+            if worker is threading.current_thread():
+                return False
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            worker.join(remaining)
+        return all(not worker.is_alive() for worker in self._threads)

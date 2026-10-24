@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -55,6 +56,9 @@ class CanvasTests(unittest.TestCase):
         self.canvas = ViewerCanvas()
         self.canvas.resize(800, 600)
         self.canvas.show()
+        self.canvas.activateWindow()
+        self.canvas.setFocus()
+        QTest.qWait(30)
         self.app.processEvents()
         self.canvas._player = self.player = FakePlayer()
         self.image = QImage(2400, 1800, QImage.Format.Format_RGB32)
@@ -73,6 +77,22 @@ class CanvasTests(unittest.TestCase):
 
     def frame(self):
         return QVideoFrame(self.image.scaled(320, 240))
+
+    def wait_for_play_calls(self, count):
+        # Windows runners can deliver a GUI timer after its nominal deadline.
+        # Pump for a bounded interval without re-pressing or forcing the timer;
+        # an actual lost hold/focus cancellation still fails with diagnostics.
+        deadline = time.monotonic() + 1.5
+        while self.player.play_calls < count and time.monotonic() < deadline:
+            QTest.qWait(10)
+        active = QApplication.activeWindow()
+        self.assertEqual(
+            self.player.play_calls, count,
+            f"hold timer active={self.canvas._hold_timer.isActive()}, "
+            f"mouse_down={self.canvas._mouse_down}, consumed={self.canvas._hold_consumed}, "
+            f"requested={self.canvas._play_requested}, "
+            f"active_window_is_canvas={active is self.canvas}",
+        )
 
     def touch(self, event_type, *points):
         if event_type == QEvent.Type.TouchCancel:
@@ -104,8 +124,7 @@ class CanvasTests(unittest.TestCase):
 
     def test_hold_waits_for_frame_then_release_immediately_restores_photo(self):
         QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
-        QTest.qWait(130)
-        self.assertEqual(self.player.play_calls, 1)
+        self.wait_for_play_calls(1)
         self.assertTrue(self.canvas._photo.isVisible())
         token = self.canvas._generation
         self.canvas._video_frame(self.frame(), token)
@@ -119,7 +138,7 @@ class CanvasTests(unittest.TestCase):
 
     def test_single_play_requires_a_new_press(self):
         QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
-        QTest.qWait(130)
+        self.wait_for_play_calls(1)
         self.canvas._video_frame(self.frame(), self.canvas._generation)
         self.canvas._media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
         QTest.qWait(140)
@@ -127,8 +146,7 @@ class CanvasTests(unittest.TestCase):
         self.assertTrue(self.canvas._photo.isVisible())
         QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
         QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
-        QTest.qWait(130)
-        self.assertEqual(self.player.play_calls, 2)
+        self.wait_for_play_calls(2)
         QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
 
     def test_temporary_full_play_restores_transform_and_center(self):
