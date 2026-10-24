@@ -274,9 +274,11 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         QTest.mouseMove(window.viewer.viewport(), QPoint(30, 30))
         QTest.qWait(100)
         assert not any(widget.isVisible() for widget in chrome), 'Mouse movement restored fullscreen controls'
-        QTest.keyClick(window.viewer, Qt.Key.Key_F11)
-        assert window._fullscreen_active, 'F11 unexpectedly exited fullscreen'
         window.grab().save(str(report_dir / 'fullscreen-photo-only.png'))
+        QTest.keyClick(window.viewer, Qt.Key.Key_F11)
+        assert not window._fullscreen_active and window.header.isVisible(), 'F11 did not exit fullscreen'
+        QTest.keyClick(window.viewer, Qt.Key.Key_F11)
+        assert window._fullscreen_active and not any(widget.isVisible() for widget in chrome)
         QTest.keyClick(window.viewer, Qt.Key.Key_Escape)
         assert not window._fullscreen_active
         window._toggle_strip(True)
@@ -288,7 +290,7 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         window.grab().save(str(report_dir / 'fullscreen-with-filmstrip.png'))
         QTest.keyClick(window.viewer, Qt.Key.Key_Escape)
         assert not window._fullscreen_active and window.header.isVisible()
-        report['checks'].append({'check': 'immediate_clean_fullscreen_until_escape',
+        report['checks'].append({'check': 'immediate_clean_fullscreen_until_escape_or_f11',
                                  'filmstrip_optional': True, 'status': 'passed'})
 
         settings = SettingsDialog(window.preferences, window)

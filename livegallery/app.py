@@ -140,6 +140,18 @@ class MediaTypeFilter(QPushButton):
         self.setText(title)
 
 
+APP_SHORTCUTS = {
+    "previous": ("Left", "上一张"),
+    "next": ("Right", "下一张"),
+    "fullscreen": ("F11", "切换全屏"),
+    "open_folder": ("Ctrl+O", "打开文件夹"),
+}
+
+
+def _matches_shortcut(event, name: str) -> bool:
+    return event.keyCombination() == QKeySequence(APP_SHORTCUTS[name][0])[0]
+
+
 def _shortcut_error(hold: QKeySequence, once: QKeySequence) -> str:
     if hold.isEmpty() or once.isEmpty():
         return "请分别设置按住播放、单击播放的按键或组合键。"
@@ -152,12 +164,14 @@ def _shortcut_error(hold: QKeySequence, once: QKeySequence) -> str:
 
 
 def _shortcut_overrides(hold: QKeySequence, once: QKeySequence) -> list[str]:
-    builtins = {"Left": "上一张", "Right": "下一张", "F11": "进入全屏", "Ctrl+O": "打开文件夹"}
     overrides = []
     for label, sequence in (("按住播放", hold), ("单击播放", once)):
-        for key, operation in builtins.items():
+        for key, operation in APP_SHORTCUTS.values():
             if sequence == QKeySequence(key):
-                overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
+                if key == "F11":
+                    overrides.append(f"F11：窗口模式改为“{label}”；全屏时仍用于退出全屏")
+                else:
+                    overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
     return overrides
 
 
@@ -208,7 +222,7 @@ class SettingsDialog(QDialog):
         self.live_once_key.setMaximumSequenceLength(1)
         self.live_once_key.setFinishingKeyCombinations([])
         form.addRow("单击播放到结束快捷键", self.live_once_key)
-        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n可设置单个按键或组合键；输入文字时不触发，Esc 保留用于退出全屏。")
+        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n可设置单个按键或组合键；输入文字时不触发。Esc 保留用于退出全屏；全屏时 F11 始终退出全屏。")
         help_text.setObjectName("muted")
         help_text.setWordWrap(True)
         form.addRow(help_text)
@@ -398,7 +412,7 @@ class MainWindow(QMainWindow):
         self.strip_button.setChecked(True)
         header.addWidget(self.strip_button)
         self.fullscreen_button = self._button("⛶  全屏", self._toggle_fullscreen)
-        self.fullscreen_button.setToolTip("F11 全屏；Esc 返回")
+        self.fullscreen_button.setToolTip("F11 进入／退出全屏；Esc 退出全屏")
         header.addWidget(self.fullscreen_button)
         header.addWidget(self._button("设置", self.open_settings))
         root.addWidget(self.header)
@@ -1101,8 +1115,9 @@ class MainWindow(QMainWindow):
         self._select_row(index.row())
 
     def _toggle_fullscreen(self):
-        """Enter immediately; Esc is the only in-app way to leave fullscreen."""
+        """Toggle immediately without ever revealing controls on hover."""
         if self._fullscreen_active:
+            self._exit_fullscreen()
             return
         self.viewer.stop_live()
         self._keyboard_live_pressed = False
@@ -1313,6 +1328,11 @@ class MainWindow(QMainWindow):
             if not event.isAutoRepeat():
                 self._exit_fullscreen()
             return True
+        if (kind == QEvent.Type.KeyPress and _matches_shortcut(event, "fullscreen")
+                and self._fullscreen_active):
+            if not event.isAutoRepeat():
+                self._exit_fullscreen()
+            return True
         if editing:
             return False
         matches_once = not self._once_sequence.isEmpty() and event.keyCombination() == self._once_sequence[0]
@@ -1337,14 +1357,13 @@ class MainWindow(QMainWindow):
                     self.viewer.release_live()
             return True
         if kind == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Left and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            if _matches_shortcut(event, "previous"):
                 self._navigate(-1)
                 return True
-            if event.key() == Qt.Key.Key_Right and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            if _matches_shortcut(event, "next"):
                 self._navigate(1)
                 return True
-            if (event.key() == Qt.Key.Key_F11 and event.modifiers() == Qt.KeyboardModifier.NoModifier
-                    and not event.isAutoRepeat()):
+            if _matches_shortcut(event, "fullscreen") and not event.isAutoRepeat():
                 self._toggle_fullscreen()
                 return True
             if event.key() == Qt.Key.Key_Escape:
@@ -1354,7 +1373,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.viewer.fit_image()
                 return True
-            if event.key() == Qt.Key.Key_O and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+            if _matches_shortcut(event, "open_folder"):
                 self.choose_folder()
                 return True
         return super().eventFilter(watched, event)

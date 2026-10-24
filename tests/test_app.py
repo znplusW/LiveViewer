@@ -176,7 +176,7 @@ class WindowTests(unittest.TestCase):
                        self.window.toast, self.window.library_label, self.window.analysis_label):
             self.assertFalse(widget.isVisible(), widget.objectName() or type(widget).__name__)
 
-    def test_fullscreen_is_immediate_stable_and_escape_only(self):
+    def test_fullscreen_is_immediate_stable_and_f11_or_escape_exit(self):
         self.show_live_item()
         self.window.grid_button.click()
         self.window.fullscreen_button.click()
@@ -188,13 +188,19 @@ class WindowTests(unittest.TestCase):
         self.window.viewer.controls_toggled.emit()
         self.window._show_message("后台分析已完成")
         self.window._set_chrome(True)
-        QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
+        repeated = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_F11,
+                             Qt.KeyboardModifier.NoModifier, "", True)
+        QApplication.sendEvent(self.window.viewer, repeated)
         self.assert_fullscreen_has_no_controls()
         self.assertTrue(self.window.film.isVisible())
-        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
         self.assertFalse(self.window.isFullScreen())
         self.assertTrue(self.window.header.isVisible())
         self.assertTrue(self.window.film.isVisible())
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
+        self.assert_fullscreen_has_no_controls()
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.isFullScreen())
 
     def test_fullscreen_restores_maximized_state_and_hidden_filmstrip_preference(self):
         self.show_live_item()
@@ -207,7 +213,7 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.window.film.isVisible())
         self.window.viewer.controls_toggled.emit()
         self.assertFalse(self.window.film.isVisible())
-        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
         self.assertTrue(self.window.isMaximized())
         self.assertFalse(self.window.film.isVisible())
 
@@ -260,6 +266,19 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(once.call_count, 1)
             dialog.reject()
 
+    def test_f11_always_exits_fullscreen_even_when_assigned_to_playback(self):
+        self.show_live_item()
+        self.window._once_sequence = QKeySequence("F11")
+        with patch.object(self.window.viewer, "play_live_once") as once:
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
+            once.assert_called_once()
+            self.assertFalse(self.window.isFullScreen())
+            self.window._toggle_fullscreen()
+            self.assert_fullscreen_has_no_controls()
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
+            self.assertFalse(self.window.isFullScreen())
+            once.assert_called_once()
+
     def test_shortcut_settings_validate_conflicts_and_persist_once_key(self):
         dialog = SettingsDialog(self.window.preferences, self.window)
         dialog.live_once_key.setKeySequence(QKeySequence("Space"))
@@ -285,6 +304,45 @@ class WindowTests(unittest.TestCase):
         target = self.base / "data" / "settings.json"
         target.write_text('{"live_key": "Space"}', encoding="utf-8")
         self.assertEqual(Preferences.load().live_once_key, "P")
+
+    def test_all_internal_shortcut_conflicts_are_shown_while_editing(self):
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        dialog.show()
+        self.application.processEvents()
+        try:
+            for editor in (dialog.live_key, dialog.live_once_key):
+                dialog.live_key.setKeySequence(QKeySequence("Space"))
+                dialog.live_once_key.setKeySequence(QKeySequence("P"))
+                for key, description in (("Left", "上一张"), ("Right", "下一张"),
+                                         ("F11", "全屏"), ("Ctrl+O", "打开文件夹")):
+                    with self.subTest(editor=editor, key=key):
+                        editor.setKeySequence(QKeySequence(key))
+                        self.assertTrue(dialog.shortcut_note.isVisible())
+                        self.assertIn(description, dialog.shortcut_note.text())
+                        self.assertTrue(dialog.override_keys.isVisible())
+                        self.assertFalse(dialog.override_keys.isChecked())
+            dialog.live_once_key.setKeySequence(QKeySequence("F11"))
+            self.assertIn("全屏时仍用于退出", dialog.shortcut_note.text())
+            dialog.live_once_key.setKeySequence(QKeySequence("Space"))
+            self.assertTrue(dialog.shortcut_note.isVisible())
+            self.assertIn("相同", dialog.shortcut_note.text())
+            self.assertFalse(dialog.override_keys.isVisible())
+            dialog.live_once_key.setKeySequence(QKeySequence("Esc"))
+            self.assertTrue(dialog.shortcut_note.isVisible())
+            self.assertIn("Esc 保留", dialog.shortcut_note.text())
+            dialog.live_once_key.setKeySequence(QKeySequence("Ctrl+Left"))
+            self.assertFalse(dialog.shortcut_note.isVisible())
+        finally:
+            dialog.reject()
+
+    def test_modified_arrows_do_not_silently_use_plain_arrow_navigation(self):
+        self.show_live_item()
+        with patch.object(self.window, "_navigate") as navigate:
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_Left, Qt.KeyboardModifier.ControlModifier)
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+            navigate.assert_not_called()
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_Left)
+            navigate.assert_called_once_with(-1)
 
     def test_old_hold_p_binding_survives_once_shortcut_migration(self):
         target = self.base / "data" / "settings.json"
