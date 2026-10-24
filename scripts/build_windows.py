@@ -12,6 +12,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "LiveViewer"
 VERSION = "0.3.0"
+USER_DOCUMENTS = ("使用说明.txt", "产品说明.txt")
 
 
 def build() -> None:
@@ -28,14 +29,22 @@ def package() -> None:
     folder = ROOT / "dist" / NAME
     if not (folder / f"{NAME}.exe").is_file():
         raise SystemExit(f"Missing built executable: {folder / (NAME + '.exe')}")
+    documents = [ROOT / "docs" / name for name in USER_DOCUMENTS]
+    for document in documents:
+        if not document.is_file():
+            raise SystemExit(f"Missing required user document: {document}")
     release = ROOT / "release"
     release.mkdir(exist_ok=True)
     portable = release / f"{NAME}-Windows-x64-v{VERSION}.zip"
     source = release / f"{NAME}-Source-v{VERSION}.zip"
     with zipfile.ZipFile(portable, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(folder.rglob("*")):
-            if path.is_file():
+            # Repackaging an existing portable folder must not duplicate or
+            # retain outdated top-level user documents.
+            if path.is_file() and path.relative_to(folder).as_posix() not in USER_DOCUMENTS:
                 archive.write(path, Path(portable.stem) / path.relative_to(folder))
+        for document in documents:
+            archive.write(document, Path(portable.stem) / document.name)
     excluded = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", "release", "reports", "work"}
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(ROOT.rglob("*")):

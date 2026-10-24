@@ -2,6 +2,8 @@
 
 Windows 11 x64 本地 Live Photo 与普通图片查看器。当前版本 v0.3.0。绿色版解压后运行 `LiveViewer.exe`，请保留同目录的 `_internal` 文件夹。
 
+每个绿色版 ZIP 的程序文件夹内附带两份简明文档：`使用说明.txt` 和 `产品说明.txt`；后者合并更新历史与功能设计，便于直接随软件分发。
+
 ## 使用
 
 1. 将 ZIP 内整个 `LiveViewer-Windows-x64-v版本号` 文件夹解压到可写位置，运行其中的 `LiveViewer.exe`。文件夹名与 ZIP 文件名一致（不含 `.zip`），例如 `LiveViewer-Windows-x64-v0.3.0`。
