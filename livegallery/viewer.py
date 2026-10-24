@@ -120,6 +120,11 @@ class ViewerCanvas(QGraphicsView):
         self._zoom_anchor_viewport = QPointF()
         self._deferred_photo: QImage | None = None
         self._loop = False
+        self._horizontal_scroll_mode = "navigate"
+        self._horizontal_wheel_total = 0.0
+        self._horizontal_wheel_unit: str | None = None
+        self._horizontal_wheel_last = 0.0
+        self._horizontal_wheel_navigation_time = -math.inf
         self._preserve_zoom = True
         self._hold_ms = 300
         self._play_requested = False
@@ -131,6 +136,9 @@ class ViewerCanvas(QGraphicsView):
         self._hold_timer = QTimer(self)
         self._hold_timer.setSingleShot(True)
         self._hold_timer.timeout.connect(self._hold_timeout)
+        self._blank_hold_timer = QTimer(self)
+        self._blank_hold_timer.setSingleShot(True)
+        self._blank_hold_timer.timeout.connect(self._blank_hold_timeout)
         self._load_timer = QTimer(self)
         self._load_timer.setSingleShot(True)
         self._load_timer.setInterval(12_000)
@@ -156,12 +164,15 @@ class ViewerCanvas(QGraphicsView):
         self._last_tap_position = QPointF()
         self._window_filter_target: QWidget | None = None
         self._touch_started_on_image = False
+        self._touch_context_cancelled = False
+        self._blank_context_seen = False
         self._last_physical_right_press = 0.0
         self._native_touch_filter = install_image_touch_filter(self)
 
     def set_photo(self, image: QImage, video_path: Path | None = None) -> None:
         """Replace the current image, cancelling every pending playback request."""
         self._cancel_zoom_animation(apply_deferred=False)
+        self._reset_horizontal_wheel()
         self.stop_live()
         self._click_timer.stop()
         self._player.setSource(QUrl())
@@ -245,6 +256,7 @@ class ViewerCanvas(QGraphicsView):
         muted: bool = True,
         preserve_zoom: bool = True,
         hold_ms: int = 300,
+        horizontal_scroll_mode: str = "navigate",
     ) -> None:
         # A settings change is a new interaction, so a previous held input must
         # not continue playing underneath the settings dialog.
@@ -252,6 +264,11 @@ class ViewerCanvas(QGraphicsView):
         self._loop = bool(loop)
         self._preserve_zoom = bool(preserve_zoom)
         self._hold_ms = max(100, min(2000, int(hold_ms)))
+        mode = horizontal_scroll_mode if horizontal_scroll_mode in ("navigate", "pan") else "navigate"
+        if mode != self._horizontal_scroll_mode:
+            self._reset_horizontal_wheel()
+            self._horizontal_wheel_navigation_time = -math.inf
+        self._horizontal_scroll_mode = mode
         self._audio.setMuted(bool(muted))
         self._player.setLoops(QMediaPlayer.Loops.Infinite if loop else QMediaPlayer.Loops.Once)
 
@@ -308,10 +325,13 @@ class ViewerCanvas(QGraphicsView):
     def stop_live(self) -> None:
         """Synchronously return to the photo and invalidate late media events."""
         self._hold_timer.stop()
+        self._blank_hold_timer.stop()
         self._click_timer.stop()
         self._mouse_down = False
         self._mouse_moved = False
         self._hold_consumed = True
+        if self._touch_active:
+            self._touch_context_cancelled = True
         self._touch_active = False
         self._touch_count = 0
         self._touch_had_multi = False
@@ -561,13 +581,62 @@ class ViewerCanvas(QGraphicsView):
             self.zoom_changed.emit(self.zoom_factor())
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        self.stop_live()
-        amount = event.angleDelta().y()
-        if not amount:
-            amount = event.pixelDelta().y() * 3
-        if amount:
+        phase = event.phase()
+        if phase == Qt.ScrollPhase.ScrollBegin:
+            self._reset_horizontal_wheel()
+        pixels = event.pixelDelta()
+        delta = pixels if not pixels.isNull() else event.angleDelta()
+        if delta.x() and abs(delta.x()) > abs(delta.y()):
+            self.stop_live()
+            self._cancel_zoom_animation()
+            self._horizontal_wheel(delta.x(), "pixel" if not pixels.isNull() else "angle")
+        elif delta.y():
+            self._reset_horizontal_wheel()
+            self.stop_live()
+            amount = delta.y() * 3 if not pixels.isNull() else delta.y()
             self._zoom_at(math.pow(1.0015, amount), event.position())
+        if phase == Qt.ScrollPhase.ScrollEnd:
+            self._reset_horizontal_wheel()
         event.accept()
+
+    def _reset_horizontal_wheel(self) -> None:
+        self._horizontal_wheel_total = 0.0
+        self._horizontal_wheel_unit = None
+        self._horizontal_wheel_last = 0.0
+
+    def _horizontal_wheel(self, amount: float, unit: str) -> None:
+        if self._image_rect.isEmpty():
+            self._reset_horizontal_wheel()
+            return
+        if self._horizontal_scroll_mode == "pan":
+            self._reset_horizontal_wheel()
+            if not self._fit_mode:
+                # Qt's positive X moves content right (scrolls toward the
+                # left). Windows has already negated WM_MOUSEHWHEEL here.
+                pixels = amount if unit == "pixel" else amount / 120 * 60
+                self._pan_by(QPointF(pixels, 0))
+            return
+        now = time.monotonic()
+        if (unit != self._horizontal_wheel_unit
+                or now - self._horizontal_wheel_last > 0.35
+                or self._horizontal_wheel_total * amount < 0):
+            self._horizontal_wheel_total = 0.0
+        self._horizontal_wheel_unit = unit
+        self._horizontal_wheel_last = now
+        self._horizontal_wheel_total += amount
+        threshold = 60 if unit == "pixel" else 120
+        if abs(self._horizontal_wheel_total) < threshold:
+            return
+        # One action per event, at most every 180 ms. Discard excess momentum
+        # rather than enqueueing page changes after the wheel has stopped.
+        total, self._horizontal_wheel_total = self._horizontal_wheel_total, 0.0
+        if now - self._horizontal_wheel_navigation_time < 0.18:
+            return
+        self._horizontal_wheel_navigation_time = now
+        # Qt X is the opposite of WM_MOUSEHWHEEL: negative means scrolling
+        # right, hence next. event.inverted() is informational; its OS setting
+        # is already reflected in delta, so applying it again would undo it.
+        self.navigate_requested.emit(1 if total < 0 else -1)
 
     @staticmethod
     def _is_synthesized_mouse(event: QMouseEvent) -> bool:
@@ -665,10 +734,28 @@ class ViewerCanvas(QGraphicsView):
         if self._hold_consumed:
             return
         if (self._mouse_down and not self._mouse_moved) or (
-            self._touch_active and self._touch_count == 1 and not self._touch_had_multi
+            self._touch_active and self._touch_started_on_image
+            and self._touch_count == 1 and not self._touch_had_multi
         ):
             self._hold_consumed = True
             self.start_live()
+
+    def _blank_hold_timeout(self) -> None:
+        if (not self._touch_active or self._touch_started_on_image
+                or self._touch_count != 1 or self._touch_had_multi
+                or self._mouse_moved or self._blank_context_seen
+                or self._image_rect.isEmpty()):
+            return
+        self._hold_consumed = True
+        self._last_tap_time = 0.0
+        position = self._pointer_start.toPoint()
+        # Accepting TouchBegin is necessary to receive blank-area swipes. On
+        # systems that then omit the promoted mouse context event, retain the
+        # normal right-click action using the platform's press-and-hold timing.
+        QApplication.sendEvent(self.viewport(), QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, position,
+            self.viewport().mapToGlobal(position),
+        ))
 
     def _release_capture(self) -> None:
         if QWidget.mouseGrabber() is self.viewport():
@@ -689,7 +776,7 @@ class ViewerCanvas(QGraphicsView):
             if self._touch_event(event):
                 event.accept()
                 return True
-            # Let Windows recognize long-press on letterboxing/empty canvas.
+            # Empty canvas leaves all normal system gestures available.
             event.ignore()
             return super().viewportEvent(event)
         if event_type == QEvent.Type.ContextMenu and self._suppress_touch_context(event):
@@ -697,6 +784,16 @@ class ViewerCanvas(QGraphicsView):
             # otherwise bypass contextMenuEvent and show the app's menu.
             event.accept()
             return True
+        if event_type == QEvent.Type.ContextMenu and self._is_blank_touch_context(event):
+            if self._blank_context_seen:
+                event.accept()
+                return True
+            # Mark before emitting CustomContextMenu: the menu may run a nested
+            # event loop and receive the Windows event after our fallback.
+            self._blank_context_seen = True
+            self._hold_consumed = True
+            self._blank_hold_timer.stop()
+            self._click_timer.stop()
         if event_type == QEvent.Type.UngrabMouse and not self._releasing_capture:
             if self._mouse_down:
                 self.stop_live()
@@ -714,14 +811,16 @@ class ViewerCanvas(QGraphicsView):
             self._touch_started_on_image = bool(
                 points and self.image_contains_viewport_point(points[0].position())
             )
-            if not self._touch_started_on_image:
+            if self._image_rect.isEmpty():
                 self.stop_live()
                 self._ignore_mouse_until = 0.0
                 return False
-        if not self._touch_started_on_image:
+        if self._image_rect.isEmpty():
             return False
         self._ignore_mouse_until = time.monotonic() + 0.65
         if event_type == QEvent.Type.TouchCancel:
+            self._blank_hold_timer.stop()
+            self._touch_context_cancelled = True
             if self._touch_active and not self._play_once:
                 self.stop_live()
             self._last_tap_time = 0.0
@@ -732,6 +831,8 @@ class ViewerCanvas(QGraphicsView):
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._touch_active = True
             self._touch_had_multi = False
+            self._touch_context_cancelled = False
+            self._blank_context_seen = False
             self._touch_was_fit = self._fit_mode
             self._hold_consumed = False
             self._mouse_moved = False
@@ -739,8 +840,13 @@ class ViewerCanvas(QGraphicsView):
             if active:
                 self._pointer_start = QPointF(active[0].position())
                 self._pointer_last = QPointF(self._pointer_start)
-            if len(active) == 1 and self._video_path is not None:
-                self._hold_timer.start(self._hold_ms)
+            if len(active) == 1:
+                if self._touch_started_on_image and self._video_path is not None:
+                    self._hold_timer.start(self._hold_ms)
+                elif not self._touch_started_on_image:
+                    self._blank_hold_timer.start(max(
+                        1, QApplication.styleHints().mousePressAndHoldInterval()
+                    ))
         if not self._touch_active:
             return True
         if event_type == QEvent.Type.TouchEnd or not active:
@@ -752,6 +858,8 @@ class ViewerCanvas(QGraphicsView):
         if len(active) >= 2:
             self._cancel_zoom_animation()
             self._hold_timer.stop()
+            self._blank_hold_timer.stop()
+            self._touch_context_cancelled = True
             self._hold_consumed = True
             self._stop_playback()
             first, second = active[0].position(), active[1].position()
@@ -773,6 +881,8 @@ class ViewerCanvas(QGraphicsView):
         elif (position - self._pointer_start).manhattanLength() >= QApplication.startDragDistance():
             self._cancel_zoom_animation()
             self._hold_timer.stop()
+            self._blank_hold_timer.stop()
+            self._touch_context_cancelled = True
             self._hold_consumed = True
             if not self._mouse_moved:
                 self._stop_playback()
@@ -787,8 +897,10 @@ class ViewerCanvas(QGraphicsView):
         delta = position - self._pointer_start
         had_multi = self._touch_had_multi
         was_fit = self._touch_was_fit
-        was_tap = owned_press and not had_multi and not self._mouse_moved and not self._hold_consumed
+        was_tap = (owned_press and self._touch_started_on_image
+                   and not had_multi and not self._mouse_moved and not self._hold_consumed)
         self._hold_timer.stop()
+        self._blank_hold_timer.stop()
         if owned_press and not self._play_once:
             self._stop_playback()
         self._touch_active = False
@@ -827,9 +939,19 @@ class ViewerCanvas(QGraphicsView):
         if time.monotonic() - self._last_physical_right_press < 0.75:
             return False
         return (
-            self._touch_started_on_image
+            (self._touch_active or time.monotonic() < self._ignore_mouse_until)
+            and (self._touch_context_cancelled or (
+                self._touch_started_on_image
+                and self.image_contains_viewport_point(QPointF(event.pos()))
+            ))
+        )
+
+    def _is_blank_touch_context(self, event: QContextMenuEvent) -> bool:
+        return (
+            event.reason() != QContextMenuEvent.Reason.Keyboard
+            and time.monotonic() - self._last_physical_right_press >= 0.75
+            and not self._touch_started_on_image
             and (self._touch_active or time.monotonic() < self._ignore_mouse_until)
-            and self.image_contains_viewport_point(QPointF(event.pos()))
         )
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:

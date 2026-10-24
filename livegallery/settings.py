@@ -32,6 +32,7 @@ class Preferences:
     live_once_key: str = 'P'
     filmstrip_key: str = 'F'
     filmstrip_visible: bool = True
+    horizontal_scroll_mode: str = 'navigate'
     cache_mb: int = 2048
     recursive: bool = True
     last_folder: str = ''
@@ -75,6 +76,8 @@ class Preferences:
             result.normalize_shortcuts()
             if not isinstance(result.filmstrip_visible, bool):
                 result.filmstrip_visible = True
+            if result.horizontal_scroll_mode not in ('navigate', 'pan'):
+                result.horizontal_scroll_mode = 'navigate'
             return result
         except (OSError, ValueError, TypeError):
             return cls()

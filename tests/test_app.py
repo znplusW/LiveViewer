@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QImage, QKeyEvent, QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QMenu
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
@@ -533,14 +533,32 @@ class WindowTests(unittest.TestCase):
         self.window._primary_items = [item]
         self.window._rebuild_items()
         self.window._current_id = item.id
-        menu = MagicMock()
-        callbacks = {}
-        menu.addAction.side_effect = lambda text, callback: callbacks.setdefault(text, callback)
+        application = MagicMock()
+        application.display_name = "照片 & 查看器"
+        menu = QMenu(self.window)
+        def execute(_position):
+            submenu = next(action.menu() for action in menu.actions() if action.text() == "以其他软件打开")
+            self.assertIsNotNone(submenu)  # A real submenu supplies the hover arrow.
+            submenu.aboutToShow.emit()
+            submenu.aboutToShow.emit()
+            self.assertEqual(submenu.actions()[0].text(), "照片 && 查看器")
+            # Qt may hide menus before delivering QAction.triggered. Native
+            # references must remain valid until the outer exec returns.
+            submenu.aboutToHide.emit()
+            menu.aboutToHide.emit()
+            application.close.assert_not_called()
+            submenu.actions()[0].trigger()
+            application.invoke.assert_called_once_with(heic)
+            application.close.assert_not_called()
+            submenu.actions()[-1].trigger()
         with patch("livegallery.app.QMenu", return_value=menu), \
+                patch.object(menu, "exec", side_effect=execute), \
+                patch("livegallery.app.enumerate_apps", return_value=[application]) as enumerate_native, \
                 patch("livegallery.app.open_with", return_value=False) as chooser, \
                 patch.object(self.window, "_show_message") as message:
             self.window._item_menu(QPoint())
-            callbacks["以其他软件打开…"]()
+            enumerate_native.assert_called_once_with(heic)
+            application.close.assert_called_once()
             chooser.assert_called_once_with(heic, int(self.window.winId()))
             message.assert_not_called()
         with patch("livegallery.app.open_with", side_effect=OSError("native failure")), \
@@ -552,6 +570,47 @@ class WindowTests(unittest.TestCase):
                 patch("livegallery.app.QMessageBox.warning") as warning:
             self.window._open_with_other_app(item)
             warning.assert_called_once_with(self.window, "无法打开", "native failure")
+
+    def test_open_with_submenu_always_has_chooser_and_handles_list_or_invoke_failure(self):
+        item = self.show_live_item()
+        for response in ([], OSError("enumeration failed")):
+            menu = QMenu(self.window)
+            applications = []
+            with patch("livegallery.app.enumerate_apps", side_effect=response if isinstance(response, OSError) else None,
+                       return_value=response if isinstance(response, list) else None):
+                submenu = self.window._add_open_with_menu(menu, item, applications)
+                submenu.aboutToShow.emit()
+                self.assertFalse(submenu.actions()[0].isEnabled())
+                self.assertEqual(submenu.actions()[-1].text(), "选择其他应用…")
+            menu.deleteLater()
+        application = MagicMock()
+        application.invoke.side_effect = OSError("invoke failed")
+        with patch.object(self.window, "_show_message") as message:
+            self.window._invoke_other_app(application, item)
+            message.assert_called_once_with("invoke failed")
+        application.invoke.side_effect = None
+        application.invoke.return_value = False
+        with patch.object(self.window, "_show_message") as message:
+            self.window._invoke_other_app(application, item)
+            message.assert_not_called()
+
+    def test_horizontal_scroll_setting_roundtrip_rebind_and_mute_preserve_mode(self):
+        self.show_live_item()
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        dialog.horizontal_scroll_mode.setCurrentIndex(1)
+        with patch("livegallery.app.SettingsDialog", return_value=dialog), \
+                patch.object(dialog, "exec", return_value=QDialog.DialogCode.Accepted), \
+                patch.object(self.window.viewer, "set_options") as options:
+            self.window.open_settings()
+            self.assertEqual(options.call_args.args[-1], "pan")
+            self.window._toggle_sound(False)
+            self.assertEqual(options.call_args.args[-1], "pan")
+        self.assertEqual(Preferences.load().horizontal_scroll_mode, "pan")
+        for mode, expected in (("navigate", "navigate"), ("pan", "pan"), ("invalid", "navigate")):
+            Preferences(horizontal_scroll_mode=mode).save()
+            self.assertEqual(Preferences.load().horizontal_scroll_mode, expected)
+        self.assertEqual(SettingsDialog(Preferences(horizontal_scroll_mode="pan"), self.window)
+                         .horizontal_scroll_mode.currentIndex(), 1)
 
 
 class OpenWithTests(unittest.TestCase):

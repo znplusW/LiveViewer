@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, Qt
-from PySide6.QtGui import QImage, QKeySequence
+from PySide6.QtGui import QImage, QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -113,6 +113,168 @@ def _check_overview_touch_scroll(window, fixtures: Path):
     finally:
         grid.setModel(original_model)
         scrolling_model.deleteLater()
+
+
+def _check_canvas_touch_and_wheel(viewer: ViewerCanvas, fixtures: Path):
+    viewer.set_options(hold_ms=150, horizontal_scroll_mode='navigate')
+    viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'), fixtures / 'Portrait_HEVC.MOV')
+    navigation = []
+    viewer.navigate_requested.connect(navigation.append)
+    try:
+        device = QTest.createTouchDevice()
+        sequence = QTest.touchEvent(viewer.viewport(), device, False)
+        left = viewer.mapFromScene(QPointF(0, 0)).x()
+        assert left > 160, 'Portrait fixture needs a wide blank letterbox'
+        start = QPoint(left - 20, viewer.viewport().height() // 2)
+        end = QPoint(20, start.y())
+        assert not viewer.image_contains_viewport_point(QPointF(start))
+        assert not viewer.image_contains_viewport_point(QPointF(end))
+        for first, last in ((start, end), (end, start)):
+            sequence.press(0, first, viewer.viewport()).commit()
+            midpoint = QPoint((first.x() + last.x()) // 2, (first.y() + last.y()) // 2)
+            sequence.move(0, midpoint, viewer.viewport()).commit()
+            sequence.release(0, last, viewer.viewport()).commit()
+            QCoreApplication.processEvents()
+        assert navigation == [1, -1], f'Blank-area swipe direction mismatch: {navigation}'
+        sequence.press(0, start, viewer.viewport()).commit()
+        QTest.qWait(350)
+        assert not viewer._play_requested and viewer._photo.isVisible(), 'Blank long press started video'
+        sequence.release(0, start, viewer.viewport()).commit()
+        QCoreApplication.processEvents()
+        navigation.clear()
+
+        center = QPointF(viewer.viewport().rect().center())
+
+        def wheel(angle=QPoint(), pixels=QPoint()):
+            event = QWheelEvent(center, QPointF(viewer.viewport().mapToGlobal(center.toPoint())),
+                                pixels, angle, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                                Qt.ScrollPhase.NoScrollPhase, False)
+            QApplication.sendEvent(viewer.viewport(), event)
+            QCoreApplication.processEvents()
+
+        # Qt Windows reverses the native WM_MOUSEHWHEEL delta before delivery:
+        # https://github.com/qt/qtbase/blob/v6.12.0/src/plugins/platforms/windows/qwindowspointerhandler.cpp
+        for angle, pixels in ((QPoint(-120, 0), QPoint()), (QPoint(120, 0), QPoint()),
+                              (QPoint(), QPoint(-60, 0)), (QPoint(), QPoint(60, 0))):
+            QTest.qWait(220)
+            wheel(angle, pixels)
+        assert navigation == [1, -1, 1, -1], f'Horizontal wheel direction mismatch: {navigation}'
+        while viewer.zoom_factor() < 3:
+            viewer.zoom_in()
+        QTest.qWait(220)
+        wheel(angle=QPoint(-120, 0))
+        assert navigation == [1, -1, 1, -1, 1], 'Default horizontal wheel changed mode when zoomed'
+        viewer.set_options(horizontal_scroll_mode='pan')
+        zoom, before = viewer.zoom_factor(), viewer._scene_center().x()
+        wheel(pixels=QPoint(40, 0))
+        assert viewer._scene_center().x() < before, 'Horizontal wheel did not pan the zoomed picture'
+        assert len(navigation) == 5 and abs(viewer.zoom_factor() - zoom) < .005
+        wheel(angle=QPoint(0, 120))
+        assert viewer.zoom_factor() > zoom, 'Vertical wheel no longer zooms'
+        viewer.set_options(horizontal_scroll_mode='pan')
+        viewer.fit_image()
+        wheel(angle=QPoint(-120, 0))
+        assert len(navigation) == 5 and abs(viewer.zoom_factor() - 1) < .005
+        viewer.set_options(horizontal_scroll_mode='navigate')
+        return {'blank_swipe': [1, -1], 'horizontal_angle_and_pixel': [1, -1, 1, -1],
+                'default_navigate_when_zoomed': True, 'blank_hold_starts_video': False,
+                'zoomed_pan_and_vertical_zoom': True}
+    finally:
+        viewer.navigate_requested.disconnect(navigation.append)
+
+
+def _check_windows_native_horizontal_wheel(viewer: ViewerCanvas):
+    """Verify the Windows-message-to-Qt direction bridge on the real HWND."""
+    import ctypes
+    from .native_touch import _Point
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    user32.ClientToScreen.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Point)]
+    user32.ClientToScreen.restype = ctypes.c_int
+    user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                   ctypes.c_size_t, ctypes.c_ssize_t]
+    user32.SendMessageW.restype = ctypes.c_ssize_t
+    viewer.activateWindow()
+    viewer.raise_()
+    viewer.setFocus()
+    QCoreApplication.processEvents()
+    window = viewer.window()
+    hwnd = int(window.winId())
+    local = viewer.viewport().mapTo(window, viewer.viewport().rect().center())
+    ratio = window.devicePixelRatioF()
+    point = _Point(round(local.x() * ratio), round(local.y() * ratio))
+    assert user32.ClientToScreen(hwnd, ctypes.byref(point))
+    packed = (point.x & 0xffff) | ((point.y & 0xffff) << 16)
+    navigation = []
+    viewer.navigate_requested.connect(navigation.append)
+    try:
+        QTest.qWait(220)
+        user32.SendMessageW(hwnd, 0x020E, 120 << 16, packed)  # WM_MOUSEHWHEEL: right
+        _wait(lambda: bool(navigation), 3)
+        assert navigation == [1], f'Windows right wheel did not advance once: {navigation}'
+    finally:
+        viewer.navigate_requested.disconnect(navigation.append)
+
+
+def _check_windows_associated_apps(fixtures: Path):
+    """Enumerate real registered handlers and release them; never launch apps."""
+    from .system_open import AssociatedApplication, _ComPtr, _load_shell32, enumerate_apps
+    import ctypes
+
+    class FormatEtc(ctypes.Structure):
+        _fields_ = [('cfFormat', ctypes.c_uint16), ('ptd', ctypes.c_void_p),
+                    ('dwAspect', ctypes.c_uint32), ('lindex', ctypes.c_int32),
+                    ('tymed', ctypes.c_uint32)]
+
+    class CaptureHandler:
+        data_object_verified = False
+
+        def call(self, slot, _argument_types, data_address):
+            assert slot == 8 and data_address
+            # The data object is borrowed here. AssociatedApplication.invoke
+            # owns it and releases it after this callback; never close it here.
+            data = _ComPtr(data_address)
+            file_list = FormatEtc(15, None, 1, -1, 1)  # CF_HDROP / CONTENT / HGLOBAL
+            result = data.call(5, [ctypes.POINTER(FormatEtc)], ctypes.byref(file_list))
+            assert result == 0, f'Shell data object lacks a file list: 0x{result & 0xffffffff:08X}'
+            self.data_object_verified = True
+            return 0
+
+        def close(self):
+            pass
+
+    captured = CaptureHandler()
+    application = AssociatedApplication('Self-test capture', 'self-test-only', captured, _load_shell32())
+    try:
+        assert application.invoke(fixtures / 'ordinary.png') and captured.data_object_verified
+    finally:
+        application.close()
+
+    result = {}
+    for path in (fixtures / 'ordinary.png', fixtures / 'Live_H264.jpg'):
+        for repetition in range(2):
+            applications = enumerate_apps(path)
+            try:
+                assert all(isinstance(app.display_name, str) and app.display_name.strip()
+                           and isinstance(app.identity, str) and app.identity.strip() for app in applications)
+                assert len({app.identity.casefold() for app in applications}) == len(applications)
+                if repetition == 0:
+                    result[path.suffix] = [{'name': app.display_name, 'identity': app.identity}
+                                          for app in applications]
+            finally:
+                for application in applications:
+                    application.close()
+                    application.close()  # Idempotence must not release COM twice.
+    applications = enumerate_apps(fixtures / 'no-app.liveviewer-unassociated-74d96f1b')
+    try:
+        # A system can register a generic wildcard handler for unknown types.
+        # Empty-list UI behavior is covered by unit tests; both native results
+        # are valid here and must release every returned association object.
+        assert all(app.display_name.strip() and app.identity.strip() for app in applications)
+        unknown_count = len(applications)
+    finally:
+        for application in applications:
+            application.close()
+    return {'formats': result, 'unknown_extension_handlers': unknown_count}
 
 
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
@@ -252,6 +414,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             assert abs(viewer.zoom_factor() - target) < .005, 'Double-click missed its 1x/2x target'
         report['checks'].append({'check': 'double_click_animated_fit_to_two_times_zoom',
                                  'intermediate_scale': True, 'status': 'passed'})
+        interactions = _check_canvas_touch_and_wheel(viewer, fixtures)
+        report['checks'].append({'check': 'blank_letterbox_swipe_and_horizontal_wheel',
+                                 **interactions, 'status': 'passed'})
         if sys.platform == 'win32' and app.platformName() == 'windows':
             viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'))
             QCoreApplication.processEvents()
@@ -259,6 +424,10 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             report['checks'].append({'check': 'windows_native_press_hold_image_vs_blank_policy',
                                      'real_hwnd': True, 'physical_touch_hardware': False,
                                      'status': 'passed'})
+            _check_windows_native_horizontal_wheel(viewer)
+            report['checks'].append({'check': 'windows_native_horizontal_wheel_direction',
+                                     'native_delta': 120, 'navigation': 1,
+                                     'physical_device_tested': False, 'status': 'passed'})
         viewer.grab().save(str(report_dir / 'canvas.png'))
         viewer.close()
         # The release must exercise the real main window as well as the media
@@ -390,11 +559,22 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             assert callable(open_with) and ctypes.WinDLL('shell32').SHOpenWithDialog
             report['checks'].append({'check': 'windows_open_with_api_available',
                                      'dialog_launched': False, 'status': 'passed'})
+            applications = _check_windows_associated_apps(fixtures)
+            report['checks'].append({'check': 'windows_registered_application_enumeration',
+                                     'applications': applications['formats'], 'repeated_enumeration': True,
+                                     'real_shell_data_object_verified': True,
+                                     'unknown_extension_handlers': applications['unknown_extension_handlers'],
+                                     'apps_launched': False,
+                                     'status': 'passed'})
 
         settings = SettingsDialog(window.preferences, window)
         assert not settings.live_key.keySequence().isEmpty()
         assert not settings.live_once_key.keySequence().isEmpty()
         assert not settings.filmstrip_key.keySequence().isEmpty()
+        assert window.preferences.horizontal_scroll_mode == 'navigate'
+        assert settings.horizontal_scroll_mode.currentIndex() == 0
+        settings.horizontal_scroll_mode.setCurrentIndex(1)
+        assert settings.horizontal_scroll_mode.currentIndex() == 1
         settings.live_once_key.setKeySequence(QKeySequence('F9'))
         assert settings.live_once_key.keySequence().toString() == 'F9'
         settings.show()

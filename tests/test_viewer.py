@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -126,6 +127,22 @@ class CanvasTests(unittest.TestCase):
                 method(point_id, QPoint(x, y), self.canvas.viewport())
         sequence.commit()
         self.app.processEvents()
+
+    def wheel(self, angle=(0, 0), pixels=(0, 0), phase=Qt.ScrollPhase.NoScrollPhase, inverted=False):
+        event = QWheelEvent(
+            QPointF(self.center), QPointF(self.canvas.viewport().mapToGlobal(self.center)),
+            QPoint(*pixels), QPoint(*angle), Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier, phase, inverted,
+        )
+        QApplication.sendEvent(self.canvas.viewport(), event)
+        return event
+
+    def portrait_with_letterboxing(self):
+        image = QImage(600, 1200, QImage.Format.Format_RGB32)
+        image.fill("red")
+        self.canvas.set_photo(image, self.video_path)
+        self.assertFalse(self.canvas.image_contains_viewport_point(QPointF(20, 300)))
+        return image
 
     def test_quick_release_never_starts_a_late_video(self):
         QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
@@ -305,6 +322,136 @@ class CanvasTests(unittest.TestCase):
         QTest.qWait(250)
         self.assertEqual(self.canvas.transform(), after)
 
+    def test_horizontal_wheel_accumulates_high_resolution_angle_and_limits_burst(self):
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        with patch("livegallery.viewer.time.monotonic") as clock:
+            clock.return_value = 10.0
+            for _ in range(3):
+                self.wheel(angle=(-30, 0))
+            self.assertEqual(navigation, [])
+            self.wheel(angle=(-30, 0))
+            self.assertEqual(navigation, [1])
+            for _ in range(30):
+                self.wheel(angle=(-120, 0))
+            self.assertEqual(navigation, [1])
+            clock.return_value = 10.2
+            self.wheel(angle=(-12000, 0))
+            self.assertEqual(navigation, [1, 1])
+            clock.return_value = 10.4
+            self.wheel(angle=(120, 0))
+            self.assertEqual(navigation, [1, 1, -1])
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0)
+
+    def test_horizontal_wheel_pixel_preference_direction_and_os_inversion(self):
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        with patch("livegallery.viewer.time.monotonic") as clock:
+            clock.return_value = 10.0
+            for _ in range(3):
+                self.wheel(angle=(120, 0), pixels=(-15, 0), inverted=True)
+            self.assertEqual(navigation, [])
+            self.wheel(angle=(120, 0), pixels=(-15, 0), inverted=True)
+            self.assertEqual(navigation, [1])
+            clock.return_value = 10.3
+            self.wheel(pixels=(60, 0), inverted=False)
+            self.assertEqual(navigation, [1, -1])
+            clock.return_value = 10.6
+            self.wheel(pixels=(-60, 0), inverted=False)
+            self.assertEqual(navigation, [1, -1, 1])
+
+    def test_horizontal_wheel_resets_partial_gestures_on_end_idle_axis_and_reversal(self):
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        with patch("livegallery.viewer.time.monotonic") as clock:
+            clock.return_value = 10.0
+            self.wheel(angle=(-90, 0))
+            self.wheel(phase=Qt.ScrollPhase.ScrollEnd)
+            self.wheel(angle=(-30, 0))
+            self.assertEqual(navigation, [])
+            self.wheel(phase=Qt.ScrollPhase.ScrollBegin)
+            self.wheel(angle=(-90, 0))
+            clock.return_value = 10.5
+            self.wheel(angle=(-30, 0))
+            self.assertEqual(navigation, [])
+            self.wheel(angle=(90, 0))  # reversal discards the previous -30
+            self.assertEqual(navigation, [])
+            self.wheel(angle=(30, 0))
+            self.assertEqual(navigation, [-1])
+            clock.return_value = 10.8
+            self.wheel(angle=(-90, 0))
+            self.wheel(angle=(0, 30))  # changing to vertical clears X residue
+            self.wheel(angle=(-30, 0))
+            self.assertEqual(navigation, [-1])
+            self.wheel(pixels=(-45, 0))  # unit change must also clear residue
+            self.assertEqual(navigation, [-1])
+            self.wheel(pixels=(-15, 0), phase=Qt.ScrollPhase.ScrollEnd)
+            self.assertEqual(navigation, [-1, 1])
+        self.assertEqual(self.canvas._horizontal_wheel_total, 0.0)
+
+    def test_horizontal_navigation_rate_survives_loading_next_photo(self):
+        navigation = []
+
+        def navigate(step):
+            navigation.append(step)
+            self.canvas.set_photo(self.image, self.video_path)
+
+        self.canvas.navigate_requested.connect(navigate)
+        with patch("livegallery.viewer.time.monotonic") as clock:
+            clock.return_value = 10.0
+            self.wheel(angle=(-120, 0))
+            clock.return_value = 10.01
+            self.wheel(angle=(-120, 0))
+            self.assertEqual(navigation, [1])
+            clock.return_value = 10.2
+            self.wheel(angle=(-120, 0))
+            self.assertEqual(navigation, [1, 1])
+
+    def test_horizontal_axis_dominance_does_not_zoom_and_vertical_still_zooms(self):
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        self.wheel(angle=(-120, 10))
+        self.assertEqual(navigation, [1])
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0)
+        self.wheel(angle=(10, 120))
+        self.assertGreater(self.canvas.zoom_factor(), 1.0)
+        self.assertEqual(navigation, [1])
+        before = self.canvas.zoom_factor()
+        self.wheel(pixels=(1, 20))
+        self.assertGreater(self.canvas.zoom_factor(), before)
+
+    def test_horizontal_pan_mode_moves_zoomed_image_and_consumes_at_fit(self):
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        self.canvas.set_options(horizontal_scroll_mode="pan")
+        before = self.canvas._scene_center()
+        self.assertTrue(self.wheel(angle=(-120, 0)).isAccepted())
+        self.assertEqual(self.canvas._scene_center(), before)
+        self.assertEqual(navigation, [])
+        self.canvas.zoom_in()
+        self.canvas.zoom_in()
+        before = self.canvas._scene_center()
+        factor = self.canvas.zoom_factor()
+        self.wheel(angle=(-120, 5))
+        self.assertGreater(self.canvas._scene_center().x(), before.x())
+        self.assertAlmostEqual(self.canvas._scene_center().y(), before.y(), delta=3)
+        self.assertAlmostEqual(self.canvas.zoom_factor(), factor)
+        before = self.canvas._scene_center()
+        self.wheel(pixels=(30, 0), inverted=True)
+        self.assertLess(self.canvas._scene_center().x(), before.x())
+        self.assertEqual(navigation, [])
+        self.canvas.set_options(horizontal_scroll_mode="invalid")
+        self.wheel(angle=(-120, 0))
+        self.assertEqual(navigation, [1])
+
+    def test_empty_canvas_does_not_navigate_from_horizontal_wheel(self):
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        self.canvas.clear()
+        self.wheel(angle=(-120, 0))
+        self.wheel(pixels=(100, 0))
+        self.assertEqual(navigation, [])
+
     def test_pan_pinch_resize_hide_and_play_cancel_zoom_animation(self):
         def begin():
             self.canvas.fit_image()
@@ -369,6 +516,116 @@ class CanvasTests(unittest.TestCase):
         self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 200, 310))
         self.assertEqual(navigation, [1])
         self.assertNotEqual(self.canvas._scene_center(), before)
+
+    def test_blank_area_swipes_both_directions_without_live_play_or_taps(self):
+        self.portrait_with_letterboxing()
+        navigation = []
+        taps = QSignalSpy(self.canvas.controls_toggled)
+        self.canvas.navigate_requested.connect(navigation.append)
+        for start, end, step in ((780, 550, 1), (20, 250, -1)):
+            self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, start, 300))
+            self.assertTrue(self.canvas._touch_active)
+            self.assertFalse(self.canvas._touch_started_on_image)
+            self.assertFalse(self.canvas._hold_timer.isActive())
+            self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Updated, end, 305))
+            self.assertFalse(self.canvas._blank_hold_timer.isActive())
+            self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, end, 305))
+            self.assertEqual(navigation[-1], step)
+        self.assertEqual(navigation, [1, -1])
+        self.assertEqual(self.player.play_calls, 0)
+        self.assertFalse(self.canvas._click_timer.isActive())
+        self.assertEqual(taps.count(), 0)
+
+    def test_blank_touch_pans_when_zoomed_but_empty_canvas_does_not_navigate(self):
+        self.portrait_with_letterboxing()
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        before = self.canvas._scene_center()
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Updated, 20, 400))
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 20, 400))
+        self.assertLess(self.canvas._scene_center().y(), before.y())
+        self.assertEqual(navigation, [])
+        self.canvas.clear()
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 780, 300))
+        self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Updated, 300, 300))
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 300, 300))
+        self.assertEqual(navigation, [])
+        self.assertFalse(self.canvas._blank_hold_timer.isActive())
+
+    def test_blank_long_press_context_fallback_is_deduplicated_and_never_plays(self):
+        self.portrait_with_letterboxing()
+        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        menus = QSignalSpy(self.canvas.customContextMenuRequested)
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        self.assertTrue(self.canvas._blank_hold_timer.isActive())
+        self.canvas._blank_hold_timer.start(50)
+        QTest.qWait(150)
+        self.assertEqual(menus.count(), 1)
+        self.assertEqual(self.player.play_calls, 0)
+        # Simulate the real Windows promotion arriving after the fallback.
+        event = QContextMenuEvent(QContextMenuEvent.Reason.Mouse, QPoint(20, 300),
+                                 self.canvas.viewport().mapToGlobal(QPoint(20, 300)))
+        QApplication.sendEvent(self.canvas.viewport(), event)
+        self.assertEqual(menus.count(), 1)
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 20, 300))
+        self.assertFalse(self.canvas._click_timer.isActive())
+        # The native path arriving first cancels the fallback instead.
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        QApplication.sendEvent(self.canvas.viewport(), event)
+        self.assertEqual(menus.count(), 2)
+        self.assertFalse(self.canvas._blank_hold_timer.isActive())
+        self.canvas._blank_hold_timeout()
+        self.assertEqual(menus.count(), 2)
+
+    def test_blank_tap_and_hold_cancellation_leave_no_late_menu_or_play(self):
+        self.portrait_with_letterboxing()
+        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        menus = QSignalSpy(self.canvas.customContextMenuRequested)
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 20, 300))
+        self.assertFalse(self.canvas._click_timer.isActive())
+        self.assertFalse(self.canvas._blank_hold_timer.isActive())
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Stationary, 20, 300),
+                   (1, QEventPoint.State.Pressed, 200, 300))
+        self.assertFalse(self.canvas._blank_hold_timer.isActive())
+        self.touch(QEvent.Type.TouchCancel)
+        self.canvas._blank_hold_timeout()
+        self.assertEqual(menus.count(), 0)
+        self.assertEqual(self.player.play_calls, 0)
+
+    def test_blank_hold_timer_is_cancelled_by_photo_hide_focus_and_explicit_play(self):
+        self.portrait_with_letterboxing()
+        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        menus = QSignalSpy(self.canvas.customContextMenuRequested)
+        for cancel in (
+            lambda: self.canvas.set_photo(self.image, self.video_path),
+            self.canvas.hide,
+            lambda: QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.FocusOut)),
+        ):
+            self.portrait_with_letterboxing()
+            self.canvas.show()
+            self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+            self.assertTrue(self.canvas._blank_hold_timer.isActive())
+            cancel()
+            self.assertFalse(self.canvas._blank_hold_timer.isActive())
+            self.canvas._blank_hold_timeout()
+            self.assertEqual(menus.count(), 0)
+            self.touch(QEvent.Type.TouchCancel)
+        self.portrait_with_letterboxing()
+        self.canvas.show()
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        self.canvas.play_live_once()
+        token = self.canvas._generation
+        self.assertFalse(self.canvas._blank_hold_timer.isActive())
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 20, 300))
+        self.touch(QEvent.Type.TouchCancel)
+        self.canvas._blank_hold_timeout()
+        self.assertTrue(self.canvas._play_requested)
+        self.assertEqual(self.canvas._generation, token)
+        self.assertEqual(menus.count(), 0)
 
     def test_second_finger_cancels_hold_and_pinches_around_touch_center(self):
         self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 300, 300))

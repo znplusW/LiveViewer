@@ -29,7 +29,7 @@ from .library import natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
 from .settings import Preferences, app_directory, data_directory
-from .system_open import open_with
+from .system_open import enumerate_apps, open_with
 from .touch_grid import OverviewGrid
 from .viewer import ViewerCanvas
 
@@ -213,6 +213,14 @@ class SettingsDialog(QDialog):
         self.zoom_mode.addItems(["沿用照片当前放大区域", "临时完整播放，停止后恢复原视图"])
         self.zoom_mode.setCurrentIndex(0 if preferences.preserve_zoom else 1)
         form.addRow("放大时播放", self.zoom_mode)
+        self.horizontal_scroll_mode = QComboBox()
+        self.horizontal_scroll_mode.addItems(["切换上一张／下一张", "放大后左右移动画面"])
+        self.horizontal_scroll_mode.setCurrentIndex(1 if preferences.horizontal_scroll_mode == "pan" else 0)
+        form.addRow("拇指／水平滚轮", self.horizontal_scroll_mode)
+        horizontal_help = QLabel("设置水平滚轮的用途：切换照片，或在放大后左右移动画面。部分鼠标需要在自带软件中将拇指滚轮设为“水平滚动”。垂直滚轮仍用于缩放图片。")
+        horizontal_help.setWordWrap(True)
+        horizontal_help.setObjectName("muted")
+        form.addRow(horizontal_help)
         self.hold = QSpinBox()
         self.hold.setRange(150, 1000)
         self.hold.setSingleStep(50)
@@ -362,7 +370,8 @@ class MainWindow(QMainWindow):
         self._filmstrip_sequence = QKeySequence(self.preferences.filmstrip_key)
         self._build_ui()
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
-                                self.preferences.preserve_zoom, self.preferences.hold_ms)
+                                self.preferences.preserve_zoom, self.preferences.hold_ms,
+                                self.preferences.horizontal_scroll_mode)
         self.viewer.navigate_requested.connect(self._navigate)
         self.viewer.zoom_changed.connect(self._zoom_changed)
         self.viewer.playback_changed.connect(self._playback_changed)
@@ -1213,7 +1222,8 @@ class MainWindow(QMainWindow):
     def _toggle_sound(self, muted):
         self.preferences.muted = muted
         self.viewer.set_options(self.preferences.loop, muted,
-                                self.preferences.preserve_zoom, self.preferences.hold_ms)
+                                self.preferences.preserve_zoom, self.preferences.hold_ms,
+                                self.preferences.horizontal_scroll_mode)
         self._save_preferences()
         self.sound_button.setText("静音" if muted else "声音开启")
 
@@ -1231,6 +1241,7 @@ class MainWindow(QMainWindow):
         self.preferences.loop = dialog.mode.currentIndex() == 1
         self.preferences.muted = dialog.muted.isChecked()
         self.preferences.preserve_zoom = dialog.zoom_mode.currentIndex() == 0
+        self.preferences.horizontal_scroll_mode = "pan" if dialog.horizontal_scroll_mode.currentIndex() == 1 else "navigate"
         self.preferences.hold_ms = dialog.hold.value()
         self.preferences.live_key = dialog.live_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         self.preferences.live_once_key = dialog.live_once_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
@@ -1254,7 +1265,8 @@ class MainWindow(QMainWindow):
         self._once_sequence = QKeySequence(self.preferences.live_once_key)
         self._filmstrip_sequence = QKeySequence(self.preferences.filmstrip_key)
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
-                                self.preferences.preserve_zoom, self.preferences.hold_ms)
+                                self.preferences.preserve_zoom, self.preferences.hold_ms,
+                                self.preferences.horizontal_scroll_mode)
         self.sound_button.setChecked(self.preferences.muted)
         self.sound_button.setText("静音" if self.preferences.muted else "声音开启")
         self._update_hint()
@@ -1294,12 +1306,62 @@ class MainWindow(QMainWindow):
             choices.addSeparator()
             choices.addAction("恢复自动择图", lambda item=item: self._choose_source(item, None))
         menu.addAction("文件与配对详情", lambda item=item: self._show_details(item))
-        menu.addAction("以其他软件打开…", lambda item=item: self._open_with_other_app(item))
+        applications = []
+        self._add_open_with_menu(menu, item, applications)
         menu.addAction("打开所在文件夹", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(item.image_path.parent))))
         menu.addAction("打开缓存位置", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.cache.base))))
         menu.addSeparator()
         menu.addAction("重新扫描当前文件夹", self._rescan)
-        menu.exec(position)
+        try:
+            menu.exec(position)
+        finally:
+            for application in applications:
+                application.close()
+            menu.deleteLater()
+
+    def _add_open_with_menu(self, menu, item, applications):
+        submenu = menu.addMenu("以其他软件打开")
+        submenu.setToolTipsVisible(True)
+        submenu.addAction("正在读取可用应用…").setEnabled(False)
+        loaded = [False]
+        def populate():
+            if loaded[0]:
+                return
+            loaded[0] = True
+            submenu.clear()
+            try:
+                found = enumerate_apps(item.image_path)
+                applications.extend(found)
+                for application in found:
+                    # Escape ampersands so a friendly Windows name is displayed
+                    # literally instead of being interpreted as a Qt mnemonic.
+                    action = submenu.addAction(application.display_name.replace("&", "&&"))
+                    action.triggered.connect(lambda _checked=False, application=application:
+                                             self._invoke_other_app(application, item))
+                if not found:
+                    submenu.addAction("没有已注册的兼容应用").setEnabled(False)
+            except OSError as error:
+                failed = submenu.addAction("无法读取应用列表")
+                failed.setEnabled(False)
+                failed.setToolTip(str(error))
+            submenu.addSeparator()
+            submenu.addAction("选择其他应用…", lambda: self._open_with_other_app(item))
+        submenu.aboutToShow.connect(populate)
+        return submenu
+
+    def _invoke_other_app(self, application, item):
+        self.viewer.stop_live()
+        self._keyboard_live_pressed = False
+        try:
+            application.invoke(item.image_path)
+        except OSError as error:
+            self._open_error(error)
+
+    def _open_error(self, error):
+        if self._fullscreen_active:
+            QMessageBox.warning(self, "无法打开", str(error))
+        else:
+            self._show_message(str(error))
 
     def _open_with_other_app(self, item=None):
         item = item or self._item_by_id(self._current_id)
@@ -1310,10 +1372,7 @@ class MainWindow(QMainWindow):
         try:
             open_with(item.image_path, int(self.winId()))
         except OSError as error:
-            if self._fullscreen_active:
-                QMessageBox.warning(self, "无法打开", str(error))
-            else:
-                self._show_message(str(error))
+            self._open_error(error)
 
     def _choose_source(self, item, path):
         try:
