@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QImage, QKeyEvent, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtGui import QContextMenuEvent, QImage, QKeyEvent, QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu
 
@@ -611,6 +611,95 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(Preferences.load().horizontal_scroll_mode, expected)
         self.assertEqual(SettingsDialog(Preferences(horizontal_scroll_mode="pan"), self.window)
                          .horizontal_scroll_mode.currentIndex(), 1)
+
+    def test_filename_mouse_drag_copies_selected_text_and_ctrl_a_copies_long_full_name(self):
+        self.show_live_item()
+        field = self.window.filename_label
+        filename = "Photo_2026_10_25_IMG_12345_中文_" + "long_filename_" * 18 + ".HEIC"
+        field.setText(filename)
+        self.assertTrue(field.isReadOnly())
+        self.assertEqual(field.cursorPosition(), 0)
+        metrics = field.fontMetrics()
+        start = QPoint(metrics.horizontalAdvance(filename[:2]) + 2, field.height() // 2)
+        end = QPoint(metrics.horizontalAdvance(filename[:15]) + 2, field.height() // 2)
+        QTest.mousePress(field, Qt.MouseButton.LeftButton, pos=start)
+        QTest.mouseMove(field, end)
+        QTest.mouseRelease(field, Qt.MouseButton.LeftButton, pos=end)
+        self.assertTrue(field.hasSelectedText())
+        selected = field.selectedText()
+        self.assertNotEqual(selected, filename)
+        self.assertIn(selected, filename)
+        QTest.keyClick(field, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(self.application.clipboard().text(), selected)
+        QTest.keyClick(field, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(field.selectedText(), filename)
+        QTest.keyClick(field, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(self.application.clipboard().text(), filename)
+        field.setSelection(len(filename) - 20, 12)
+        selected, cursor = field.selectedText(), field.cursorPosition()
+        cursor_rect = field.cursorRect()
+        field.setText(filename)  # A background refresh of this same photo.
+        self.assertEqual(field.selectedText(), selected)
+        self.assertEqual(field.cursorPosition(), cursor)
+        self.assertEqual(field.cursorRect(), cursor_rect)
+        field.setText("replacement.jpg")
+        self.assertEqual(field.cursorPosition(), 0)
+        self.assertFalse(field.hasSelectedText())
+
+    def test_filename_native_context_copy_and_shortcuts_do_not_change_media_or_text(self):
+        item = self.show_live_item()
+        field = self.window.filename_label
+        filename = "Example_中文_filename.JPG"
+        field.setText(filename)
+        field.setFocus()
+        field.setSelection(2, 7)
+        selected = field.selectedText()
+        standard_menu = []
+        def copy_and_close():
+            popup = QApplication.activePopupWidget()
+            if isinstance(popup, QMenu):
+                standard_menu.extend(action.text() for action in popup.actions())
+                copy = next((action for action in popup.actions()
+                             if "copy" in action.text().casefold() or "复制" in action.text()), None)
+                if copy is not None:
+                    copy.trigger()
+                popup.close()
+        QTimer.singleShot(50, copy_and_close)
+        with patch.object(self.window, "_item_menu") as file_menu:
+            QApplication.sendEvent(field, QContextMenuEvent(QContextMenuEvent.Reason.Mouse,
+                                   field.rect().center(), field.mapToGlobal(field.rect().center())))
+            QTest.qWait(100)
+            file_menu.assert_not_called()
+        self.assertTrue(standard_menu)
+        self.assertEqual(self.application.clipboard().text(), selected)
+        self.assertFalse(any("以其他软件打开" in title for title in standard_menu))
+        with patch.object(self.window.viewer, "start_live") as hold, \
+                patch.object(self.window.viewer, "play_live_once") as once, \
+                patch.object(self.window, "_navigate") as navigate, \
+                patch.object(self.window, "_toggle_strip_shortcut") as strip:
+            self.window.activateWindow()
+            field.setFocus()
+            self.application.processEvents()
+            self.assertIs(QApplication.focusWidget(), field)
+            QTest.keyClick(field, Qt.Key.Key_P)
+            QTest.keyClick(field, Qt.Key.Key_F)
+            QTest.keyClick(field, Qt.Key.Key_Space)
+            QTest.keyClick(field, Qt.Key.Key_Left)
+            QTest.keyClick(field, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+            self.assertEqual(field.text(), filename)
+            self.assertEqual(self.window._current_id, item.id)
+            for callback in (hold, once, navigate, strip):
+                callback.assert_not_called()
+        QTest.keyClick(field, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(field, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        repeated = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                             Qt.KeyboardModifier.NoModifier, "", True)
+        QApplication.sendEvent(field, repeated)
+        self.assertFalse(self.window._grid_mode)
+        QTest.keyClick(field, Qt.Key.Key_Escape)
+        self.assertTrue(self.window._grid_mode)
+        QTest.keyClick(field, Qt.Key.Key_Escape)
+        self.assertTrue(self.window._grid_mode)
 
 
 class OpenWithTests(unittest.TestCase):

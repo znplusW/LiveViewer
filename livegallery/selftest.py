@@ -444,6 +444,22 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         window.load_folder(fixtures)
         _wait(lambda: window._displayed_item is not None and not window.viewer._photo.pixmap().isNull(), 18)
         assert len(window.model.items) >= 9
+        copied_path = window._displayed_item.image_path
+        before = copied_path.stat()
+        assert window.filename_label.isReadOnly()
+        assert window.filename_label.text() == copied_path.name
+        window.activateWindow()
+        window.filename_label.setFocus()
+        QTest.keyClick(window.filename_label, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+        assert window.filename_label.selectedText() == copied_path.name
+        QTest.keyClick(window.filename_label, Qt.Key.Key_C, Qt.KeyboardModifier.ControlModifier)
+        QCoreApplication.processEvents()
+        assert app.clipboard().text() == copied_path.name, 'Filename copy did not reach the clipboard'
+        after = copied_path.stat()
+        assert (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+        window.viewer.setFocus()
+        report['checks'].append({'check': 'readonly_filename_selection_and_clipboard_copy',
+                                 'file_unchanged': True, 'status': 'passed'})
         first_id = window._current_id
         window._navigate(1)
         _wait(lambda: window._current_id != first_id and window._displayed_item is not None, 18)

@@ -48,7 +48,7 @@ QLabel#subtitle, QLabel#muted { color: #83909f; }
 QLabel#emptyTitle { color: #e7edf5; font-size: 25px; font-weight: 600; }
 QLabel#emptyIcon { color: #e6ba72; font-size: 66px; }
 QLabel#emptyBody { color: #8e9baa; font-size: 14px; line-height: 150%; }
-QLabel#filename { font-size: 15px; font-weight: 600; }
+QLineEdit#filename, QLineEdit#filename:focus { font-size: 15px; font-weight: 600; background: transparent; border: none; border-radius: 0; padding: 0; }
 QLabel#liveBadge { color: #f1cf91; border: 1px solid #775e38; border-radius: 5px; padding: 4px 7px; background: #31281c; }
 QLabel#toast { background: #3a3020; color: #f5d69e; border: 1px solid #6b5533; padding: 9px 14px; }
 QPushButton { border: 1px solid #39424e; border-radius: 7px; background: #232b35; color: #dce3ec; padding: 8px 13px; min-height: 20px; }
@@ -98,6 +98,25 @@ def _decode(path: Path, edge: int | None):
 class _ScanSignals(QObject):
     progress = Signal(int, int)
     complete = Signal(int, object, object)
+
+
+class FilenameField(QLineEdit):
+    """Selectable filename text with native copy controls and no rename action."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setReadOnly(True)
+        self.setFrame(False)
+        self.setTextMargins(0, 0, 0, 0)
+        self.setCursorPosition(0)
+
+    def setText(self, text):
+        # Preview/pair updates can reapply the same name while the user copies
+        # it. Leave selection, cursor and horizontal scroll untouched then.
+        if text == self.text():
+            return
+        super().setText(text)
+        self.setCursorPosition(0)
 
 
 class MediaTypeFilter(QPushButton):
@@ -502,7 +521,7 @@ class MainWindow(QMainWindow):
         self.infobar.setObjectName("infobar")
         info = QHBoxLayout(self.infobar)
         info.setContentsMargins(20, 10, 18, 10)
-        self.filename_label = QLabel("你的本地照片库")
+        self.filename_label = FilenameField("你的本地照片库")
         self.filename_label.setObjectName("filename")
         self.filename_label.setMinimumWidth(80)
         self.filename_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -1452,7 +1471,10 @@ class MainWindow(QMainWindow):
             if not event.isAutoRepeat():
                 self._exit_fullscreen()
             return True
-        if editing:
+        filename_escape = (focus is self.filename_label and kind == QEvent.Type.KeyPress
+                           and event.key() == Qt.Key.Key_Escape
+                           and event.modifiers() == Qt.KeyboardModifier.NoModifier)
+        if editing and not filename_escape:
             return False
         matches_filmstrip = (not self._filmstrip_sequence.isEmpty()
                              and event.keyCombination() == self._filmstrip_sequence[0])
