@@ -536,6 +536,127 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
                 'touch_scrub_updates_before_release': shown_while_pressed}
 
 
+def _check_filter_blank_click(window):
+    from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+    control = window.kind_filter.live
+    menu = window.kind_filter.menu
+    assert menu.isVisible(), 'Multi-select filter menu must be open'
+    option = QStyleOptionButton()
+    option.initFrom(control)
+    indicator = control.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, control)
+    spacing = control.style().pixelMetric(QStyle.PixelMetric.PM_CheckBoxLabelSpacing, option, control)
+    label_right = indicator.right() + spacing + control.fontMetrics().horizontalAdvance(control.text())
+    blank = QPoint(control.width() - 3, control.height() // 2)
+    assert blank.x() > max(indicator.right(), label_right) + 4, 'Fixture needs blank space after the filter label'
+    original = control.isChecked()
+    for expected in (not original, original):
+        QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=blank)
+        QCoreApplication.processEvents()
+        assert control.isChecked() == expected, 'Clicking blank space did not toggle the filter row'
+        assert menu.isVisible(), 'Clicking blank space closed the multi-select menu'
+    return {'right_blank_click_keeps_menu_open': True}
+
+
+def _check_settings_controls(settings, window, report_dir: Path):
+    """Send real wheel/key/touch events through the shipped settings dialog."""
+    from PySide6.QtGui import QAccessible
+    from PySide6.QtWidgets import QCheckBox
+    from .settings_controls import PillSwitch
+
+    scroll = settings.findChild(QScrollArea)
+    bar = scroll.verticalScrollBar()
+    settings.resize(settings.width(), min(settings.height(), 650))
+    settings.show()
+    settings.activateWindow()
+    QCoreApplication.processEvents()
+    assert bar.maximum() > 0, 'Settings fixture must have a scrollable page'
+
+    def wheel(target, pixel, angle):
+        position = target.rect().center()
+        event = QWheelEvent(QPointF(position), QPointF(target.mapToGlobal(position)),
+                            pixel, angle, Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        QCoreApplication.sendEvent(target, event)
+        QCoreApplication.processEvents()
+
+    wheel_events = 0
+    targets = [(combo, combo.currentIndex) for combo in
+               (settings.mode, settings.zoom_mode, settings.horizontal_scroll_mode, settings.cache_location)]
+    targets.extend((control, control.value) for control in (settings.hold, settings.cache))
+    targets.extend((control.lineEdit(), control.value) for control in (settings.hold, settings.cache))
+    for target, value in targets:
+        for pixel_only in (False, True):
+            scroll.ensureWidgetVisible(target)
+            target.setFocus()
+            QCoreApplication.processEvents()
+            start, before = bar.value(), value()
+            direction = -1 if start < bar.maximum() - 40 else 1
+            pixel = QPoint(0, 27 * direction) if pixel_only else QPoint()
+            angle = QPoint() if pixel_only else QPoint(0, 120 * direction)
+            wheel(scroll.viewport(), pixel, angle)
+            expected = bar.value()
+            assert expected != start, 'Wheel did not scroll the settings page'
+            bar.setValue(start)
+            wheel(target, pixel, angle)
+            assert value() == before, 'Wheel changed a closed settings control'
+            assert bar.value() == expected, 'Settings wheel was lost or scrolled the page more than once'
+            wheel_events += 1
+
+    combo = settings.mode
+    old_index = combo.currentIndex()
+    scroll.ensureWidgetVisible(combo)
+    combo.setCurrentIndex(0)
+    combo.showPopup()
+    QCoreApplication.processEvents()
+    assert combo.view().isVisible(), 'Explicit settings dropdown did not open'
+    QTest.keyClick(combo.view(), Qt.Key.Key_Down)
+    QTest.keyClick(combo.view(), Qt.Key.Key_Return)
+    QCoreApplication.processEvents()
+    assert combo.currentIndex() == 1, 'Explicit dropdown selection stopped working'
+    combo.setCurrentIndex(old_index)
+
+    switches = (settings.autoplay, settings.muted, settings.override_keys, settings.recursive, settings.portable)
+    for control in switches:
+        assert isinstance(control, PillSwitch) and isinstance(control, QCheckBox)
+        assert control.focusPolicy() != Qt.FocusPolicy.NoFocus
+        accessible = QAccessible.queryAccessibleInterface(control)
+        assert accessible is not None and accessible.role() == QAccessible.Role.CheckBox
+        assert bool(accessible.state().checked) == control.isChecked()
+    assert all(isinstance(control, QCheckBox) and not isinstance(control, PillSwitch)
+               for control in (window.kind_filter.live, window.kind_filter.static, window.kind_filter.pending))
+
+    control = settings.autoplay
+    before = control.isChecked()
+    scroll.ensureWidgetVisible(control)
+    control.setFocus()
+    position = QPoint(20, control.height() // 2)
+    QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=position)
+    assert control.isChecked() != before, 'Pill switch did not respond to a click'
+    QTest.keyClick(control, Qt.Key.Key_Space)
+    assert control.isChecked() == before, 'Pill switch did not respond to Space'
+    device = QTest.createTouchDevice()
+    touch = QTest.touchEvent(control, device, False)
+    touch.press(0, position, control).commit()
+    touch.release(0, position, control).commit()
+    QCoreApplication.processEvents()
+    assert control.isChecked() != before, 'Pill switch did not respond to simulated touch'
+    control.setChecked(before)
+    control.setEnabled(False)
+    QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=position)
+    QTest.keyClick(control, Qt.Key.Key_Space)
+    assert control.isChecked() == before, 'Disabled pill switch changed its value'
+    control.setEnabled(True)
+    bar.setValue(0)
+    QCoreApplication.processEvents()
+    settings.grab().save(str(report_dir / 'settings-switches.png'))
+    return {'closed_control_wheel_events': wheel_events,
+            'focused_controls_and_spinbox_children_protected': True,
+            'angle_and_pixel_scroll_page_once': True, 'opened_dropdown_selectable': True,
+            'checkbox_accessibility_preserved': True, 'click_space_touch_toggle': True,
+            'disabled_switch_unchanged': True, 'overview_filter_remains_checkboxes': True}
+
+
 def _check_library_cache(fixtures: Path, report_dir: Path):
     """Exercise real cache files without writing next to shipped test media."""
     from PIL import Image
@@ -897,7 +1018,21 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         window.kind_filter.live.setChecked(True)
         assert any(item.is_live for item in window.model.items)
         assert any(not item.is_live for item in window.model.items)
-        report['checks'].append({'check': 'overview_multi_select_type_filter', 'status': 'passed'})
+        filter_menu = window.kind_filter.menu
+        filter_menu.popup(window.kind_filter.mapToGlobal(QPoint(0, window.kind_filter.height())))
+        QCoreApplication.processEvents()
+        for expected in (False, True):
+            QTest.mouseClick(window.kind_filter.live, Qt.MouseButton.LeftButton,
+                             pos=window.kind_filter.live.rect().center())
+            QCoreApplication.processEvents()
+            assert window.kind_filter.live.isChecked() == expected
+            assert filter_menu.isVisible(), 'Selecting a filter closed the multi-select menu'
+        filter_blank_result = _check_filter_blank_click(window)
+        filter_menu.grab().save(str(report_dir / 'overview-filter.png'))
+        filter_menu.hide()
+        report['checks'].append({'check': 'overview_multi_select_type_filter',
+                                 **filter_blank_result,
+                                 'checkbox_click_keeps_menu_open': True, 'status': 'passed'})
 
         live_row = next(i for i, value in enumerate(window.model.items)
                         if value.is_live and value.image_path.stem == 'JPEG_PAIR')
@@ -1027,6 +1162,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         assert settings.live_once_key.keySequence().toString() == 'F9'
         settings.show()
         QCoreApplication.processEvents()
+        settings_result = _check_settings_controls(settings, window, report_dir)
+        report['checks'].append({'check': 'settings_wheel_safety_and_blue_switches',
+                                 **settings_result, 'status': 'passed'})
         settings.grab().save(str(report_dir / 'settings.png'))
         settings.findChild(QScrollArea).ensureWidgetVisible(settings.portable)
         QCoreApplication.processEvents()

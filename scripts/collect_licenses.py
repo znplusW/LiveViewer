@@ -104,7 +104,7 @@ def gather(destination: Path) -> dict:
                 if path.is_file():
                     native_files.append({"file": str(path.relative_to(base)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {
-        "application": "LiveViewer 0.7.0", "distributions": distributions,
+        "application": "LiveViewer 0.7.1", "distributions": distributions,
         "runtime_versions": runtime, "native_binaries": sorted(native_files, key=lambda x: x["file"]),
         "upstream_sources": [{"component": n, "source": value[0], "license_note": value[1]} for n, value in UPSTREAM.items()],
         "original_upstream_texts": fetched, "upstream_fetch_failures": failures,

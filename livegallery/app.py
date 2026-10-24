@@ -32,6 +32,7 @@ from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
 from .reveal_file import reveal_in_folder
 from .settings import Preferences, app_directory, cache_data_roots, data_directory
+from .settings_controls import PillSwitch, SettingsScrollArea, SettingsWheelGuard, TickCheckBox
 from .system_open import enumerate_apps, open_with
 from .touch_grid import OverviewGrid
 from .viewer import ViewerCanvas
@@ -161,9 +162,15 @@ class MediaTypeFilter(QPushButton):
         self._update_label()
 
     def _add_option(self, text, checked):
-        box = QCheckBox(text)
+        box = TickCheckBox(text)
         box.setChecked(checked)
-        box.setStyleSheet("QCheckBox { padding: 7px 15px; }")
+        box.setStyleSheet("""
+            QCheckBox { padding: 7px 15px; spacing: 10px; background: transparent; }
+            QCheckBox:hover { background: #303b48; }
+            QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #8e9aa8;
+                                  border-radius: 3px; background: transparent; }
+            QCheckBox::indicator:checked { border-color: #3b82f6; background: #3b82f6; }
+        """)
         action = QWidgetAction(self.menu)
         action.setDefaultWidget(box)
         self.menu.addAction(action)
@@ -235,7 +242,7 @@ class SettingsDialog(QDialog):
         title = QLabel("按你的习惯浏览")
         title.setStyleSheet("font-size:21px;font-weight:600;padding-bottom:6px")
         outer.addWidget(title)
-        scroll = QScrollArea()
+        scroll = self.scroll_area = SettingsScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll_content = QWidget()
@@ -250,14 +257,14 @@ class SettingsDialog(QDialog):
         self.mode.addItems(["播放一次，结束后恢复照片", "持续按住时循环播放"])
         self.mode.setCurrentIndex(1 if preferences.loop else 0)
         form.addRow("播放模式", self.mode)
-        self.autoplay = QCheckBox("切换到 Live Photo 时自动播放一次")
+        self.autoplay = PillSwitch("切换到 Live Photo 时自动播放一次")
         self.autoplay.setChecked(preferences.autoplay)
         form.addRow("自动播放", self.autoplay)
         autoplay_help = QLabel("下次切换照片起生效；播完恢复静态照片，不受按住时循环设置影响。总览或对话框中不会自动播放。")
         autoplay_help.setWordWrap(True)
         autoplay_help.setObjectName("muted")
         form.addRow(autoplay_help)
-        self.muted = QCheckBox("默认静音")
+        self.muted = PillSwitch("默认静音")
         self.muted.setChecked(preferences.muted)
         form.addRow("声音", self.muted)
         self.zoom_mode = QComboBox()
@@ -297,7 +304,7 @@ class SettingsDialog(QDialog):
         self.shortcut_note = QLabel()
         self.shortcut_note.setWordWrap(True)
         form.addRow(self.shortcut_note)
-        self.override_keys = QCheckBox("确认替换以上原有快捷键")
+        self.override_keys = PillSwitch("确认替换以上原有快捷键")
         form.addRow(self.override_keys)
         self.live_key.keySequenceChanged.connect(self._shortcuts_changed)
         self.live_once_key.keySequenceChanged.connect(self._shortcuts_changed)
@@ -307,7 +314,7 @@ class SettingsDialog(QDialog):
         storage_group = QGroupBox("文件夹与缓存")
         storage = QFormLayout(storage_group)
         storage.setVerticalSpacing(12)
-        self.recursive = QCheckBox("包含所有子文件夹（只在同一目录内配对）")
+        self.recursive = PillSwitch("包含所有子文件夹（只在同一目录内配对）")
         self.recursive.setChecked(preferences.recursive)
         storage.addRow(self.recursive)
         self.cache_location = QComboBox()
@@ -331,7 +338,7 @@ class SettingsDialog(QDialog):
         if parent is not None:
             clear_cache.clicked.connect(parent._clear_cache)
         storage.addRow(clear_cache)
-        self.portable = QCheckBox("设置跟随软件目录（完全便携设置）")
+        self.portable = PillSwitch("设置跟随软件目录（完全便携设置）")
         self.portable.setChecked((app_directory() / "portable.flag").exists())
         storage.addRow(self.portable)
         portable_note = QLabel("设置保存位置切换后重启生效；缓存位置可独立选择并立即切换。选择图库缓存或保存封面图时会写入照片目录。")
@@ -346,6 +353,9 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+        self._wheel_guard = SettingsWheelGuard(scroll)
+        self._wheel_guard.protect(self.mode, self.zoom_mode, self.horizontal_scroll_mode,
+                                  self.cache_location, self.hold, self.cache)
         screen = self.screen()
         available_height = screen.availableGeometry().height() if screen else 900
         self.resize(620, min(850, max(420, available_height - 70)))
@@ -358,7 +368,7 @@ class SettingsDialog(QDialog):
             return
         overrides = _shortcut_overrides(*sequences)
         if overrides and not self.override_keys.isChecked():
-            QMessageBox.information(self, "快捷键冲突", "\n".join(overrides) + "\n\n请勾选确认替换，或更换播放快捷键。")
+            QMessageBox.information(self, "快捷键冲突", "\n".join(overrides) + "\n\n请开启确认替换，或更换播放快捷键。")
             return
         self.accept()
 

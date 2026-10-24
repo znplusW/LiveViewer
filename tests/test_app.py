@@ -382,6 +382,32 @@ class WindowTests(unittest.TestCase):
         target.write_text('{"live_key": "Space"}', encoding="utf-8")
         self.assertEqual(Preferences.load().live_once_key, "P")
 
+    def test_settings_switches_save_actual_clicked_values_and_cancel_discards_changes(self):
+        directory = self.base / 'application'
+        directory.mkdir()
+        with patch('livegallery.app.app_directory', return_value=directory):
+            dialog = SettingsDialog(self.window.preferences, self.window)
+            for switch in (dialog.autoplay, dialog.muted, dialog.recursive, dialog.portable):
+                switch.click()
+            with patch('livegallery.app.SettingsDialog', return_value=dialog), \
+                    patch.object(dialog, 'exec', return_value=QDialog.DialogCode.Accepted):
+                self.window.open_settings()
+            saved = Preferences.load()
+            self.assertTrue(saved.autoplay)
+            self.assertFalse(saved.muted)
+            self.assertFalse(saved.recursive)
+            self.assertTrue((directory / 'portable.flag').is_file())
+            dialog.deleteLater()
+            cancelled = SettingsDialog(self.window.preferences, self.window)
+            for switch in (cancelled.autoplay, cancelled.muted, cancelled.recursive, cancelled.portable):
+                switch.click()
+            with patch('livegallery.app.SettingsDialog', return_value=cancelled), \
+                    patch.object(cancelled, 'exec', return_value=QDialog.DialogCode.Rejected):
+                self.window.open_settings()
+            self.assertEqual(Preferences.load(), saved)
+            self.assertTrue((directory / 'portable.flag').is_file())
+            cancelled.deleteLater()
+
     def test_all_internal_shortcut_conflicts_are_shown_while_editing(self):
         dialog = SettingsDialog(self.window.preferences, self.window)
         dialog.show()

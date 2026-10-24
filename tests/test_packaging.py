@@ -21,7 +21,7 @@ class PackagingDataTests(unittest.TestCase):
             (program / '_internal/normal.dll').write_bytes(b'packaged component')
             (root / 'docs').mkdir()
             for name in build_windows.USER_DOCUMENTS:
-                (root / 'docs' / name).write_text('LiveViewer v0.7.0\n', encoding='utf-8')
+                (root / 'docs' / name).write_text(f'LiveViewer v{build_windows.VERSION}\n', encoding='utf-8')
             (root / 'livegallery').mkdir()
             (root / 'livegallery/data_directory.py').write_text('# source code\n', encoding='utf-8')
             for base in (root, program):
