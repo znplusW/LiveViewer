@@ -1,0 +1,226 @@
+{
+  "application": "LiveViewer 0.1.0",
+  "distributions": [
+    {
+      "name": "PySide6",
+      "version": "6.12.0",
+      "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "project_urls": [
+        "Homepage, https://pyside.org",
+        "Documentation, https://doc.qt.io/qtforpython",
+        "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+        "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+        "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+      ],
+      "original_license_files": []
+    },
+    {
+      "name": "PySide6_Addons",
+      "version": "6.12.0",
+      "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "project_urls": [
+        "Homepage, https://pyside.org",
+        "Documentation, https://doc.qt.io/qtforpython",
+        "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+        "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+        "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+      ],
+      "original_license_files": []
+    },
+    {
+      "name": "PySide6_Essentials",
+      "version": "6.12.0",
+      "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "project_urls": [
+        "Homepage, https://pyside.org",
+        "Documentation, https://doc.qt.io/qtforpython",
+        "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+        "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+        "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+      ],
+      "original_license_files": []
+    },
+    {
+      "name": "shiboken6",
+      "version": "6.12.0",
+      "declared_license": "LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only",
+      "project_urls": [
+        "Homepage, https://pyside.org",
+        "Documentation, https://doc.qt.io/qtforpython",
+        "Repository, https://code.qt.io/cgit/pyside/pyside-setup.git/",
+        "Changelog, https://code.qt.io/cgit/pyside/pyside-setup.git/tree/doc/changelogs",
+        "Tracker, https://qt-project.atlassian.net/browse/PYSIDE"
+      ],
+      "original_license_files": []
+    },
+    {
+      "name": "pillow",
+      "version": "13.0.0",
+      "declared_license": "MIT-CMU",
+      "project_urls": [
+        "Release notes, https://pillow.readthedocs.io/en/stable/releasenotes/index.html",
+        "Changelog, https://github.com/python-pillow/Pillow/releases",
+        "Documentation, https://pillow.readthedocs.io",
+        "Funding, https://tidelift.com/lifter/search/pypi/pillow",
+        "Homepage, https://python-pillow.org",
+        "Mastodon, https://fosstodon.org/@pillow",
+        "Security, https://pillow.readthedocs.io/en/stable/handbook/security.html",
+        "Source, https://github.com/python-pillow/Pillow"
+      ],
+      "original_license_files": [
+        "python-distributions/Pillow/pillow-13.0.0.dist-info/licenses/LICENSE"
+      ]
+    },
+    {
+      "name": "pi_heif",
+      "version": "1.4.0",
+      "declared_license": "BSD-3-Clause",
+      "project_urls": [
+        "Documentation, https://pillow-heif.readthedocs.io",
+        "Source, https://github.com/bigcat88/pillow_heif",
+        "Changelog, https://github.com/bigcat88/pillow_heif/blob/master/CHANGELOG.md"
+      ],
+      "original_license_files": [
+        "python-distributions/pi-heif/pi_heif-1.4.0.dist-info/licenses/LICENSE.txt",
+        "python-distributions/pi-heif/pi_heif-1.4.0.dist-info/licenses/LICENSES_bundled.txt"
+      ]
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.4",
+      "declared_license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+      "project_urls": [
+        "homepage, https://numpy.org",
+        "documentation, https://numpy.org/doc/",
+        "source, https://github.com/numpy/numpy",
+        "download, https://pypi.org/project/numpy/#files",
+        "tracker, https://github.com/numpy/numpy/issues",
+        "release notes, https://numpy.org/doc/stable/release"
+      ],
+      "original_license_files": [
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/LICENSE.txt",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/_core/include/numpy/libdivide/LICENSE.txt",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/_core/src/common/pythoncapi-compat/COPYING",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/_core/src/highway/LICENSE",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/_core/src/multiarray/dragon4_LICENSE.txt",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/_core/src/npysort/x86-simd-sort/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/_core/src/umath/svml/LICENSE",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/fft/pocketfft/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/linalg/lapack_lite/LICENSE.txt",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/ma/LICENSE",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/src/distributions/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/src/mt19937/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/src/pcg64/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/src/philox/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/src/sfc64/LICENSE.md",
+        "python-distributions/numpy/numpy-2.5.4.dist-info/licenses/numpy/random/src/splitmix64/LICENSE.md",
+        "python-distributions/numpy/numpy/_core/include/numpy/random/LICENSE.txt",
+        "python-distributions/numpy/numpy/ma/LICENSE",
+        "python-distributions/numpy/numpy/random/LICENSE.md"
+      ]
+    }
+  ],
+  "runtime_versions": {
+    "python": "3.12.14 (main, Aug 25 2026, 13:50:33) [Clang 22.1.3 ]",
+    "qt_ffmpeg_version": "9.0.1",
+    "heif_info": {
+      "libheif": "1.23.0",
+      "HEIF": "",
+      "AVIF": "",
+      "encoders": {
+        "mask": "mask"
+      },
+      "decoders": {
+        "libde265": "libde265 HEVC decoder, version 1.1.0"
+      }
+    }
+  },
+  "native_binaries": [],
+  "upstream_sources": [
+    {
+      "component": "Python",
+      "source": "https://github.com/python/cpython",
+      "license_note": "PSF-2.0 and included notices"
+    },
+    {
+      "component": "Qt-PySide6",
+      "source": "https://download.qt.io/archive/qt/6.12/6.12.0/single/",
+      "license_note": "LGPL-3.0 and third-party notices"
+    },
+    {
+      "component": "FFmpeg",
+      "source": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+      "license_note": "Qt build LGPL-2.1-or-later and included permissive third-party notices"
+    },
+    {
+      "component": "libheif",
+      "source": "https://github.com/strukturag/libheif",
+      "license_note": "LGPL-3.0-or-later"
+    },
+    {
+      "component": "libde265",
+      "source": "https://github.com/strukturag/libde265",
+      "license_note": "LGPL-3.0-or-later"
+    },
+    {
+      "component": "MinGW-runtime",
+      "source": "https://www.mingw-w64.org/",
+      "license_note": "GCC runtime exception, MIT and BSD; see upstream notices"
+    }
+  ],
+  "original_upstream_texts": [
+    {
+      "file": "native-libraries/Python-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/python/cpython/v3.12.14/LICENSE",
+      "sha256": "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+    },
+    {
+      "file": "native-libraries/LGPL-3.0.txt",
+      "url": "https://raw.githubusercontent.com/qt/qtbase/v6.12.0/LICENSES/LGPL-3.0-only.txt",
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "file": "native-libraries/GPL-3.0.txt",
+      "url": "https://raw.githubusercontent.com/qt/qtbase/v6.12.0/LICENSES/GPL-3.0-only.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    {
+      "file": "native-libraries/FFmpeg-LGPL-2.1.txt",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/COPYING.LGPLv2.1",
+      "sha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30"
+    },
+    {
+      "file": "native-libraries/FFmpeg-GPL-2.0.txt",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/COPYING.GPLv2",
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+    },
+    {
+      "file": "native-libraries/FFmpeg-LICENSE.md",
+      "url": "https://raw.githubusercontent.com/FFmpeg/FFmpeg/n9.0.1/LICENSE.md",
+      "sha256": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
+    },
+    {
+      "file": "native-libraries/libheif-COPYING.txt",
+      "url": "https://raw.githubusercontent.com/strukturag/libheif/v1.23.0/COPYING",
+      "sha256": "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596"
+    },
+    {
+      "file": "native-libraries/libde265-COPYING.txt",
+      "url": "https://raw.githubusercontent.com/strukturag/libde265/v1.1.0/COPYING",
+      "sha256": "02cc1585a20677992e0ba578fa692635dc193735f2691dc81de924b51c4e8020"
+    },
+    {
+      "file": "native-libraries/GCC-runtime-exception.txt",
+      "url": "https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-15/COPYING.RUNTIME",
+      "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+    },
+    {
+      "file": "native-libraries/MinGW-COPYING.txt",
+      "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/COPYING",
+      "sha256": "99a69660981156c21336fdb5661f89341b013c94e4bf9e1c7467b4745718397f"
+    }
+  ],
+  "upstream_fetch_failures": [],
+  "redistribution_note": "Qt, FFmpeg, libheif and libde265 remain separate replaceable LGPL shared libraries in this onedir distribution. Keep original notices and corresponding source references with redistributed binaries. PyAV is a development-only fixture generator and is not shipped in the application."
+}

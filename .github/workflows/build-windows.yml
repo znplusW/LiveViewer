@@ -1,0 +1,72 @@
+name: Build and test Windows x64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liveviewer-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x64:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+      QT_MEDIA_BACKEND: ffmpeg
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python x64
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+      - name: Install pinned dependencies
+        run: python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
+      - name: Prepare and verify media fixtures
+        run: python scripts/generate_fixtures.py --output tests/fixtures --require-codecs
+      - name: Test indexing, images, gestures, and playback state
+        run: python -m unittest discover -s tests -v
+      - name: Test source application and media decoding
+        shell: pwsh
+        run: |
+          python launch.py --self-test --fixtures tests/fixtures --report-dir reports/source
+          if ($LASTEXITCODE -ne 0) { throw "Source application test failed with exit code $LASTEXITCODE" }
+          $report = Get-Content -Raw 'reports/source/self-test.json' | ConvertFrom-Json
+          if ($report.status -cne 'passed') { throw "Source test report status: $($report.status)" }
+      - name: Build portable Windows application
+        run: python scripts/build_windows.py --build-only
+      - name: Verify executable architecture and bundled decoders
+        run: python scripts/verify_bundle.py
+      - name: Test frozen application and media decoding
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath '.\dist\LiveViewer\LiveViewer.exe' -ArgumentList '--self-test', '--fixtures', 'tests/fixtures', '--report-dir', 'reports/frozen' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Frozen application test failed with exit code $($process.ExitCode)" }
+          $report = Get-Content -Raw 'reports/frozen/self-test.json' | ConvertFrom-Json
+          if ($report.status -cne 'passed') { throw "Frozen test report status: $($report.status)" }
+      - name: Create portable and source archives with checksums
+        run: python scripts/build_windows.py --archive-only
+      - name: Upload portable application and corresponding source
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: LiveViewer-Windows-x64-v0.1.0
+          path: release/
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: LiveViewer-Windows-x64-reports-${{ github.run_number }}
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 3

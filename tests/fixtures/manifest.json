@@ -1,0 +1,37 @@
+{
+  "synthetic": true,
+  "size": [
+    640,
+    420
+  ],
+  "images": [
+    "JPEG_PAIR.jpeg",
+    "Live_H264.jpg",
+    "Live_HEVC.jpeg",
+    "Live_HEVC.jpg",
+    "ordinary.avif",
+    "ordinary.bmp",
+    "ordinary.gif",
+    "ordinary.png",
+    "ordinary.tiff",
+    "ordinary.webp"
+  ],
+  "videos": [
+    {
+      "path": "Live_H264.MOV",
+      "codec": "h264"
+    },
+    {
+      "path": "Live_HEVC.MOV",
+      "codec": "hevc"
+    },
+    {
+      "path": "JPEG_PAIR.mov",
+      "codec": "h264"
+    }
+  ],
+  "heic_images": [
+    "Live_H264.heic"
+  ],
+  "generation_failures": []
+}
