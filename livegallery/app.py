@@ -299,7 +299,7 @@ class SettingsDialog(QDialog):
         self.portable = QCheckBox("完全便携：设置和缓存跟随软件文件夹")
         self.portable.setChecked((app_directory() / "portable.flag").exists())
         storage.addRow(self.portable)
-        portable_note = QLabel("便携模式切换后重启生效；现有缓存不会自动搬运。照片与视频始终只读。")
+        portable_note = QLabel("便携模式切换后重启生效；现有缓存不会自动搬运。仅确认更改头图时写入照片目录。")
         portable_note.setWordWrap(True)
         portable_note.setObjectName("muted")
         storage.addRow(portable_note)
