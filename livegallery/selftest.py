@@ -216,9 +216,11 @@ def _check_windows_native_horizontal_wheel(viewer: ViewerCanvas):
 
 
 def _check_windows_associated_apps(fixtures: Path):
-    """Enumerate real registered handlers and release them; never launch apps."""
-    from .system_open import AssociatedApplication, _ComPtr, _load_shell32, enumerate_apps
+    """Enumerate format-recommended handlers; never launch external apps."""
+    from .system_open import (ASSOC_FILTER_RECOMMENDED, AssociatedApplication,
+                              _ComPtr, _load_shell32, enumerate_apps)
     import ctypes
+    assert ASSOC_FILTER_RECOMMENDED == 1
 
     class FormatEtc(ctypes.Structure):
         _fields_ = [('cfFormat', ctypes.c_uint16), ('ptd', ctypes.c_void_p),
@@ -257,6 +259,7 @@ def _check_windows_associated_apps(fixtures: Path):
                 assert all(isinstance(app.display_name, str) and app.display_name.strip()
                            and isinstance(app.identity, str) and app.identity.strip() for app in applications)
                 assert len({app.identity.casefold() for app in applications}) == len(applications)
+                assert all(app._handler.call(6, []) == 0 for app in applications), 'A handler is not recommended'
                 if repetition == 0:
                     result[path.suffix] = [{'name': app.display_name, 'identity': app.identity}
                                           for app in applications]
@@ -274,7 +277,8 @@ def _check_windows_associated_apps(fixtures: Path):
     finally:
         for application in applications:
             application.close()
-    return {'formats': result, 'unknown_extension_handlers': unknown_count}
+    return {'formats': result, 'unknown_extension_handlers': unknown_count,
+            'association_filter': ASSOC_FILTER_RECOMMENDED}
 
 
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
@@ -560,8 +564,10 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             report['checks'].append({'check': 'windows_open_with_api_available',
                                      'dialog_launched': False, 'status': 'passed'})
             applications = _check_windows_associated_apps(fixtures)
-            report['checks'].append({'check': 'windows_registered_application_enumeration',
+            report['checks'].append({'check': 'windows_recommended_application_enumeration',
                                      'applications': applications['formats'], 'repeated_enumeration': True,
+                                     'filter': 'ASSOC_FILTER_RECOMMENDED',
+                                     'filter_value': applications['association_filter'],
                                      'real_shell_data_object_verified': True,
                                      'unknown_extension_handlers': applications['unknown_extension_handlers'],
                                      'apps_launched': False,

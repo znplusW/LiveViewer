@@ -17,7 +17,7 @@ OAIF_EXEC = 0x00000004
 OAIF_HIDE_REGISTRATION = 0x00000020
 HRESULT_CANCELLED = 0x800704C7
 E_ABORT = 0x80004004
-ASSOC_FILTER_NONE = 0
+ASSOC_FILTER_RECOMMENDED = 1
 _WINCALL = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
 _HRESULT = ctypes.c_int32
 _ULONG = ctypes.c_uint32
@@ -141,11 +141,13 @@ class AssociatedApplication:
 
 
 def enumerate_apps(path: Path) -> list[AssociatedApplication]:
-    """Read handlers registered for this extension, with bounded iteration.
+    """Read Windows-recommended handlers for this format, with bounded iteration.
 
     All returned applications must be closed by the caller in a finally block.
     SHAssocEnumHandlers covers packaged and desktop apps without reading or
-    reconstructing executable command lines. No association is changed.
+    reconstructing executable command lines. The recommended filter excludes
+    generic wildcard applications offered for every extension. Other apps stay
+    available through the native chooser. No association is changed.
     https://learn.microsoft.com/windows/win32/api/shobjidl_core/nf-shobjidl_core-shassocenumhandlers
     """
     extension = Path(path).suffix.casefold()
@@ -159,7 +161,7 @@ def enumerate_apps(path: Path) -> list[AssociatedApplication]:
     applications = []
     enumerator = None
     try:
-        result = enumerate_native(extension, ASSOC_FILTER_NONE, ctypes.byref(pointer))
+        result = enumerate_native(extension, ASSOC_FILTER_RECOMMENDED, ctypes.byref(pointer))
         enumerator = _ComPtr(pointer)
         _hresult(result, "无法读取 Windows 应用列表")
         if not enumerator.address:

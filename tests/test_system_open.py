@@ -128,7 +128,10 @@ class AssociationTests(unittest.TestCase):
         applications = self.enumerate(fixture)
         try:
             self.assertEqual(fixture.extension, ".heic")
-            self.assertEqual(fixture.flags, native.ASSOC_FILTER_NONE)
+            # The exact native filter must exclude generic wildcard handlers
+            # that Windows offers even for unknown, unsupported extensions.
+            self.assertEqual(fixture.flags, 1)
+            self.assertEqual(fixture.flags, native.ASSOC_FILTER_RECOMMENDED)
             self.assertEqual({application.display_name for application in applications},
                              {"图片查看器", "Microsoft 照片"})
             self.assertEqual(fixture.enumerator.releases, 1)

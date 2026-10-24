@@ -1339,7 +1339,7 @@ class MainWindow(QMainWindow):
                     action.triggered.connect(lambda _checked=False, application=application:
                                              self._invoke_other_app(application, item))
                 if not found:
-                    submenu.addAction("没有已注册的兼容应用").setEnabled(False)
+                    submenu.addAction("没有此格式的推荐应用").setEnabled(False)
             except OSError as error:
                 failed = submenu.addAction("无法读取应用列表")
                 failed.setEnabled(False)
