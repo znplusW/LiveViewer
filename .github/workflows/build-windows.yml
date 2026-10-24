@@ -82,6 +82,20 @@ jobs:
           if ($testExitCode -ne 0) { throw "Native settings interaction preflight failed with exit code $testExitCode" }
           $report = Get-Content -Raw 'reports/native-settings-probe.json' | ConvertFrom-Json
           if ($report.status -cne 'passed') { throw "Native settings probe status: $($report.status)" }
+      - name: Preflight native settings after viewer and Explorer interactions
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'windows'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'tests.settings_native_probe', '--source-context', '--expect-platform', 'windows', '--report', 'reports/native-settings-source-context.json' -PassThru -RedirectStandardOutput 'reports/preflight-settings-source-context.stdout.log' -RedirectStandardError 'reports/preflight-settings-source-context.stderr.log'
+          $finished = $process.WaitForExit(150000)
+          if (-not $finished) { Stop-Process -Id $process.Id -Force }
+          $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
+          Get-Content 'reports/preflight-settings-source-context.stdout.log', 'reports/preflight-settings-source-context.stderr.log' | Tee-Object -FilePath 'reports/preflight-settings-source-context.log'
+          if (-not $finished) { throw 'Settings source-context preflight timed out' }
+          if ($testExitCode -ne 0) { throw "Settings source-context preflight failed with exit code $testExitCode" }
+          $report = Get-Content -Raw 'reports/native-settings-source-context.json' | ConvertFrom-Json
+          if ($report.status -cne 'passed') { throw "Settings source-context status: $($report.status)" }
       - name: Identify native build environment
         if: ${{ !inputs.preflight_only }}
         id: heic_environment
