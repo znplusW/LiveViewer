@@ -4,7 +4,7 @@ Windows 11 x64 本地 Live Photo 与普通图片查看器。绿色版解压后�
 
 ## 使用
 
-1. 将整个 `LiveViewer` 文件夹解压到可写位置，运行 `LiveViewer.exe`。
+1. 将 ZIP 内整个 `LiveViewer-Windows-x64-v版本号` 文件夹解压到可写位置，运行其中的 `LiveViewer.exe`。文件夹名与 ZIP 文件名一致（不含 `.zip`），例如 `LiveViewer-Windows-x64-v0.1.0`。
 2. 点击“打开文件夹”，选择照片所在目录。默认递归包含子文件夹。
 3. 点击缩略图查看图片，或切换网格总览快速定位。
 4. 有 LIVE 标记的图片，按住鼠标左键、单指长按或默认空格键播放视频；松开立即恢复静态图片。

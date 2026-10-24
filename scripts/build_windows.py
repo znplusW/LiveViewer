@@ -35,7 +35,7 @@ def package() -> None:
     with zipfile.ZipFile(portable, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(folder.rglob("*")):
             if path.is_file():
-                archive.write(path, Path(NAME) / path.relative_to(folder))
+                archive.write(path, Path(portable.stem) / path.relative_to(folder))
     excluded = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", "release", "reports", "work"}
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(ROOT.rglob("*")):
