@@ -1,7 +1,7 @@
 这个软件是用来看 iPhone 导入到 Windows 电脑的 Live Photos。
 导入时可以使用爱思助手导入到 Windows 上，每个 Live Photo 会分别有一个同名的视频文件和图片文件。
 
-LiveViewer 使用说明（v0.7.1）
+LiveViewer 使用说明（v0.7.2）
 
 解压整个文件夹后运行 LiveViewer.exe，保留 _internal 文件夹。
 

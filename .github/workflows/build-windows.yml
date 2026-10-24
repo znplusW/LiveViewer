@@ -96,6 +96,20 @@ jobs:
           if ($testExitCode -ne 0) { throw "Settings source-context preflight failed with exit code $testExitCode" }
           $report = Get-Content -Raw 'reports/native-settings-source-context.json' | ConvertFrom-Json
           if ($report.status -cne 'passed') { throw "Settings source-context status: $($report.status)" }
+      - name: Preflight actual Windows native SaveAs export
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'windows'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'tests.windows_export_probe', '--report', 'reports/native-export.json' -PassThru -RedirectStandardOutput 'reports/preflight-native-export.stdout.log' -RedirectStandardError 'reports/preflight-native-export.stderr.log'
+          $finished = $process.WaitForExit(150000)
+          if (-not $finished) { Stop-Process -Id $process.Id -Force }
+          $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
+          Get-Content 'reports/preflight-native-export.stdout.log', 'reports/preflight-native-export.stderr.log' | Tee-Object -FilePath 'reports/preflight-native-export.log'
+          if (-not $finished) { throw 'Native SaveAs export preflight timed out' }
+          if ($testExitCode -ne 0) { throw "Native SaveAs export preflight failed with exit code $testExitCode" }
+          $report = Get-Content -Raw 'reports/native-export.json' | ConvertFrom-Json
+          if ($report.status -cne 'passed') { throw "Native export status: $($report.status)" }
       - name: Identify native build environment
         if: ${{ !inputs.preflight_only }}
         id: heic_environment
@@ -183,7 +197,7 @@ jobs:
         if: ${{ !inputs.preflight_only }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: LiveViewer-Windows-x64-v0.7.1
+          name: LiveViewer-Windows-x64-v0.7.2
           path: release/
           if-no-files-found: error
           retention-days: 3
