@@ -33,7 +33,11 @@ def inspect(folder: Path) -> dict:
                         errors.append(f"Expected AMD64 PE machine 0x8664; received {machine:#x}")
     files = [path for path in folder.rglob("*") if path.is_file()]
     for path in files:
-        lowered = str(path.relative_to(folder)).lower()
+        relative = path.relative_to(folder)
+        lowered = str(relative).lower()
+        if (any(part.casefold() in {"data", "liveviewer cache", ".liveviewer-work"}
+                for part in relative.parts) or path.name.casefold() == 'portable.flag'):
+            errors.append(f"Runtime user data must not be distributed: {relative.as_posix()}")
         if "av.libs" in lowered or path.name.lower().startswith(("libx264", "libx265")):
             errors.append(f"Development-only GPL encoder library leaked into bundle: {lowered}")
     patterns = {

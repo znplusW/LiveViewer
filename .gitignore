@@ -13,3 +13,5 @@ portable.flag
 tools/
 vendor/
 work/
+LiveViewer Cache/
+.LiveViewer-work/

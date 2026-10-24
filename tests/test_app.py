@@ -19,7 +19,8 @@ from PySide6.QtWidgets import QApplication, QDialog, QMenu
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
-from livegallery.cache import file_version
+from livegallery.cache import CacheStore, file_version
+from livegallery.cache_locations import open_cache
 from livegallery.settings import Preferences
 from livegallery.system_open import (E_ABORT, HRESULT_CANCELLED, OAIF_EXEC,
                                      OAIF_HIDE_REGISTRATION, OPENASINFO, open_with)
@@ -1036,6 +1037,293 @@ class WindowTests(unittest.TestCase):
             self.assertTrue(complete.wait(1))
             worker.join(1)
             self.assertIsNone(self.window.cache.get_decision(item, "test"))
+
+    def choose_cache(self, mode):
+        application_directory = self.base / 'application'
+        application_directory.mkdir(exist_ok=True)
+        with patch('livegallery.app.app_directory', return_value=application_directory):
+            dialog = SettingsDialog(self.window.preferences, self.window)
+            dialog.cache_location.setCurrentIndex(dialog.cache_location.findData(mode))
+            with patch('livegallery.app.SettingsDialog', return_value=dialog), \
+                    patch.object(dialog, 'exec', return_value=QDialog.DialogCode.Accepted):
+                self.window.open_settings()
+            dialog.deleteLater()
+
+    def test_three_cache_locations_switch_independently_and_keep_current_photo(self):
+        first, selected = self.picture('first.jpg'), self.picture('selected.jpg')
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        self.assertFalse((first.parent / 'LiveViewer Cache').exists())
+        self.window._select_row(1)
+        self.wait_until(lambda: self.window._displayed_item.image_path == selected)
+        item = self.window._displayed_item
+        self.window.cache.set_override(item, selected)
+        self.window.cache.get_thumbnail(selected)
+        self.window._toggle_grid(True)
+        settings_path = self.base / 'data' / 'settings.json'
+        flag = self.base / 'application' / 'portable.flag'
+        for mode, target in (
+                ('program', self.base / 'data' / 'program-data' / 'cache'),
+                ('library', first.parent / 'LiveViewer Cache'),
+                ('user', self.base / 'data' / 'cache')):
+            with self.subTest(mode=mode):
+                previous = self.window.cache
+                self.choose_cache(mode)
+                self.wait_until(lambda: self.window.cache is not previous and
+                                self.window._displayed_item is not None and
+                                self.window._displayed_item.image_path == selected)
+                self.assertEqual(self.window.cache.base, target)
+                self.assertTrue(self.window._grid_mode)
+                self.assertEqual(self.window.cache.get_override(self.window._displayed_item), selected)
+                self.assertEqual(Preferences.load().cache_location, mode)
+                self.assertTrue(settings_path.is_file())
+                self.assertFalse(flag.exists())
+        self.window._clear_cache()
+        self.wait_until(lambda: not any(context[0] == 'clear' for context in
+                                       self.window._request_context.values()))
+        self.assertEqual(self.window.cache.get_override(self.window._displayed_item), selected)
+
+    def test_library_mode_without_folder_uses_local_cache_until_opened(self):
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.assertEqual(self.window.preferences.cache_location, 'library')
+        self.assertEqual(self.window.cache.base, self.base / 'data' / 'cache')
+        path = self.picture('one.jpg')
+        self.window.load_folder(path.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        cache = self.window.cache
+        self.assertEqual(cache.base, path.parent / 'LiveViewer Cache')
+        self.window.load_folder(path.parent, preserve_view=True)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        self.assertIs(self.window.cache, cache)
+        self.assertFalse(self.window._cache_warning)
+
+    def test_cache_location_change_does_not_autoplay_the_same_photo_again(self):
+        path = self.picture('live.jpg')
+        path.with_suffix('.mov').touch()
+        self.window.preferences.autoplay = True
+        decision = PairDecision(path, (), False, 'test')
+        with patch('livegallery.app.resolve_pair', return_value=decision), \
+                patch.object(self.window.viewer, 'play_live_once') as once:
+            self.window.load_folder(path.parent)
+            self.wait_until(lambda: once.call_count == 1 and
+                            self.window._displayed_item is not None and
+                            not self.window._displayed_item.pending)
+            once.reset_mock()
+            old = self.window.cache
+            self.choose_cache('program')
+            self.wait_until(lambda: self.window.cache is not old and
+                            self.window._displayed_item is not None and
+                            not self.window._displayed_item.pending)
+            QTest.qWait(30)
+            once.assert_not_called()
+            self.assertFalse(self.window._autoplay_armed)
+            self.assertEqual(self.window._displayed_item.image_path, path)
+
+    def test_recovered_gallery_cache_is_reused_on_same_folder_rescan(self):
+        path = self.picture('one.jpg')
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.window.load_folder(path.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        cache = self.window.cache
+        warning = '缓存索引已自动恢复。'
+        self.window._cache_warning = warning
+        with patch('livegallery.app.open_cache', wraps=open_cache) as opened:
+            self.window.load_folder(path.parent, preserve_view=True)
+            self.wait_until(lambda: self.window._displayed_item is not None)
+            opened.assert_not_called()
+        self.assertIs(self.window.cache, cache)
+        self.assertEqual(self.window._cache_location, 'library')
+        self.assertEqual(self.window._cache_warning, warning)
+
+    def test_gallery_cache_never_imports_same_named_different_gallery(self):
+        first, second = self.picture('A/same.bmp'), self.picture('B/same.bmp')
+        image = QImage(640, 480, QImage.Format.Format_RGB32)
+        image.fill('#dd2222')
+        self.assertTrue(image.save(str(second)))
+        timestamp = first.stat().st_mtime_ns
+        os.utime(second, ns=(timestamp, timestamp))
+        self.assertEqual(first.stat().st_size, second.stat().st_size)
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        old = self.window.cache
+        old.get_thumbnail(first)
+        old.set_override(self.window._displayed_item, first)
+        self.window.load_folder(second.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None and
+                        self.window._displayed_item.image_path == second)
+        thumbnail = QImage(str(self.window.cache.get_thumbnail(second)))
+        color = thumbnail.pixelColor(20, 20)
+        self.assertGreater(color.red(), 200)
+        self.assertLess(color.blue(), 80)
+        self.assertIsNone(self.window.cache.get_override(self.window._displayed_item))
+        self.wait_until(lambda: old._closed)
+
+    def test_global_cache_rebind_releases_previous_gallery_readers(self):
+        first, second = self.picture('A/first.jpg'), self.picture('B/second.jpg')
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        self.window.cache.set_override(self.window._displayed_item, first)
+        self.choose_cache('user')
+        self.wait_until(lambda: self.window._cache_location == 'user' and
+                        self.window._displayed_item is not None)
+        global_cache = self.window.cache
+        self.assertEqual(global_cache.get_override(self.window._displayed_item), first)
+        readers = [reader for reader in global_cache._owned_readers if reader.library_root == first.parent]
+        self.assertTrue(readers)
+        self.window.load_folder(second.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None and
+                        self.window._displayed_item.image_path == second and
+                        id(global_cache) not in self.window._cache_stores)
+        self.assertIsNot(global_cache, self.window.cache)
+        self.assertTrue(all(reader._closed for reader in readers))
+
+    def test_folder_switch_keeps_old_pair_writer_owned_until_it_finishes(self):
+        first, second = self.picture('A/first.jpg'), self.picture('B/second.jpg')
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        old = self.window.cache
+        item = self.window._displayed_item
+        started, release, completed = threading.Event(), threading.Event(), threading.Event()
+        observed = []
+        def held_pair(candidate, cache):
+            observed.append(cache)
+            started.set()
+            release.wait(4)
+            observed.append(cache._closed)
+            cache.set_override(candidate, candidate.image_path)
+            completed.set()
+            return PairDecision(candidate.image_path, (), False, 'test')
+        try:
+            with patch('livegallery.app.resolve_pair', side_effect=held_pair):
+                self.window._request_pair(item, 3)
+                self.assertTrue(started.wait(1))
+                self.window.load_folder(second.parent)
+                self.wait_until(lambda: self.window._displayed_item is not None and
+                                self.window._displayed_item.image_path == second)
+                self.assertFalse(old._closed)
+                self.assertIsNone(self.window.cache.get_override(self.window._displayed_item))
+                release.set()
+                self.assertTrue(completed.wait(1))
+                self.wait_until(lambda: id(old) not in self.window._cache_stores)
+        finally:
+            release.set()
+        self.assertEqual(observed, [old, False])
+        rebound = open_cache('library', first.parent, user_base=self.base / 'data',
+                             program_base=self.base / 'data' / 'program-data')
+        try:
+            self.assertFalse(rebound.fallback)
+            self.assertEqual(rebound.cache.get_override(item), first)
+        finally:
+            rebound.close()
+
+    def test_slow_stale_cache_open_is_off_gui_and_closed_after_new_folder_wins(self):
+        first, second = self.picture('A/first.jpg'), self.picture('B/second.jpg')
+        entered, release = threading.Event(), threading.Event()
+        stale, threads = [], []
+        def delayed_open(location, folder=None, **kwargs):
+            threads.append(threading.current_thread())
+            if folder == first.parent:
+                entered.set()
+                release.wait(4)
+            binding = open_cache(location, folder, **kwargs)
+            if folder == first.parent:
+                stale.append(binding.cache)
+            return binding
+        try:
+            with patch('livegallery.app.open_cache', side_effect=delayed_open):
+                before = time.monotonic()
+                self.window.load_folder(first.parent)
+                self.assertLess(time.monotonic() - before, 0.3)
+                self.assertTrue(entered.wait(1))
+                self.window.load_folder(second.parent)
+                self.wait_until(lambda: self.window._displayed_item is not None and
+                                self.window._displayed_item.image_path == second)
+                release.set()
+                self.wait_until(lambda: stale and id(stale[0]) not in self.window._cache_stores)
+                self.assertEqual(self.window._displayed_item.image_path, second)
+        finally:
+            release.set()
+        self.assertTrue(all(worker is not threading.main_thread() for worker in threads))
+
+    def test_deep_verification_cancels_on_folder_change_without_closing_its_cache(self):
+        first, second = self.picture('A/first.jpg'), self.picture('B/second.jpg')
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        old = self.window.cache
+        entered, release = threading.Event(), threading.Event()
+        observed = []
+        def verify(paths, cancel=None, progress=None):
+            entered.set()
+            release.wait(4)
+            observed.append((cancel(), old._closed, threading.current_thread()))
+            return {'checked': 0, 'changed': [], 'cancelled': True}
+        try:
+            with patch.object(old, 'verify_files', side_effect=verify):
+                self.window._verify_cache()
+                self.assertTrue(entered.wait(1))
+                self.window.load_folder(second.parent)
+                self.wait_until(lambda: self.window._displayed_item is not None and
+                                self.window._displayed_item.image_path == second)
+                self.assertFalse(old._closed)
+                release.set()
+                self.wait_until(lambda: id(old) not in self.window._cache_stores)
+                self.assertFalse(self.window._verify_running)
+                self.assertEqual(self.window._displayed_item.image_path, second)
+        finally:
+            release.set()
+        self.assertEqual(observed[0][:2], (True, False))
+        self.assertIsNot(observed[0][2], threading.main_thread())
+
+    def test_deep_verification_refreshes_current_same_stat_image_and_preserves_choice(self):
+        path = self.picture('same.bmp')
+        self.window.load_folder(path.parent)
+        self.wait_until(lambda: self.window._displayed_item is not None)
+        item, cache = self.window._displayed_item, self.window.cache
+        cache.get_thumbnail(path)
+        cache.set_override(item, path)
+        timestamp, size = path.stat().st_mtime_ns, path.stat().st_size
+        image = QImage(640, 480, QImage.Format.Format_RGB32)
+        image.fill('#dd2222')
+        self.assertTrue(image.save(str(path)))
+        os.utime(path, ns=(timestamp, timestamp))
+        self.assertEqual(path.stat().st_size, size)
+        self.window._verify_cache()
+        self.wait_until(lambda: not self.window._verify_running and self.window._displayed_item is not None and
+                        not self.window.viewer._photo.pixmap().isNull() and
+                        self.window.viewer._photo.pixmap().toImage().pixelColor(20, 20).red() > 200)
+        self.assertEqual(self.window._displayed_item.image_path, path)
+        self.assertEqual(cache.get_override(self.window._displayed_item), path)
+        self.assertIs(cache, self.window.cache)
+
+    def test_unwritable_program_bootstrap_uses_user_cache(self):
+        self.window.close()
+        self.assertTrue(self.window.wait_for_shutdown(5))
+        self.window.deleteLater()
+        self.application.processEvents()
+        Preferences(cache_location='program').save()
+        user, program = self.base / 'data' / 'cache', self.base / 'data' / 'program-data' / 'cache'
+        seen = []
+        def attempt(base, *args, **kwargs):
+            seen.append(base)
+            if base == program:
+                raise PermissionError('test readonly directory')
+            return CacheStore(base, *args, **kwargs)
+        with patch('livegallery.app.CacheStore', side_effect=attempt):
+            self.window = MainWindow()
+        self.assertEqual(seen, [program, user])
+        self.assertEqual(self.window.cache.base, user)
+        self.assertEqual(self.window.preferences.cache_location, 'program')
+        self.assertIn('本机缓存', self.window._cache_warning)
 
 
 class OpenWithTests(unittest.TestCase):

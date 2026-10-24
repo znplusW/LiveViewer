@@ -109,6 +109,28 @@ class JobQueueTests(unittest.TestCase):
             release.set()
             self.assertTrue(queue.wait(3))
 
+    def test_cancelled_running_owner_is_not_idle_until_function_finishes(self):
+        queue = JobQueue(workers=2)
+        first, second = object(), object()
+        started, release, other = threading.Event(), threading.Event(), threading.Event()
+        def work():
+            started.set()
+            release.wait(3)
+        try:
+            queue.submit('old-cache', work, 0, owner=first)
+            self.assertTrue(started.wait(1))
+            queue.cancel_where(lambda key: key == 'old-cache')
+            self.assertFalse(queue.wait_owner(first, .02))
+            queue.submit('new-cache', other.set, 4, owner=second)
+            self.assertTrue(other.wait(1))
+            self.assertTrue(queue.wait_owner(second, 1))
+            release.set()
+            self.assertTrue(queue.wait_owner(first, 1))
+        finally:
+            release.set()
+            queue.close()
+            self.assertTrue(queue.wait(3))
+
 
 if __name__ == "__main__":
     unittest.main()

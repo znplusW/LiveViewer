@@ -9,17 +9,37 @@ def app_directory() -> Path:
     return Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parents[1]
 
 
+def user_data_directory() -> Path:
+    """The local-user data root, independently of the settings portability flag."""
+    override = os.environ.get('LIVEGALLERY_DATA_DIR')
+    if override:
+        return Path(override)
+    if sys.platform == 'win32':
+        return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'LiveViewer'
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library/Application Support/LiveViewer'
+    return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'LiveViewer'
+
+
+def cache_data_roots() -> tuple[Path, Path]:
+    """Return user/program roots; an explicit test/runtime override isolates both."""
+    user = user_data_directory()
+    override = os.environ.get('LIVEGALLERY_DATA_DIR')
+    program = Path(override) / 'program-data' if override else app_directory() / 'data'
+    return user, program
+
+
+def default_cache_location() -> str:
+    return 'program' if (app_directory() / 'portable.flag').exists() else 'user'
+
+
 def data_directory() -> Path:
     override = os.environ.get('LIVEGALLERY_DATA_DIR')
     if override:
         return Path(override)
     if (app_directory() / 'portable.flag').exists():
         return app_directory() / 'data'
-    if sys.platform == 'win32':
-        return Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) / 'LiveViewer'
-    if sys.platform == 'darwin':
-        return Path.home() / 'Library/Application Support/LiveViewer'
-    return Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'LiveViewer'
+    return user_data_directory()
 
 
 @dataclass
@@ -35,6 +55,7 @@ class Preferences:
     filmstrip_visible: bool = True
     horizontal_scroll_mode: str = 'navigate'
     cache_mb: int = 2048
+    cache_location: str = 'user'
     recursive: bool = True
     last_folder: str = ''
     last_image: str = ''
@@ -72,6 +93,8 @@ class Preferences:
             values = json.loads((data_directory() / 'settings.json').read_text(encoding='utf-8'))
             valid = {f.name for f in fields(cls)}
             result = cls(**{k: v for k, v in values.items() if k in valid})
+            if values.get('cache_location') not in ('user', 'program', 'library'):
+                result.cache_location = default_cache_location()
             result.hold_ms = max(150, min(1000, int(result.hold_ms)))
             result.cache_mb = max(256, min(16384, int(result.cache_mb)))
             result.normalize_shortcuts()
@@ -83,7 +106,7 @@ class Preferences:
                 result.horizontal_scroll_mode = 'navigate'
             return result
         except (OSError, ValueError, TypeError):
-            return cls()
+            return cls(cache_location=default_cache_location())
 
     def save(self):
         base = data_directory()

@@ -1,7 +1,11 @@
+import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
+from livegallery.cache_locations import (CACHE_DIRECTORY, MANIFEST_NAME, OWNERSHIP_SENTINEL,
+                                         PRODUCT, SCHEMA_VERSION)
 from livegallery.library import scan_folder
 
 
@@ -73,6 +77,53 @@ class LibraryTests(unittest.TestCase):
         self.file(".normal-hidden/retained.png")
         self.assertEqual({item.image_path.name for item in scan_folder(self.root)},
                          {"visible.jpg", "retained.png"})
+        self.assertEqual(scan_folder(self.root / ".LiveViewer-work"), [])
+
+    def cache_directory(self, relative, *, product=PRODUCT, schema=SCHEMA_VERSION):
+        cache = self.root / relative
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / MANIFEST_NAME).write_text(json.dumps({
+            "product": product, "schema": schema, "library_id": str(uuid.uuid4()),
+            "thumbnail_format": 3,
+        }), encoding="utf-8")
+        (cache / "cached.jpg").touch()
+        return cache
+
+    def test_managed_library_caches_are_excluded_at_root_and_nested_levels(self):
+        self.file("actual.jpg")
+        self.file("actual.mov")
+        self.file("nested/second.png")
+        root_cache = self.cache_directory(CACHE_DIRECTORY)
+        self.cache_directory("nested/" + CACHE_DIRECTORY.upper())
+        items = scan_folder(self.root)
+        self.assertEqual({item.image_path.name for item in items}, {"actual.jpg", "second.png"})
+        self.assertEqual(len([item for item in items if item.is_live]), 1)
+        self.assertEqual(scan_folder(root_cache), [])
+
+    def test_same_named_ordinary_folder_and_foreign_marker_are_still_browsable(self):
+        self.file(CACHE_DIRECTORY + "/family.jpg")
+        self.cache_directory("foreign/" + CACHE_DIRECTORY, product="OtherPhotoApplication")
+        items = scan_folder(self.root)
+        self.assertEqual({item.image_path.name for item in items}, {"family.jpg", "cached.jpg"})
+
+    def test_recognized_future_cache_schema_is_not_browsed_as_photos(self):
+        self.file("actual.webp")
+        self.cache_directory(CACHE_DIRECTORY, schema=SCHEMA_VERSION + 100)
+        self.assertEqual([item.image_path.name for item in scan_folder(self.root)], ["actual.webp"])
+
+    def test_malformed_marker_does_not_hide_an_ordinary_same_named_photo_folder(self):
+        self.file(CACHE_DIRECTORY + "/actual.jpeg")
+        (self.root / CACHE_DIRECTORY / MANIFEST_NAME).write_text("not JSON", encoding="utf-8")
+        self.assertEqual([item.image_path.name for item in scan_folder(self.root)], ["actual.jpeg"])
+
+    def test_known_cache_stays_excluded_with_damaged_manifest_but_foreign_sentinel_does_not_hide_photos(self):
+        known = self.cache_directory(CACHE_DIRECTORY)
+        (known / OWNERSHIP_SENTINEL).write_bytes((PRODUCT + "\n").encode("ascii"))
+        (known / MANIFEST_NAME).write_text("damaged JSON", encoding="utf-8")
+        foreign = self.file("foreign/" + CACHE_DIRECTORY + "/actual.jpeg").parent
+        (foreign / OWNERSHIP_SENTINEL).write_bytes(b"OtherPhotoApplication\n")
+        self.assertEqual([item.image_path.name for item in scan_folder(self.root)], ["actual.jpeg"])
+        self.assertEqual(scan_folder(known), [])
 
     def test_nonrecursive_scan_does_not_enter_subdirectories(self):
         self.file("root.jpeg")

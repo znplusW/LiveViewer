@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from typing import Callable
 
+from .cache_locations import CACHE_DIRECTORY, is_managed_cache_directory
 from .models import MediaItem
 
 LIVE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".heic"})
@@ -30,6 +31,10 @@ def scan_folder(root: Path, cancel: Callable[[], bool] | None = None,
     root = Path(root).absolute()
     if not root.is_dir():
         raise NotADirectoryError(str(root))
+    if root.name.casefold() == ".liveviewer-work":
+        return []
+    if root.name.casefold() == CACHE_DIRECTORY.casefold() and is_managed_cache_directory(root):
+        return []
     items: list[MediaItem] = []
     count = 0
     for directory, directories, filenames in os.walk(root, followlinks=False):
@@ -38,7 +43,9 @@ def scan_folder(root: Path, cancel: Callable[[], bool] | None = None,
         parent = Path(directory)
         directories[:] = (sorted((name for name in directories
                                   if name.casefold() != ".liveviewer-work"
-                                  and not (parent / name).is_symlink()), key=natural_key)
+                                  and not (parent / name).is_symlink()
+                                  and not (name.casefold() == CACHE_DIRECTORY.casefold()
+                                           and is_managed_cache_directory(parent / name))), key=natural_key)
                           if recursive else [])
         images: dict[str, list[Path]] = {}
         videos: dict[str, list[Path]] = {}

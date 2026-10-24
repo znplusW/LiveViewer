@@ -1,5 +1,5 @@
 {
-  "application": "LiveViewer 0.6.0",
+  "application": "LiveViewer 0.7.0",
   "distributions": [
     {
       "name": "PySide6",

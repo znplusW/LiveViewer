@@ -17,7 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QImage, QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QScrollArea
 
 from .cache import CacheStore
 from .catalog_model import CatalogModel
@@ -536,6 +536,143 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
                 'touch_scrub_updates_before_release': shown_while_pressed}
 
 
+def _check_library_cache(fixtures: Path, report_dir: Path):
+    """Exercise real cache files without writing next to shipped test media."""
+    from PIL import Image
+    from . import cache as cache_module
+    from .cache_locations import CACHE_DIRECTORY, is_managed_cache_directory, open_cache
+    from .models import PairDecision
+
+    with tempfile.TemporaryDirectory(prefix='library-cache-', dir=report_dir) as temporary:
+        base = Path(temporary)
+        gallery = base / '照片图库'
+        nested = gallery / '2026'
+        nested.mkdir(parents=True)
+        shutil.copy2(fixtures / 'Live_H264.jpg', nested / 'Live.jpg')
+        shutil.copy2(fixtures / 'Live_HEVC.jpeg', nested / 'Live.jpeg')
+        shutil.copy2(fixtures / 'Live_H264.MOV', nested / 'Live.MOV')
+        Image.new('RGB', (64, 48), '#365579').save(gallery / 'ordinary.bmp')
+        user, program = base / 'user-data', base / 'program-data'
+        arguments = {'user_base': user, 'program_base': program, 'max_bytes': 8 * 1024 ** 2}
+        bindings = []
+        def opened(location, root=gallery, **kwargs):
+            binding = open_cache(location, root, **arguments, **kwargs)
+            bindings.append(binding)
+            return binding
+        def close_all():
+            for binding in reversed(bindings):
+                binding.close()
+            bindings.clear()
+        try:
+            local = opened('user')
+            portable = opened('program')
+            assert local.actual_path == user / 'cache'
+            assert portable.actual_path == program / 'cache'
+            assert not (gallery / CACHE_DIRECTORY).exists(), 'Default cache modes wrote into the photo folder'
+            original_items = scan_folder(gallery)
+            assert len(original_items) == 2
+            live = next(item for item in original_items if item.is_live)
+            still = nested / 'Live.jpg'
+            other = nested / 'Live.jpeg'
+            old_thumbnail = local.cache.get_thumbnail(still)
+            thumbnail_digest = _file_digest(old_thumbnail)
+            local.cache.set_override(live, still)
+            decision = PairDecision(still, (other,), False, 'Synthetic v0.7 cache check')
+            local.cache.put_decision(live, 'selftest-library-v1', decision)
+            selected = opened('library', legacy_sources=(local.cache,))
+            assert selected.location == 'library' and not selected.warning
+            assert selected.actual_path == gallery / CACHE_DIRECTORY
+            assert is_managed_cache_directory(selected.actual_path)
+            hidden = None
+            if sys.platform == 'win32':
+                import ctypes
+                kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                kernel.GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
+                kernel.GetFileAttributesW.restype = ctypes.c_uint32
+                attributes = kernel.GetFileAttributesW(str(selected.actual_path))
+                assert attributes != 0xffffffff and attributes & 0x2, 'Library cache is not hidden on Windows'
+                hidden = True
+            original_decoder = cache_module.thumbnail_bytes
+            def unexpected_decode(*_args, **_kwargs):
+                raise AssertionError('A valid existing thumbnail was decoded again')
+            cache_module.thumbnail_bytes = unexpected_decode
+            try:
+                migrated = selected.cache.get_thumbnail(still)
+                assert _file_digest(migrated) == thumbnail_digest
+                assert selected.cache.get_decision(live, 'selftest-library-v1') == decision
+                assert selected.cache.get_override(live) == still
+            finally:
+                cache_module.thumbnail_bytes = original_decoder
+            thumbnail_name = migrated.name
+            child = opened('library', nested)
+            child.cache.get_thumbnail(still)
+            assert len(scan_folder(gallery)) == 2, 'Cache thumbnails appeared as photos'
+            assert scan_folder(selected.actual_path) == []
+            child.close()
+            selected.close()
+            assert not local.cache._closed, 'Closing a migrated destination closed the caller-owned source'
+            close_all()
+
+            moved = base / '移动后的图库'
+            gallery.rename(moved)
+            moved_live = next(item for item in scan_folder(moved) if item.is_live)
+            moved_still, moved_other = moved / '2026/Live.jpg', moved / '2026/Live.jpeg'
+            moved_binding = opened('library', moved)
+            cache_module.thumbnail_bytes = unexpected_decode
+            try:
+                reused = moved_binding.cache.get_thumbnail(moved_still)
+                assert reused.name == thumbnail_name and _file_digest(reused) == thumbnail_digest
+                assert moved_binding.cache.get_override(moved_live) == moved_still
+                rebased = moved_binding.cache.get_decision(moved_live, 'selftest-library-v1')
+                assert rebased is not None and rebased.image_path == moved_still
+                assert rebased.extra_images == (moved_other,)
+            finally:
+                cache_module.thumbnail_bytes = original_decoder
+            close_all()
+
+            copied = base / '复制后的图库'
+            shutil.copytree(moved, copied)
+            first = opened('library', moved)
+            second = opened('library', copied)
+            copied_live = next(item for item in scan_folder(copied) if item.is_live)
+            second.cache.set_override(copied_live, copied / '2026/Live.jpeg')
+            assert first.cache.get_override(moved_live) == moved_still, 'Independent gallery copies shared mutable state'
+            busy = opened('library', moved)
+            assert busy.fallback and busy.warning
+            assert busy.actual_path != moved / CACHE_DIRECTORY
+            busy.cache.set_override(moved_live, moved_other)
+            busy.close()
+            close_all()
+            restored = opened('library', moved)
+            assert restored.cache.get_override(moved_live) == moved_other, 'Fallback manual choice was lost'
+            restored.cache.clear_thumbnails()
+            assert restored.cache.get_override(moved_live) == moved_other
+
+            plain = moved / 'ordinary.bmp'
+            before_thumbnail = restored.cache.get_thumbnail(plain)
+            before_bytes = _file_digest(before_thumbnail)
+            before_status = plain.stat()
+            Image.new('RGB', (64, 48), '#b34d3e').save(plain)
+            assert plain.stat().st_size == before_status.st_size
+            os.utime(plain, ns=(before_status.st_atime_ns, before_status.st_mtime_ns))
+            verified = restored.cache.verify_files([plain])
+            assert verified['checked'] == 1 and plain in verified['changed'] and not verified['cancelled']
+            assert _file_digest(restored.cache.get_thumbnail(plain)) != before_bytes
+            assert restored.cache.get_override(moved_live) == moved_other
+            cancelled = restored.cache.verify_files([plain], cancel=lambda: True)
+            assert cancelled['cancelled'] and cancelled['checked'] == 0
+            return {'three_locations': True, 'windows_hidden': hidden,
+                    'managed_cache_excluded_from_scan': True,
+                    'legacy_thumbnail_reused_without_decode': True,
+                    'moved_gallery_reuses_thumbnail_decision_and_choice': True,
+                    'copied_galleries_independent': True,
+                    'writer_lock_falls_back_locally': True,
+                    'fallback_and_clear_preserve_manual_choice': True,
+                    'same_metadata_content_change_detected': True, 'deep_verification_cancelled': True}
+        finally:
+            close_all()
+
+
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
     report_dir = report_dir.resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -580,6 +717,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             assert thumbnail.is_file()
         report['checks'].append({'check': 'index_and_thumbnails', 'status': 'passed',
                                  'items': len(catalog), 'live_items': len(lives)})
+        library_cache = _check_library_cache(fixtures, report_dir)
+        report['checks'].append({'check': 'cache_locations_portable_library_reuse_and_validation',
+                                 **library_cache, 'status': 'passed'})
         exact_frames = _check_exact_frame_reader(fixtures, report_dir)
         report['checks'].append({'check': 'exact_frame_index_export_h264_hevc_rotated_and_vfr',
                                  'videos': exact_frames, 'status': 'passed'})
@@ -878,6 +1018,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         assert not settings.autoplay.isChecked()
         assert window.preferences.horizontal_scroll_mode == 'navigate'
         assert settings.horizontal_scroll_mode.currentIndex() == 0
+        assert [settings.cache_location.itemData(index) for index in range(settings.cache_location.count())] == [
+            'user', 'program', 'library']
+        assert settings.cache_location.currentData() == window.preferences.cache_location
         settings.horizontal_scroll_mode.setCurrentIndex(1)
         assert settings.horizontal_scroll_mode.currentIndex() == 1
         settings.live_once_key.setKeySequence(QKeySequence('F9'))
@@ -885,6 +1028,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         settings.show()
         QCoreApplication.processEvents()
         settings.grab().save(str(report_dir / 'settings.png'))
+        settings.findChild(QScrollArea).ensureWidgetVisible(settings.portable)
+        QCoreApplication.processEvents()
+        settings.grab().save(str(report_dir / 'settings-cache.png'))
         settings.close()
         report['checks'].append({'check': 'main_window_scan_navigation_grid_and_settings', 'status': 'passed'})
         editor_result = _check_real_cover_editor(fixtures, report_dir, window)

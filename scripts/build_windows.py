@@ -11,8 +11,14 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "LiveViewer"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 USER_DOCUMENTS = ("使用说明.txt", "产品说明.txt")
+RUNTIME_DIRECTORIES = frozenset({"data", "liveviewer cache", ".liveviewer-work"})
+
+
+def is_runtime_path(relative: Path) -> bool:
+    return (any(part.casefold() in RUNTIME_DIRECTORIES for part in relative.parts)
+            or relative.name.casefold() == "portable.flag")
 
 
 def build() -> None:
@@ -45,15 +51,18 @@ def package() -> None:
         for path in sorted(folder.rglob("*")):
             # Repackaging an existing portable folder must not duplicate or
             # retain outdated top-level user documents.
-            if path.is_file() and path.relative_to(folder).as_posix() not in USER_DOCUMENTS:
-                archive.write(path, Path(portable.stem) / path.relative_to(folder))
+            relative = path.relative_to(folder)
+            if (path.is_file() and relative.as_posix() not in USER_DOCUMENTS
+                    and not is_runtime_path(relative)):
+                archive.write(path, Path(portable.stem) / relative)
         for document in documents:
             archive.write(document, Path(portable.stem) / document.name)
     excluded = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", "release", "reports", "work", "tools", "vendor"}
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(ROOT.rglob("*")):
             rel = path.relative_to(ROOT)
-            if path.is_file() and not any(part in excluded for part in rel.parts) and path.suffix not in {".pyc", ".pyo"}:
+            if (path.is_file() and not any(part in excluded for part in rel.parts)
+                    and not is_runtime_path(rel) and path.suffix not in {".pyc", ".pyo"}):
                 archive.write(path, Path(f"{NAME}-Source-v{VERSION}") / rel)
     sums = []
     for path in (portable, source):

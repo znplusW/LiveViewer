@@ -14,6 +14,7 @@ class _Job:
     priority: int
     order: int
     cancelled: bool = False
+    owner: object = None
 
 
 class JobQueue(QObject):
@@ -44,7 +45,7 @@ class JobQueue(QObject):
         with self._lock:
             return len(self._pending)
 
-    def submit(self, key, function, priority=5):
+    def submit(self, key, function, priority=5, *, owner=None):
         evicted = None
         with self._condition:
             if self._closed.is_set():
@@ -53,6 +54,7 @@ class JobQueue(QObject):
             if queued is not None:
                 queued.priority = min(queued.priority, priority)
                 queued.function = function
+                queued.owner = owner
                 self._condition.notify_all()
                 return True
             if any(job.key == key and not job.cancelled for job in self._running.values()):
@@ -63,7 +65,7 @@ class JobQueue(QObject):
                     return False
                 evicted = self._pending.pop(worst.key)
                 evicted.cancelled = True
-            self._pending[key] = _Job(key, function, priority, next(self._counter))
+            self._pending[key] = _Job(key, function, priority, next(self._counter), owner=owner)
             self._condition.notify_all()
         if evicted is not None:
             self.discarded.emit(evicted.key)
@@ -143,6 +145,22 @@ class JobQueue(QObject):
             for job in self._running.values():
                 job.cancelled = True
             self._condition.notify_all()
+
+    def wait_owner(self, owner, timeout: float | None = None) -> bool:
+        """Wait off the GUI thread until every operation using an owner settles.
+
+        Cancelled native reads remain running until their function returns, so
+        a cache/database cannot be closed merely because its result was dropped.
+        Unrelated owners and the reserved current-image lane keep progressing.
+        """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        with self._condition:
+            while any(job.owner is owner for job in (*self._pending.values(), *self._running.values())):
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._condition.wait(remaining)
+            return True
 
     def wait(self, timeout: float | None = None) -> bool:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
