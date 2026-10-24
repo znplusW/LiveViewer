@@ -30,7 +30,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-build.txt
       - name: Install pinned dependencies
-        run: python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
       - name: Prepare and verify media fixtures
         run: python scripts/generate_fixtures.py --output tests/fixtures --require-codecs
       - name: Test indexing, images, gestures, and playback state
