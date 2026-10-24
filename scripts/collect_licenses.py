@@ -21,8 +21,10 @@ UPSTREAM = {
     "Python": ("https://github.com/python/cpython", "PSF-2.0 and included notices"),
     "Qt-PySide6": ("https://download.qt.io/archive/qt/6.12/6.12.0/single/", "LGPL-3.0 and third-party notices"),
     "FFmpeg": ("https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz", "Qt build LGPL-2.1-or-later and included permissive third-party notices"),
+    "FFmpeg-frame-tools": ("https://github.com/FFmpeg/FFmpeg/tree/2a571b606854520cf89804d8030c8b328e621689", "BtbN pinned LGPL shared variant; source/build references and original license in FFmpeg-CLI/"),
     "libheif": ("https://github.com/strukturag/libheif", "LGPL-3.0-or-later"),
     "libde265": ("https://github.com/strukturag/libde265", "LGPL-3.0-or-later"),
+    "HEIC-encoder": ("dependencies/heic-encoder.json and native/heic_encoder/ in the corresponding source ZIP", "MIT helper, separate LGPL libheif and BSD Kvazaar shared libraries; exact pins/notices in HEIC/"),
     "MinGW-runtime": ("https://www.mingw-w64.org/", "GCC runtime exception, MIT and BSD; see upstream notices"),
 }
 TEXTS = {
@@ -102,18 +104,20 @@ def gather(destination: Path) -> dict:
                 if path.is_file():
                     native_files.append({"file": str(path.relative_to(base)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     manifest = {
-        "application": "LiveViewer 0.4.0", "distributions": distributions,
+        "application": "LiveViewer 0.5.0", "distributions": distributions,
         "runtime_versions": runtime, "native_binaries": sorted(native_files, key=lambda x: x["file"]),
         "upstream_sources": [{"component": n, "source": value[0], "license_note": value[1]} for n, value in UPSTREAM.items()],
         "original_upstream_texts": fetched, "upstream_fetch_failures": failures,
-        "redistribution_note": "Qt, FFmpeg, libheif and libde265 remain separate replaceable LGPL shared libraries in this onedir distribution. Keep original notices and corresponding source references with redistributed binaries. PyAV is a development-only fixture generator and is not shipped in the application.",
+        "external_tools": json.loads((destination / 'FFmpeg-CLI/PROVENANCE.json').read_text(encoding='utf-8')) if (destination / 'FFmpeg-CLI/PROVENANCE.json').is_file() else None,
+        "heic_encoder": json.loads((destination / 'HEIC/provenance.json').read_text(encoding='utf-8')) if (destination / 'HEIC/provenance.json').is_file() else None,
+        "redistribution_note": "Qt, FFmpeg, libheif and libde265 remain separate replaceable LGPL shared libraries in this onedir distribution. The frame-reading FFmpeg/ffprobe subprocess tools and their matching DLLs are isolated from Qt under tools/ffmpeg. Keep original notices and corresponding source references with redistributed binaries. PyAV is a development-only fixture generator and is not shipped in the application.",
     }
     (destination / "DEPENDENCIES.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     rows = ["# Third-party components", "", manifest["redistribution_note"], "", "Installed versions and original Python distribution licenses:", ""]
     rows.extend(f"- {item['name']} {item['version']}; original notices in python-distributions/{item['name']}/." for item in distributions)
     rows += ["", "Native library license families and corresponding upstream source:", ""]
     rows.extend(f"- {name}: {value[1]}. Source: {value[0]}" for name, value in UPSTREAM.items())
-    rows += ["", "Qt uses its own dynamically linked FFmpeg build. The development-only PyAV installation is excluded from the application.", "", "No runtime component needs to be installed globally. Do not delete or merge these replaceable shared libraries."]
+    rows += ["", "Qt uses its own dynamically linked FFmpeg build. Exact frame extraction uses separately pinned FFmpeg/ffprobe executables with their own replaceable libraries; FFmpeg-CLI/ records the checksum, upstream license, build configuration and source references. The development-only PyAV installation is excluded from the application.", "", "No runtime component needs to be installed globally. Do not delete or merge these replaceable shared libraries."]
     if failures:
         rows += ["", "Some additional upstream license fetches failed; see DEPENDENCIES.json. Installed wheel license files are preserved unchanged."]
     (destination / "THIRD_PARTY_NOTICES.md").write_text("\n".join(rows) + "\n", encoding="utf-8")

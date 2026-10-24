@@ -10,3 +10,6 @@ portable.flag
 .DS_Store
 .env
 .env.*
+tools/
+vendor/
+work/

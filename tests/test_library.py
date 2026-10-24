@@ -66,6 +66,14 @@ class LibraryTests(unittest.TestCase):
         self.file("test.jpg")
         self.assertEqual(scan_folder(self.root, cancel=lambda: True), [])
 
+    def test_excludes_editor_staging_directories_at_every_level(self):
+        self.file("visible.jpg")
+        self.file(".LiveViewer-work/staged.HEIC")
+        self.file("nested/.liveviewer-WORK/staged.jpg")
+        self.file(".normal-hidden/retained.png")
+        self.assertEqual({item.image_path.name for item in scan_folder(self.root)},
+                         {"visible.jpg", "retained.png"})
+
     def test_nonrecursive_scan_does_not_enter_subdirectories(self):
         self.file("root.jpeg")
         self.file("root.mov")

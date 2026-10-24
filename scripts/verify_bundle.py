@@ -45,6 +45,9 @@ def inspect(folder: Path) -> dict:
         "hevc_still_decoder": "libde265-*.dll",
         "windows_platform": "qwindows.dll",
         "third_party_manifest": "DEPENDENCIES.json",
+        "exact_frame_ffmpeg": "ffmpeg.exe",
+        "exact_frame_ffprobe": "ffprobe.exe",
+        "heic_encoder": "LiveViewer.HeicEncoder.exe",
     }
     found = {}
     for label, pattern in patterns.items():
@@ -56,6 +59,34 @@ def inspect(folder: Path) -> dict:
     qt_codec = [p for p in files if p.name.startswith("avcodec-") and p.parent.name == "PySide6"]
     if not qt_codec:
         errors.append("Qt's own FFmpeg DLLs were not retained under PySide6")
+    frame_folder = folder / '_internal/tools/ffmpeg'
+    provenance_path = frame_folder / 'PROVENANCE.json'
+    frame_tools = None
+    if not provenance_path.is_file():
+        errors.append('Pinned frame-tool provenance is absent from its isolated folder')
+    else:
+        frame_tools = json.loads(provenance_path.read_text(encoding='utf-8'))
+        if frame_tools.get('runtime_validation', {}).get('status') != 'passed':
+            errors.append('Pinned frame tools did not pass native LGPL/configuration validation')
+        for binary in frame_tools.get('binaries', []):
+            path = frame_folder / binary['file']
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != binary['sha256']:
+                errors.append(f'Private frame-tool binary differs from the pinned distribution: {binary["file"]}')
+    heic_folder = folder / '_internal/tools/heic'
+    for pattern in ('*heif*.dll', '*kvazaar*.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'):
+        if not list(heic_folder.glob(pattern)):
+            errors.append(f'Missing isolated HEIC shared library/runtime: {pattern}')
+    heic_provenance = folder / '_internal/licenses/HEIC/provenance.json'
+    if not heic_provenance.is_file():
+        errors.append('HEIC encoder provenance is absent')
+    else:
+        heic_record = json.loads(heic_provenance.read_text(encoding='utf-8'))
+        if not heic_record.get('shared_libraries') or heic_record.get('x265') or heic_record.get('gpl_encoder'):
+            errors.append('HEIC encoder must use replaceable shared libraries without a GPL encoder')
+        for name, digest in heic_record.get('binaries', {}).items():
+            path = heic_folder / name
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                errors.append(f'HEIC encoder binary differs from its source-build provenance: {name}')
     licenses = [p for p in files if "licenses" in p.parts and p.suffix.lower() in {".txt", ".md"}]
     if len(licenses) < 5:
         errors.append("Third-party license collection is incomplete")
@@ -64,6 +95,7 @@ def inspect(folder: Path) -> dict:
         "bundle": str(folder.resolve()), "files": len(files),
         "bytes": sum(p.stat().st_size for p in files), "required_components": found,
         "executable_sha256": hashlib.sha256(exe.read_bytes()).hexdigest() if exe.is_file() else None,
+        "frame_tool_archive_sha256": frame_tools.get('sha256') if frame_tools else None,
         "errors": errors,
     }
 

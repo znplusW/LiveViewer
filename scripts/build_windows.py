@@ -11,13 +11,17 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "LiveViewer"
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 USER_DOCUMENTS = ("使用说明.txt", "产品说明.txt")
 
 
 def build() -> None:
     if sys.platform != "win32":
         raise SystemExit("Windows artifacts must be built on Windows x64.")
+    if not (ROOT / 'tools/ffmpeg/ffmpeg.exe').is_file():
+        subprocess.run([sys.executable, str(ROOT / 'scripts/fetch_frame_tools.py')], cwd=ROOT, check=True)
+    if not (ROOT / 'vendor/heic/LiveViewer.HeicEncoder.exe').is_file():
+        subprocess.run([sys.executable, str(ROOT / 'scripts/build_heic_encoder.py')], cwd=ROOT, check=True)
     subprocess.run([sys.executable, str(ROOT / "scripts/collect_licenses.py")], cwd=ROOT, check=True)
     subprocess.run(
         [sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", str(ROOT / "LiveViewer.spec")],
@@ -45,7 +49,7 @@ def package() -> None:
                 archive.write(path, Path(portable.stem) / path.relative_to(folder))
         for document in documents:
             archive.write(document, Path(portable.stem) / document.name)
-    excluded = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", "release", "reports", "work"}
+    excluded = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", "build", "dist", "release", "reports", "work", "tools", "vendor"}
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for path in sorted(ROOT.rglob("*")):
             rel = path.relative_to(ROOT)

@@ -36,7 +36,9 @@ def scan_folder(root: Path, cancel: Callable[[], bool] | None = None,
         if cancel and cancel():
             break
         parent = Path(directory)
-        directories[:] = (sorted((name for name in directories if not (parent / name).is_symlink()), key=natural_key)
+        directories[:] = (sorted((name for name in directories
+                                  if name.casefold() != ".liveviewer-work"
+                                  and not (parent / name).is_symlink()), key=natural_key)
                           if recursive else [])
         images: dict[str, list[Path]] = {}
         videos: dict[str, list[Path]] = {}

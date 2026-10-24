@@ -10,6 +10,7 @@
     "Live_HEVC.jpeg",
     "Live_HEVC.jpg",
     "Portrait_HEVC.jpg",
+    "VFR_PAIR.jpg",
     "ordinary.avif",
     "ordinary.bmp",
     "ordinary.gif",
@@ -18,6 +19,19 @@
     "ordinary.webp"
   ],
   "videos": [
+    {
+      "path": "VFR_PAIR.MOV",
+      "codec": "h264",
+      "frame_times_ms": [
+        0,
+        40,
+        160,
+        200,
+        440,
+        480,
+        760
+      ]
+    },
     {
       "path": "Live_H264.MOV",
       "codec": "h264"

@@ -1,0 +1,63 @@
+{
+  "provider": "BtbN/FFmpeg-Builds (linked by ffmpeg.org/download.html)",
+  "release_tag": "autobuild-2026-09-30-13-08",
+  "asset": "ffmpeg-n9.0.2-17-g2a571b6068-win64-lgpl-shared-9.0.zip",
+  "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-win64-lgpl-shared-9.0.zip",
+  "sha256": "7157177b8a6cb2174c1650ba8c71b363f2c78cba5330f88c4c02cf5b2b880646",
+  "bytes": 76972461,
+  "version": "n9.0.2-17-g2a571b6068",
+  "ffmpeg_source": "https://github.com/FFmpeg/FFmpeg/tree/2a571b606854520cf89804d8030c8b328e621689",
+  "build_recipe_and_dependency_sources": "https://github.com/BtbN/FFmpeg-Builds/tree/6c9aec5fc9a72ec3abedd1fa84db141fa18cf52b",
+  "license": "LGPL shared variant; retain upstream LICENSE.txt, build configuration and corresponding source references",
+  "runtime_validation": {
+    "status": "staged_only",
+    "reason": "Runtime inspection requires Windows x64"
+  },
+  "binaries": [
+    {
+      "file": "avcodec-63.dll",
+      "bytes": 91182080,
+      "sha256": "525060f60b3d0171bb9e0ea4b2074a2ff07f5d96b2483a82d9e08fe2ece58e9c"
+    },
+    {
+      "file": "avdevice-63.dll",
+      "bytes": 4948480,
+      "sha256": "e9e4306ac36778f2faceb1b3ee42152e9b16f10227d2315ae42d282d77c9105c"
+    },
+    {
+      "file": "avfilter-12.dll",
+      "bytes": 31195648,
+      "sha256": "df6f94c43a04be9f3cedcf94b9c5085ae4186339b6828271d42055723eccc060"
+    },
+    {
+      "file": "avformat-63.dll",
+      "bytes": 22764032,
+      "sha256": "7275053ebb1dfa708d45d8544ad94bf664e0cb534cd0f2ed979fdf024bc190b3"
+    },
+    {
+      "file": "avutil-61.dll",
+      "bytes": 3016704,
+      "sha256": "a34c7ef846a2d353c1a6a266b22a001ccd42f6654ab92631a7196e961bdedffd"
+    },
+    {
+      "file": "ffmpeg.exe",
+      "bytes": 540160,
+      "sha256": "24fdada9908f7a231e9dfcc9f462273d3ddb698f5071f04c61496819ce3cfef0"
+    },
+    {
+      "file": "ffprobe.exe",
+      "bytes": 229888,
+      "sha256": "a77003c4628c7a414718623156280be47c1aaa2fa85c177d3d1d325d3d06358f"
+    },
+    {
+      "file": "swresample-7.dll",
+      "bytes": 734720,
+      "sha256": "1fbcea031ada11a15e609e209e1cd71a9c632f39bc4794190137b67351db677f"
+    },
+    {
+      "file": "swscale-10.dll",
+      "bytes": 2332160,
+      "sha256": "9ff8d80bc228f0e557553fd5cfcefc67b682098e9bd6ab08dc7a7d2dc8ad4699"
+    }
+  ]
+}

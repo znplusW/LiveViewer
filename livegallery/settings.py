@@ -25,6 +25,7 @@ def data_directory() -> Path:
 @dataclass
 class Preferences:
     loop: bool = False
+    autoplay: bool = False
     muted: bool = True
     preserve_zoom: bool = True
     hold_ms: int = 300
@@ -76,6 +77,8 @@ class Preferences:
             result.normalize_shortcuts()
             if not isinstance(result.filmstrip_visible, bool):
                 result.filmstrip_visible = True
+            if not isinstance(result.autoplay, bool):
+                result.autoplay = False
             if result.horizontal_scroll_mode not in ('navigate', 'pan'):
                 result.horizontal_scroll_mode = 'navigate'
             return result

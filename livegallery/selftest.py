@@ -4,10 +4,13 @@ from __future__ import annotations
 import json
 import os
 import platform
+import hashlib
+import shutil
 import struct
 import sys
 import time
 import traceback
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, Qt
@@ -23,6 +26,7 @@ from .matching import close_video_probe, resolve_pair, _video_samples
 from .models import MediaItem
 from .touch_grid import OverviewGrid
 from .viewer import ViewerCanvas
+from .frame_reader import FrameReader
 
 
 def _wait(predicate, seconds=12):
@@ -281,6 +285,123 @@ def _check_windows_associated_apps(fixtures: Path):
             'association_filter': ASSOC_FILTER_RECOMMENDED}
 
 
+def _check_exact_frame_reader(fixtures: Path, report_dir: Path):
+    results = []
+    for filename in ('Live_H264.MOV', 'Live_HEVC.MOV', 'Portrait_HEVC.MOV', 'VFR_PAIR.MOV'):
+        with FrameReader(fixtures / filename) as reader:
+            metadata = reader.metadata
+            expected_count = 7 if filename == 'VFR_PAIR.MOV' else 21
+            assert reader.frame_count == expected_count, f'Incorrect frame count for {filename}'
+            assert not metadata.timestamps_estimated
+            preview = reader.preview(0, edge=256)
+            assert max(preview.size) <= 256
+            first = reader.export(0)
+            assert first.size == (metadata.width, metadata.height)
+            if filename == 'Portrait_HEVC.MOV':
+                assert first.size == (420, 640)
+                rgba = first.convert('RGBA')
+                image = QImage(rgba.tobytes(), rgba.width, rgba.height, QImage.Format.Format_RGBA8888).copy()
+                _assert_portrait_corners(image)
+            elif filename == 'VFR_PAIR.MOV':
+                from PIL import ImageColor
+                expected_times = (0, 40, 160, 200, 440, 480, 760)
+                assert [round(frame.pts_seconds * 1000) for frame in metadata.frames] == list(expected_times)
+                colors = ('#d43d35', '#42bd51', '#3568d4', '#e2d63c', '#cf42c2', '#3fc2d1', '#df8d32')
+                for index, color in enumerate(colors):
+                    selected = reader.export(index)
+                    actual, expected = selected.getpixel((160, 120)), ImageColor.getrgb(color)
+                    assert max(abs(a - b) for a, b in zip(actual, expected)) < 8, f'VFR frame {index} is wrong'
+                assert reader.nearest_index(140) == 2
+            else:
+                for index, x in ((0, 140), (9, 230), (20, 340)):
+                    selected = reader.export(index)
+                    r, g, b = selected.getpixel((x, 180))
+                    assert r > 180 and g > 120 and b < 170, f'{filename} frame {index} is wrong'
+                assert first.getpixel((340, 180))[0] < 150
+            first.save(report_dir / f'exact-frame-{Path(filename).stem}.png')
+            results.append({'file': filename, 'frame_count': reader.frame_count,
+                            'display_size': [metadata.width, metadata.height],
+                            'pts_milliseconds': [round(frame.pts_seconds * 1000) for frame in metadata.frames],
+                            'status': 'passed'})
+    return results
+
+
+def _file_digest(path: Path):
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
+    from .cover_save import CoverSource, save_cover
+    with tempfile.TemporaryDirectory(prefix='heic-cover-', dir=report_dir) as temporary:
+        folder = Path(temporary)
+        still, video = folder / 'Real_HEIC.heic', folder / 'Real_HEIC.MOV'
+        shutil.copy2(fixtures / 'Live_H264.heic', still)
+        shutil.copy2(fixtures / 'Live_H264.MOV', video)
+        item = MediaItem('heic-roundtrip', still, video)
+        before_image, before_video = _file_digest(still), _file_digest(video)
+        with FrameReader(video) as reader:
+            selected = reader.export(0)
+        copied = save_cover(CoverSource.capture(item), selected, 'copy')
+        assert copied.image_path.suffix == '.heic' and copied.image_path.stem == copied.video_path.stem
+        assert _file_digest(still) == before_image and _file_digest(video) == before_video
+        assert _file_digest(copied.video_path) == before_video
+        replaced = save_cover(CoverSource.capture(item), selected, 'overwrite')
+        assert replaced.backup_path is None and _file_digest(video) == before_video
+        assert _file_digest(still) != before_image
+        for path in (copied.image_path, replaced.image_path):
+            header = path.read_bytes()[:128]
+            assert header[4:8] == b'ftyp' and any(brand in header[8:] for brand in (b'heic', b'heix', b'hevc'))
+            decoded = load_image(path, None)
+            assert decoded.size == selected.size, 'HEIC roundtrip changed full-resolution dimensions'
+            decoded.load()
+        return {'format': 'HEVC HEIC', 'size': list(selected.size),
+                'copy_and_overwrite': True, 'video_bytes_unchanged': True}
+
+
+def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
+    from .cover_editor import EditorDialog
+    with tempfile.TemporaryDirectory(prefix='editor-vfr-', dir=report_dir) as temporary:
+        folder = Path(temporary)
+        still, video = folder / 'Editor_VFR.jpg', folder / 'Editor_VFR.MOV'
+        shutil.copy2(fixtures / 'VFR_PAIR.jpg', still)
+        shutil.copy2(fixtures / 'VFR_PAIR.MOV', video)
+        item = MediaItem('vfr-editor', still, video)
+        before_image, before_video = _file_digest(still), _file_digest(video)
+        dialog = EditorDialog(item, parent)
+        dialog.show()
+        try:
+            _wait(lambda: dialog.metadata is not None and dialog.save_button.isEnabled(), 20)
+            assert dialog.copy_choice.isChecked()
+            dialog.timeline.setValue(4)
+            _wait(lambda: dialog.selected_frame_index == 4 and dialog.save_button.isEnabled(), 20)
+            assert abs(dialog.metadata.frames[4].pts_seconds - .44) < .000001
+            dialog.grab().save(str(report_dir / 'cover-editor.png'))
+            dialog._save()
+            _wait(lambda: dialog.saved_result is not None, 25)
+            saved = dialog.saved_result
+            assert saved.created_copy and saved.image_path.stem == saved.video_path.stem
+            assert _file_digest(still) == before_image and _file_digest(video) == before_video
+            assert _file_digest(saved.video_path) == before_video
+            decoded = load_image(saved.image_path, None)
+            assert decoded.size == (320, 240)
+            expected = (207, 66, 194)  # Exact VFR frame 4, not a millisecond/fps approximation.
+            assert max(abs(a - b) for a, b in zip(decoded.getpixel((160, 120)), expected)) < 10
+            _wait(lambda: not dialog._worker.thread.is_alive(), 5)
+        finally:
+            dialog.close()
+        before_cancel = {path.name: _file_digest(path) for path in folder.iterdir() if path.is_file()}
+        cancelled = EditorDialog(item, parent)
+        cancelled.show()
+        _wait(lambda: cancelled.metadata is not None, 20)
+        cancelled.reject()
+        _wait(lambda: not cancelled._worker.thread.is_alive(), 5)
+        after_cancel = {path.name: _file_digest(path) for path in folder.iterdir() if path.is_file()}
+        assert before_cancel == after_cancel and cancelled.saved_result is None
+        return {'vfr_index': 4, 'pts_milliseconds': 440, 'full_size': [320, 240],
+                'copy_preserves_originals_and_video_bytes': True, 'cancel_no_changes': True}
+
+
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
     report_dir = report_dir.resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -325,6 +446,12 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             assert thumbnail.is_file()
         report['checks'].append({'check': 'index_and_thumbnails', 'status': 'passed',
                                  'items': len(catalog), 'live_items': len(lives)})
+        exact_frames = _check_exact_frame_reader(fixtures, report_dir)
+        report['checks'].append({'check': 'exact_frame_index_export_h264_hevc_rotated_and_vfr',
+                                 'videos': exact_frames, 'status': 'passed'})
+        heic_roundtrip = _check_heic_cover_roundtrip(fixtures, report_dir)
+        report['checks'].append({'check': 'genuine_heic_cover_copy_overwrite_full_decode',
+                                 **heic_roundtrip, 'status': 'passed'})
 
         for item in lives:
             decision = resolve_pair(item, cache)
@@ -500,6 +627,16 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
 
         live_row = next(i for i, value in enumerate(window.model.items)
                         if value.is_live and value.image_path.stem == 'JPEG_PAIR')
+        window.activateWindow()
+        window.viewer.setFocus()
+        window.preferences.autoplay = True
+        window.viewer.set_options(loop=True)
+        window._select_row(live_row)
+        _wait(lambda: window.viewer._video.isVisible(), 18)
+        _wait(lambda: not window.viewer._video.isVisible(), 8)
+        assert window.viewer._photo.isVisible()
+        window.preferences.autoplay = False
+        report['checks'].append({'check': 'selection_autoplay_once_independent_of_hold_loop', 'status': 'passed'})
         window._select_row(live_row)
         _wait(lambda: window._displayed_item is not None
               and window._displayed_item.image_path.stem == 'JPEG_PAIR', 18)
@@ -593,6 +730,7 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         assert not settings.live_key.keySequence().isEmpty()
         assert not settings.live_once_key.keySequence().isEmpty()
         assert not settings.filmstrip_key.keySequence().isEmpty()
+        assert not settings.autoplay.isChecked()
         assert window.preferences.horizontal_scroll_mode == 'navigate'
         assert settings.horizontal_scroll_mode.currentIndex() == 0
         settings.horizontal_scroll_mode.setCurrentIndex(1)
@@ -604,6 +742,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         settings.grab().save(str(report_dir / 'settings.png'))
         settings.close()
         report['checks'].append({'check': 'main_window_scan_navigation_grid_and_settings', 'status': 'passed'})
+        editor_result = _check_real_cover_editor(fixtures, report_dir, window)
+        report['checks'].append({'check': 'real_vfr_cover_editor_copy_and_cancel',
+                                 **editor_result, 'status': 'passed'})
         report['status'] = 'passed'
     except Exception as error:
         report['error'] = f'{type(error).__name__}: {error}'

@@ -21,11 +21,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget, QWidgetAction,
 )
 
-from .cache import CacheStore
+from .cache import CacheStore, file_version
 from .catalog_model import CatalogModel, ThumbnailDelegate
 from .imaging import load_image
 from .jobs import JobQueue
-from .library import natural_key, scan_folder
+from .library import _identifier, natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
 from .settings import Preferences, app_directory, data_directory
@@ -225,6 +225,13 @@ class SettingsDialog(QDialog):
         self.mode.addItems(["播放一次，结束后恢复照片", "持续按住时循环播放"])
         self.mode.setCurrentIndex(1 if preferences.loop else 0)
         form.addRow("播放模式", self.mode)
+        self.autoplay = QCheckBox("切换到 Live Photo 时自动播放一次")
+        self.autoplay.setChecked(preferences.autoplay)
+        form.addRow("自动播放", self.autoplay)
+        autoplay_help = QLabel("下次切换照片起生效；播完恢复静态照片，不受按住时循环设置影响。总览或对话框中不会自动播放。")
+        autoplay_help.setWordWrap(True)
+        autoplay_help.setObjectName("muted")
+        form.addRow(autoplay_help)
         self.muted = QCheckBox("默认静音")
         self.muted.setChecked(preferences.muted)
         form.addRow("声音", self.muted)
@@ -346,6 +353,7 @@ class MainWindow(QMainWindow):
         self.cache = CacheStore(self._data_base / "cache", self.preferences.cache_mb * 1024 ** 2)
         self.jobs = JobQueue(self)
         self.jobs.finished.connect(self._job_finished)
+        self.jobs.discarded.connect(self._job_discarded)
         self._scan_signals = _ScanSignals(self)
         self._scan_signals.progress.connect(self._scan_progress)
         self._scan_signals.complete.connect(self._scan_complete)
@@ -372,6 +380,12 @@ class MainWindow(QMainWindow):
         self._current_full = False
         self._full_requested = False
         self._deferred_upgrade = None
+        self._deferred_candidate = None
+        self._shown_image_path = None
+        self._selection_generation = 0
+        self._autoplay_armed = False
+        self._autoplay_consumed = -1
+        self._navigation_target_id = None
         self._file_times: dict[str, float] = {}
         self._grid_mode = False
         self._is_playing = False
@@ -406,9 +420,13 @@ class MainWindow(QMainWindow):
         self._analysis_timer = QTimer(self)
         self._analysis_timer.setSingleShot(True)
         self._analysis_timer.timeout.connect(self._schedule_background_pair)
+        self._navigation_timer = QTimer(self)
+        self._navigation_timer.setSingleShot(True)
+        self._navigation_timer.setInterval(45)
+        self._navigation_timer.timeout.connect(self._flush_navigation)
         QApplication.instance().installEventFilter(self)
         self._update_hint()
-        self.statusBar().showMessage("只读浏览 · JPG / JPEG / HEIC + MOV · 支持触屏与普通图片")
+        self.statusBar().showMessage("本地浏览 · JPG / JPEG / HEIC + MOV · 支持触屏与普通图片")
 
     @staticmethod
     def _button(text, callback=None, *, checkable=False, name=None):
@@ -506,7 +524,7 @@ class MainWindow(QMainWindow):
         self.tree.setIndentation(16)
         self.tree.itemClicked.connect(self._directory_selected)
         side.addWidget(self.tree)
-        side_note = QLabel("图片与视频保持原样\n分析和缓存只存放在本机")
+        side_note = QLabel("仅在保存头图时更改文件\n分析和缓存只存放在本机")
         side_note.setObjectName("muted")
         side_note.setStyleSheet("font-size:11px;padding:5px")
         side.addWidget(side_note)
@@ -652,6 +670,8 @@ class MainWindow(QMainWindow):
         self._update_navigation()
 
     def choose_folder(self):
+        self._navigation_timer.stop()
+        self._navigation_target_id = None
         self.viewer.stop_live()
         selected = QFileDialog.getExistingDirectory(self, "选择照片文件夹", str(self.folder or Path.home()))
         if selected:
@@ -666,6 +686,7 @@ class MainWindow(QMainWindow):
         generation = self._scan_generation
         self._epoch += 1
         self._request_context.clear()
+        self.jobs.cancel_where(lambda _key: True)
         self.folder = folder
         self._directory_filter = None
         self._primary_items = []
@@ -677,6 +698,10 @@ class MainWindow(QMainWindow):
         self._displayed_item = None
         self._awaiting_pair = None
         self._deferred_upgrade = None
+        self._deferred_candidate = None
+        self._shown_image_path = None
+        self._navigation_target_id = None
+        self._navigation_timer.stop()
         self._previews.clear()
         self._preview_bytes = 0
         self.viewer.clear()
@@ -851,10 +876,17 @@ class MainWindow(QMainWindow):
             return result
         self._submit("times", str(epoch), times, 5, (epoch,))
 
-    def _select_row(self, row):
+    def _select_row(self, row, *, allow_autoplay=True):
         if not 0 <= row < len(self.model.items):
             return
         item = self.model.items[row]
+        self._navigation_timer.stop()
+        self._navigation_target_id = None
+        self._selection_generation += 1
+        self._autoplay_armed = self.preferences.autoplay and allow_autoplay
+        self._deferred_candidate = None
+        self._shown_image_path = None
+        self._prune_media_jobs(item, row)
         self.viewer.clear()
         self._keyboard_live_pressed = False
         self._current_id = item.id
@@ -870,13 +902,10 @@ class MainWindow(QMainWindow):
         self.live_badge.setText("◉ LIVE")
         self.preferences.last_image = str(item.image_path)
         self.empty_open.hide()
+        self._awaiting_pair = item.id if item.pending else None
+        self._load_current(item)
         if item.pending:
-            self._awaiting_pair = item.id
-            self._set_empty("正在选择静态照片", "比较同名候选图片与视频画面，结果会保存在本机。\n你可以继续切换其他照片。", "◌")
-            self._request_pair(item, 0)
-        else:
-            self._awaiting_pair = None
-            self._load_current(item)
+            self._request_pair(item, 3)
         self._update_navigation()
         self._update_hint()
         self._prefetch_neighbors(row)
@@ -898,17 +927,30 @@ class MainWindow(QMainWindow):
             self._previews.move_to_end(str(item.image_path))
             self._display_image(item, cached[0], cached[1])
             return
-        self._set_empty("正在载入照片", item.image_path.name + "\n大图按需加载，其他照片仍可继续浏览。", "◌")
-        self._submit("image", str(item.image_path), lambda: _decode(item.image_path, 4800), 0,
+        thumbnail = self.model.thumbnails.get(str(item.image_path))
+        if self._shown_image_path is None and thumbnail is not None and not thumbnail.isNull():
+            self.viewer.set_photo(thumbnail.toImage(), item.video_path)
+            self._shown_image_path = item.image_path
+            self.content.setCurrentWidget(self.grid if self._grid_mode else self.viewer)
+        elif self._shown_image_path is None:
+            self._set_empty("正在载入照片", item.image_path.name + "\n优先载入当前照片，其他照片不会阻塞浏览。", "◌")
+        self._submit("image", str(item.image_path), lambda: _decode(item.image_path, 2000), 0,
                      (self._epoch, item.id, item.image_path))
 
     def _display_image(self, item, image, original_size):
         if self._closed or item.id != self._current_id:
             return
+        if self._shown_image_path is not None and (self._is_playing or self.viewer._play_requested):
+            self._deferred_candidate = (self._selection_generation, item, image, original_size)
+            return
         self._original_size = original_size
-        self._current_full = max(original_size) <= 4800
+        self._current_full = max(original_size) <= max(image.width(), image.height())
         self._displayed_item = item
-        self.viewer.set_photo(image, item.video_path)
+        if self._shown_image_path is not None:
+            self.viewer.replace_photo(image)
+        else:
+            self.viewer.set_photo(image, item.video_path)
+        self._shown_image_path = item.image_path
         self.content.setCurrentWidget(self.grid if self._grid_mode else self.viewer)
         self.filename_label.setText(item.image_path.name)
         self.live_badge.setVisible(item.is_live)
@@ -918,6 +960,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(item.note or f"{original_size[0]:,} × {original_size[1]:,} · {item.image_path.parent}")
         self._update_hint()
         self.image_ready.emit()
+        self._schedule_autoplay()
 
     def _cache_preview(self, path, image, size):
         key = str(path)
@@ -926,7 +969,7 @@ class MainWindow(QMainWindow):
             self._preview_bytes -= previous[0].sizeInBytes()
         self._previews[key] = (image, size)
         self._preview_bytes += image.sizeInBytes()
-        while len(self._previews) > 3 or self._preview_bytes > 200 * 1024 ** 2:
+        while len(self._previews) > 8 or self._preview_bytes > 96 * 1024 ** 2:
             if len(self._previews) <= 1:
                 break
             _, (old_image, _) = self._previews.popitem(last=False)
@@ -941,7 +984,7 @@ class MainWindow(QMainWindow):
 
     def _request_pair(self, item, priority):
         revision = self._pair_revisions.get(item.id, 0)
-        self._submit("pair", f"{item.id}:{revision}", lambda: resolve_pair(item, self.cache), priority,
+        self._submit("pair", f"{item.id}:{revision}", lambda: resolve_pair(item, self.cache), max(3, priority),
                      (self._epoch, item, revision))
 
     def _schedule_background_pair(self):
@@ -972,23 +1015,70 @@ class MainWindow(QMainWindow):
             if not 0 <= neighbor < len(self.model.items):
                 continue
             item = self.model.items[neighbor]
-            if item.pending:
-                self._request_pair(item, 4)
-            elif str(item.image_path) not in self._previews:
-                self._submit("image", str(item.image_path), lambda path=item.image_path: _decode(path, 4800), 5,
+            if str(item.image_path) not in self._previews:
+                self._submit("image", str(item.image_path), lambda path=item.image_path: _decode(path, 2000), 5,
                              (self._epoch, item.id, item.image_path))
 
     def _submit(self, kind, identity, function, priority, context):
         key = f"{kind}:{self._epoch}:{identity}"
-        if key not in self._request_context:
-            self._request_context[key] = (kind, *context)
-            epoch = self._epoch
-            def guarded():
-                if self._closed or epoch != self._epoch:
-                    return None
-                return function()
-            if not self.jobs.submit(key, guarded, priority):
-                self._request_context.pop(key, None)
+        existing = key in self._request_context
+        self._request_context[key] = (kind, *context)
+        epoch = self._epoch
+        def guarded():
+            if self._closed or epoch != self._epoch or key not in self._request_context:
+                return None
+            return function()
+        if not self.jobs.submit(key, guarded, priority) and not existing:
+            self._job_discarded(key)
+
+    def _job_discarded(self, key):
+        context = self._request_context.pop(key, None)
+        if context and context[0] == "thumb":
+            self.model.pending.discard(str(context[2]))
+        if context and context[0] == "pair" and self._background_pair_id == context[2].id:
+            self._background_pair_id = None
+
+    def _prune_media_jobs(self, item, row):
+        neighbors = self.model.items[max(0, row - 1):row + 2]
+        keep_paths = {str(candidate.image_path) for candidate in neighbors}
+        current_path = str(item.image_path)
+        def obsolete(key):
+            context = self._request_context.get(key)
+            if context is None:
+                return False
+            kind = context[0]
+            if kind == "image":
+                return str(context[3]) != current_path
+            if kind == "full":
+                return str(context[3]) != current_path
+            if kind == "thumb":
+                return str(context[2]) not in keep_paths
+            if kind == "pair":
+                return context[2].id != item.id and context[2].id != self._background_pair_id
+            return False
+        obsolete_keys = [key for key in self._request_context if obsolete(key)]
+        self.jobs.cancel_where(obsolete)
+        for key in obsolete_keys:
+            self._job_discarded(key)
+
+    def _schedule_autoplay(self):
+        generation = self._selection_generation
+        if not self._autoplay_armed or self._autoplay_consumed == generation:
+            return
+        self._autoplay_consumed = generation
+        item_id = self._current_id
+        def play():
+            item = self._displayed_item
+            if (self._closed or generation != self._selection_generation or item is None
+                    or item.id != item_id or not item.is_live or not self._autoplay_armed
+                    or not self.preferences.autoplay or self.viewer._play_requested
+                    or self._grid_mode or not self.isVisible() or self.isMinimized() or not self.viewer.isVisible()
+                    or self.content.currentWidget() is not self.viewer
+                    or QApplication.activeModalWidget() is not None
+                    or QApplication.activePopupWidget() is not None):
+                return
+            self.viewer.play_live_once()
+        QTimer.singleShot(0, play)
 
     def _job_finished(self, key, result, error):
         context = self._request_context.pop(key, None)
@@ -1024,6 +1114,8 @@ class MainWindow(QMainWindow):
                 if applies_to_current:
                     self._set_empty("无法读取这张图片", path.name + "\n请检查文件格式、文件完整性或硬盘连接。", "!")
                     self._show_message(str(error))
+                return
+            if result is None:
                 return
             image, size = result
             self._cache_preview(path, image, size)
@@ -1065,11 +1157,17 @@ class MainWindow(QMainWindow):
             self._extras[original.id] = extras
             self._rebuild_items()
             self._apply_filters(select_first=False)
-            if current_before == original.id and self._awaiting_pair == original.id:
+            if current_before == original.id and self._current_id == original.id:
                 self._awaiting_pair = None
-                self._load_current(selected)
-            elif current_before == original.id and self._displayed_item:
-                self.statusBar().showMessage("自动择图结果已保存，下次进入该项时应用。")
+                if self._shown_image_path == selected.image_path:
+                    self._displayed_item = selected
+                    self.live_badge.setText("! LIVE" if selected.uncertain else "◉ LIVE")
+                    self._update_live_overlay()
+                else:
+                    self.jobs.cancel_where(lambda key: key.startswith(f"full:{self._epoch}:"))
+                    self._full_requested = False
+                    self._deferred_upgrade = None
+                    self._load_current(selected)
             if self.preferences.sort_by == "time" and extras:
                 self._request_times()
 
@@ -1083,6 +1181,24 @@ class MainWindow(QMainWindow):
         target = max(0, min(len(self.model.items) - 1, row + step))
         if target != row:
             self._select_row(target)
+
+    def _queue_navigation(self, step):
+        if not self.model.items:
+            return
+        reference = self._navigation_target_id or self._current_id
+        row = next((row for row, item in enumerate(self.model.items) if item.id == reference), 0)
+        target = max(0, min(len(self.model.items) - 1, row + step))
+        self._navigation_target_id = self.model.items[target].id
+        self.viewer.stop_live()
+        if not self._navigation_timer.isActive():
+            self._navigation_timer.start()
+
+    def _flush_navigation(self):
+        target, self._navigation_target_id = self._navigation_target_id, None
+        self._navigation_timer.stop()
+        row = next((row for row, item in enumerate(self.model.items) if item.id == target), None)
+        if row is not None and target != self._current_id:
+            self._select_row(row)
 
     def _update_navigation(self):
         row = next((row for row, item in enumerate(self.model.items) if item.id == self._current_id), -1)
@@ -1122,6 +1238,17 @@ class MainWindow(QMainWindow):
             self.live_badge.setText("! LIVE" if self._displayed_item.uncertain else "◉ LIVE")
         if not playing:
             self._apply_deferred_upgrade()
+            self._apply_candidate_upgrade()
+
+    def _apply_candidate_upgrade(self):
+        if self._deferred_candidate is None or self._is_playing or self.viewer._play_requested:
+            return
+        generation, item, image, original_size = self._deferred_candidate
+        self._deferred_candidate = None
+        current = self._item_by_id(self._current_id)
+        if (generation == self._selection_generation and current is not None
+                and current.id == item.id and current.image_path == item.image_path):
+            self._display_image(item, image, original_size)
 
     def _set_empty(self, title, body, icon="◉"):
         self.empty_title.setText(title)
@@ -1252,12 +1379,15 @@ class MainWindow(QMainWindow):
         self.hint_label.setText(f"按住鼠标／触屏／{key} 播放 · 松开停止 · 按 {once} 播完一次 · 左右滑动切图 · 双指缩放")
 
     def open_settings(self):
+        self._navigation_timer.stop()
+        self._navigation_target_id = None
         self.viewer.stop_live()
         dialog = SettingsDialog(self.preferences, self)
         was_portable = (app_directory() / "portable.flag").exists()
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.preferences.loop = dialog.mode.currentIndex() == 1
+        self.preferences.autoplay = dialog.autoplay.isChecked()
         self.preferences.muted = dialog.muted.isChecked()
         self.preferences.preserve_zoom = dialog.zoom_mode.currentIndex() == 0
         self.preferences.horizontal_scroll_mode = "pan" if dialog.horizontal_scroll_mode.currentIndex() == 1 else "navigate"
@@ -1313,8 +1443,12 @@ class MainWindow(QMainWindow):
         item = self._item_by_id(self._current_id)
         if item is None:
             return
+        self._navigation_timer.stop()
+        self._navigation_target_id = None
         self.viewer.stop_live()
         menu = QMenu(self)
+        if item.is_live:
+            menu.addAction("更改头图…", lambda item=item: self._open_cover_editor(item))
         if item.is_live and len(item.candidates) > 1:
             choices = menu.addMenu("选择静态图片")
             for path in item.candidates:
@@ -1367,6 +1501,81 @@ class MainWindow(QMainWindow):
             submenu.addAction("选择其他应用…", lambda: self._open_with_other_app(item))
         submenu.aboutToShow.connect(populate)
         return submenu
+
+    def _open_cover_editor(self, item=None):
+        item = item or self._item_by_id(self._current_id)
+        if item is None or not item.is_live:
+            return
+        self._navigation_timer.stop()
+        self._navigation_target_id = None
+        self.viewer.stop_live()
+        self._autoplay_armed = False
+        self._keyboard_live_pressed = False
+        versions = tuple(file_version(path) for path in (item.candidates or (item.image_path,)))
+        dialog = None
+        try:
+            from .cover_editor import EditorDialog
+            dialog = EditorDialog(item, self)
+            if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_result is not None:
+                self._apply_cover_result(item, dialog.saved_result, versions)
+        except (OSError, ValueError, RuntimeError) as error:
+            self._open_error(error)
+        finally:
+            if dialog is not None:
+                # finished already cancels the reader worker. Deferred widget
+                # deletion drops its frame/metadata instead of retaining one
+                # large child dialog for every edit during this app session.
+                dialog.deleteLater()
+
+    def _apply_cover_result(self, original, result, previous_versions=()):
+        """Refresh a committed editor result without rescanning the whole disk."""
+        affected = {str(path) for path in original.candidates or (original.image_path,)}
+        affected.add(str(result.image_path))
+        self._pair_revisions[original.id] = self._pair_revisions.get(original.id, 0) + 1
+        # A finished worker may already have queued its Qt signal. A new epoch
+        # also rejects those late results when the edited path stays unchanged.
+        self._epoch += 1
+        self.jobs.cancel_where(lambda _key: True)
+        self._request_context.clear()
+        self._background_pair_id = None
+        self.cache.invalidate_item(original, previous_versions)
+        for path in affected:
+            preview = self._previews.pop(path, None)
+            if preview:
+                self._preview_bytes -= preview[0].sizeInBytes()
+            self.model.thumbnails.pop(path, None)
+            self.model.pending.discard(path)
+            self.model.failures.discard(path)
+            self._file_times.pop(path, None)
+        if result.created_copy:
+            identifier = _identifier("live", Path(result.image_path).parent / Path(result.image_path).stem.casefold())
+            updated = MediaItem(identifier, Path(result.image_path), Path(result.video_path),
+                                (Path(result.image_path),), note="已另存新的头图与 Live Photo 视频")
+            self._primary_items.append(updated)
+        else:
+            updated = replace(original, image_path=Path(result.image_path), video_path=Path(result.video_path),
+                              pending=False, uncertain=False, note="已更新头图")
+            self._primary_items = [updated if item.id == original.id else item for item in self._primary_items]
+            extras = {str(item.image_path): item for item in self._extras.get(original.id, [])}
+            for path in original.candidates:
+                if path != updated.image_path:
+                    extras.setdefault(str(path), MediaItem("extra-" + hashlib.sha256(str(path).encode()).hexdigest()[:22], path))
+            self._extras[original.id] = list(extras.values())
+            self.cache.set_override(updated, updated.image_path)
+        self._deferred_upgrade = None
+        self._deferred_candidate = None
+        self._rebuild_items()
+        self._apply_filters(select_first=False)
+        if not any(item.id == updated.id for item in self.model.items):
+            self.search.clear()
+            self.kind_filter.live.setChecked(True)
+            self.kind_filter.pending.setChecked(False)
+            self._apply_filters(select_first=False)
+        row = next((row for row, item in enumerate(self.model.items) if item.id == updated.id), None)
+        if row is not None:
+            self._select_row(row, allow_autoplay=False)
+        self._build_tree()
+        self._show_message("头图已另存，已载入新版本。" if result.created_copy else "头图已更新。")
 
     def _invoke_other_app(self, application, item):
         self.viewer.stop_live()
@@ -1446,6 +1655,7 @@ class MainWindow(QMainWindow):
         kind = event.type()
         if kind in (QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate) and watched is self:
             self._keyboard_live_pressed = False
+            self._autoplay_armed = False
             self.viewer.stop_live()
         if kind not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             return super().eventFilter(watched, event)
@@ -1476,6 +1686,10 @@ class MainWindow(QMainWindow):
                            and event.modifiers() == Qt.KeyboardModifier.NoModifier)
         if editing and not filename_escape:
             return False
+        if kind == QEvent.Type.KeyRelease and not event.isAutoRepeat() and (
+                _matches_shortcut(event, "previous") or _matches_shortcut(event, "next")):
+            self._flush_navigation()
+            return True
         matches_filmstrip = (not self._filmstrip_sequence.isEmpty()
                              and event.keyCombination() == self._filmstrip_sequence[0])
         if matches_filmstrip:
@@ -1505,10 +1719,16 @@ class MainWindow(QMainWindow):
             return True
         if kind == QEvent.Type.KeyPress:
             if _matches_shortcut(event, "previous"):
-                self._navigate(-1)
+                if event.isAutoRepeat():
+                    self._queue_navigation(-1)
+                else:
+                    self._navigate(-1)
                 return True
             if _matches_shortcut(event, "next"):
-                self._navigate(1)
+                if event.isAutoRepeat():
+                    self._queue_navigation(1)
+                else:
+                    self._navigate(1)
                 return True
             if _matches_shortcut(event, "fullscreen") and not event.isAutoRepeat():
                 self._toggle_fullscreen()
@@ -1533,6 +1753,7 @@ class MainWindow(QMainWindow):
         self.viewer.stop_live()
         self._disk_timer.stop()
         self._analysis_timer.stop()
+        self._navigation_timer.stop()
         self.jobs.close()
         QApplication.instance().removeEventFilter(self)
         # Running media tasks can still hold the database, especially on

@@ -37,6 +37,8 @@ class CacheStore:
         self.max_bytes = max(0, int(max_bytes))
         self._lock = threading.RLock()
         self._closed = False
+        self._decision_revisions = {}
+        self._requests = threading.local()
         self._connection = sqlite3.connect(self.base / "library.sqlite3", timeout=20, check_same_thread=False)
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA busy_timeout=20000")
@@ -102,6 +104,8 @@ class CacheStore:
 
     def get_override(self, item: MediaItem) -> Path | None:
         with self._lock:
+            self._remember_request("items", item.id,
+                                   (item_version(item, ""), self._decision_revisions.get(item.id, 0)))
             row = self._connection.execute("SELECT path FROM overrides WHERE item_id=?", (item.id,)).fetchone()
         if row:
             selected = Path(row[0])
@@ -139,6 +143,7 @@ class CacheStore:
         if path is not None and Path(path) not in (item.candidates or (item.image_path,)):
             raise ValueError("The selected file must be an image candidate for this item")
         with self._lock:
+            self._decision_revisions[item.id] = self._decision_revisions.get(item.id, 0) + 1
             if path is None:
                 self._connection.execute("DELETE FROM overrides WHERE item_id=?", (item.id,))
             else:
@@ -149,12 +154,31 @@ class CacheStore:
     def forget_decision(self, item: MediaItem) -> None:
         """Invalidate automatic analysis while retaining the user's explicit choice."""
         with self._lock:
+            self._decision_revisions[item.id] = self._decision_revisions.get(item.id, 0) + 1
             self._connection.execute("DELETE FROM decisions WHERE item_id=?", (item.id,))
+            self._connection.commit()
+
+    def invalidate_item(self, item: MediaItem, previous_versions=()) -> None:
+        """Discard this item's analysis and known pre-edit thumbnail versions."""
+        with self._lock:
+            self._decision_revisions[item.id] = self._decision_revisions.get(item.id, 0) + 1
+            self._connection.execute("DELETE FROM decisions WHERE item_id=?", (item.id,))
+            for version in previous_versions:
+                key = hashlib.sha256(json.dumps(["thumbnail-v2", 256, version]).encode()).hexdigest()
+                row = self._connection.execute("SELECT filename FROM thumbnails WHERE key=?", (key,)).fetchone()
+                if row:
+                    try:
+                        (self.thumbnail_dir / row[0]).unlink(missing_ok=True)
+                    except OSError:
+                        continue
+                    self._connection.execute("DELETE FROM thumbnails WHERE key=?", (key,))
             self._connection.commit()
 
     def get_decision(self, item: MediaItem, algorithm: str) -> PairDecision | None:
         version = item_version(item, algorithm)
         with self._lock:
+            self._remember_request("versions", (item.id, algorithm),
+                                   (version, self._decision_revisions.get(item.id, 0)))
             row = self._connection.execute(
                 "SELECT version,payload FROM decisions WHERE item_id=?", (item.id,)).fetchone()
         if not row or row[0] != version:
@@ -172,9 +196,25 @@ class CacheStore:
                               "uncertain": decision.uncertain, "reason": decision.reason,
                               "same_content": decision.same_content}, ensure_ascii=False)
         with self._lock:
+            version = item_version(item, algorithm)
+            requested = getattr(self._requests, "versions", {}).pop((item.id, algorithm), None)
+            if requested is not None and requested != (version, self._decision_revisions.get(item.id, 0)):
+                return
+            started = getattr(self._requests, "items", {}).pop(item.id, None)
+            if started is not None and started != (item_version(item, ""), self._decision_revisions.get(item.id, 0)):
+                return
             self._connection.execute("INSERT OR REPLACE INTO decisions VALUES (?,?,?)",
-                                     (item.id, item_version(item, algorithm), payload))
+                                     (item.id, version, payload))
             self._connection.commit()
+
+    def _remember_request(self, name, key, value):
+        requests = getattr(self._requests, name, None)
+        if requests is None:
+            requests = {}
+            setattr(self._requests, name, requests)
+        requests[key] = value
+        while len(requests) > 32:
+            requests.pop(next(iter(requests)))
 
     def close(self) -> None:
         with self._lock:

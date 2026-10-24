@@ -13,7 +13,7 @@ concurrency:
 jobs:
   windows-x64:
     runs-on: windows-2025
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       PYTHONUTF8: '1'
       QT_MEDIA_BACKEND: ffmpeg
@@ -32,6 +32,10 @@ jobs:
       - name: Install pinned dependencies
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
+      - name: Fetch and validate pinned LGPL frame tools
+        run: python scripts/fetch_frame_tools.py
+      - name: Build private HEIC encoder from pinned sources
+        run: python scripts/build_heic_encoder.py
       - name: Prepare and verify media fixtures
         run: python scripts/generate_fixtures.py --output tests/fixtures --require-codecs
       - name: Test indexing, images, gestures, and playback state
@@ -69,7 +73,7 @@ jobs:
       - name: Upload portable application and corresponding source
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: LiveViewer-Windows-x64-v0.4.0
+          name: LiveViewer-Windows-x64-v0.5.0
           path: release/
           if-no-files-found: error
           retention-days: 3

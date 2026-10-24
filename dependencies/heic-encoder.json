@@ -1,0 +1,16 @@
+{
+  "libheif": {
+    "version": "1.23.4",
+    "url": "https://github.com/strukturag/libheif/releases/download/v1.23.4/libheif-1.23.4.tar.gz",
+    "sha256": "d0c02b4b0e978f34a1974b6f3eea7975a537bf7a9195ffeea38e7242ff316fdd",
+    "bytes": 2217221,
+    "license": "LGPL-3.0-or-later"
+  },
+  "kvazaar": {
+    "version": "2.3.2",
+    "url": "https://github.com/ultravideo/kvazaar/releases/download/v2.3.2/kvazaar-2.3.2.tar.gz",
+    "sha256": "b95d2e20f2b0d8d7ed320055740be2e7a730abe28b153b5a788cfca371cc38b2",
+    "bytes": 1024707,
+    "license": "BSD-3-Clause"
+  }
+}

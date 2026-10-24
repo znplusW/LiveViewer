@@ -6,6 +6,15 @@ from PyInstaller.utils.hooks import collect_submodules
 
 root = Path(SPECPATH)
 datas = [(str(root / 'licenses'), 'licenses'), (str(root / 'assets'), 'assets')]
+# Keep private subprocess tools opaque to PyInstaller's dependency scanner.
+# In particular, their FFmpeg DLLs must not be merged with Qt's matching DLLs.
+for source, destination, executable in (
+    (root / 'tools/ffmpeg', 'tools/ffmpeg', 'ffmpeg.exe'),
+    (root / 'vendor/heic', 'tools/heic', 'LiveViewer.HeicEncoder.exe'),
+):
+    if not (source / executable).is_file():
+        raise SystemExit(f'Missing private tool: {source / executable}')
+    datas.append((str(source), destination))
 for name in ('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'):
     if (root / name).is_file():
         datas.append((str(root / name), '.'))

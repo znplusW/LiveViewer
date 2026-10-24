@@ -7,6 +7,7 @@ import time
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMenu
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
+from livegallery.cache import file_version
 from livegallery.settings import Preferences
 from livegallery.system_open import (E_ABORT, HRESULT_CANCELLED, OAIF_EXEC,
                                      OAIF_HIDE_REGISTRATION, OPENASINFO, open_with)
@@ -700,6 +702,269 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(self.window._grid_mode)
         QTest.keyClick(field, Qt.Key.Key_Escape)
         self.assertTrue(self.window._grid_mode)
+
+    def catalog(self, items, *, cached=False):
+        self.window._primary_items = items
+        self.window._rebuild_items()
+        self.window.model.set_items(items)
+        if cached:
+            for item in items:
+                self.window._cache_preview(item.image_path, self.image, (640, 480))
+
+    def test_autoplay_once_per_selection_and_not_on_refresh_or_manual_loop_setting(self):
+        first = MediaItem("first", self.picture("first.jpg"), self.base / "first.mov")
+        second = MediaItem("second", self.picture("second.jpg"), self.base / "second.mov")
+        static = MediaItem("static", self.picture("static.png"))
+        self.catalog([first, second, static], cached=True)
+        self.window.preferences.autoplay = True
+        self.window.preferences.loop = True
+        with patch.object(self.window.viewer, "play_live_once") as once, \
+                patch.object(self.window.viewer, "start_live") as held:
+            self.window._select_row(0)
+            self.application.processEvents()
+            once.assert_called_once()
+            self.window._display_image(first, self.image, (640, 480))
+            self.window._display_image(first, self.image, (640, 480))
+            self.application.processEvents()
+            once.assert_called_once()
+            self.window._select_row(2)
+            self.application.processEvents()
+            once.assert_called_once()
+            # The old zero-delay request must not play after rapid navigation.
+            self.window._select_row(0)
+            self.window._select_row(1)
+            observed_paths = []
+            once.side_effect = lambda: observed_paths.append(self.window.viewer._video_path)
+            self.application.processEvents()
+            self.assertEqual(observed_paths, [second.video_path])
+            self.assertEqual(once.call_count, 2)
+            held.assert_not_called()
+
+    def test_autoplay_suppressed_in_grid_dialog_hidden_and_enable_applies_next_selection(self):
+        first = MediaItem("first", self.picture("first.jpg"), self.base / "first.mov")
+        second = MediaItem("second", self.picture("second.jpg"), self.base / "second.mov")
+        self.catalog([first, second], cached=True)
+        with patch.object(self.window.viewer, "play_live_once") as once:
+            self.window._select_row(0)
+            self.application.processEvents()
+            once.assert_not_called()
+            dialog = SettingsDialog(self.window.preferences, self.window)
+            dialog.autoplay.setChecked(True)
+            with patch("livegallery.app.SettingsDialog", return_value=dialog), \
+                    patch.object(dialog, "exec", return_value=QDialog.DialogCode.Accepted):
+                self.window.open_settings()
+            self.window._display_image(first, self.image, (640, 480))
+            self.application.processEvents()
+            once.assert_not_called()
+            self.assertTrue(Preferences.load().autoplay)
+            self.window._toggle_grid(True)
+            self.window._select_row(1)
+            self.application.processEvents()
+            once.assert_not_called()
+            self.window._toggle_grid(False)
+            dialog = SettingsDialog(self.window.preferences, self.window)
+            dialog.show()
+            self.application.processEvents()
+            self.window._select_row(0)
+            self.application.processEvents()
+            once.assert_not_called()
+            dialog.reject()
+            self.window.hide()
+            self.window._select_row(1)
+            self.application.processEvents()
+            once.assert_not_called()
+            self.window.show()
+            self.window._display_image(second, self.image, (640, 480))
+            self.application.processEvents()
+            once.assert_not_called()
+            self.window._select_row(0)
+            self.application.processEvents()
+            once.assert_called_once()
+
+    def test_rapid_hundred_selections_cancel_obsolete_decodes_and_bypass_blocked_probe(self):
+        items = [MediaItem(str(index), self.picture(f"rapid-{index}.jpg")) for index in range(100)]
+        self.catalog(items)
+        self.window.model.thumbnail_requested.disconnect()
+        background_started, background_release = threading.Event(), threading.Event()
+        first_started, first_release = threading.Event(), threading.Event()
+        decoded = []
+        def blocked_probe():
+            background_started.set()
+            background_release.wait(5)
+        def decode(path, edge):
+            decoded.append((path.name, edge))
+            if path == items[0].image_path:
+                first_started.set()
+                first_release.wait(5)
+            return self.image, (4000, 3000)
+        self.window.jobs.submit("test-probe", blocked_probe, 12)
+        self.assertTrue(background_started.wait(1))
+        try:
+            with patch("livegallery.app._decode", side_effect=decode):
+                self.window._select_row(0)
+                self.assertTrue(first_started.wait(1))
+                self.window._submit("full", str(items[0].image_path),
+                                    lambda: decode(items[0].image_path, None), 1,
+                                    (self.window._epoch, items[0].id, items[0].image_path))
+                for row in range(1, 100):
+                    self.window._select_row(row)
+                    self.assertLessEqual(self.window.jobs.queued_count, 3)
+                first_release.set()
+                self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer
+                                and self.window._displayed_item.id == "99")
+                self.assertFalse(background_release.is_set())
+                self.assertEqual(decoded, [("rapid-0.jpg", 2000), ("rapid-99.jpg", 2000)])
+                self.assertLessEqual(len(self.window._request_context), 3)
+        finally:
+            first_release.set()
+            background_release.set()
+
+    def test_current_photo_promotes_queued_neighbor_while_background_is_blocked(self):
+        items = [MediaItem(str(index), self.picture(f"neighbor-{index}.jpg")) for index in range(2)]
+        self.catalog(items)
+        self.window.model.thumbnail_requested.disconnect()
+        started, release = threading.Event(), threading.Event()
+        decoded = []
+        def background():
+            started.set()
+            release.wait(5)
+        self.window.jobs.submit("blocked-background", background, 12)
+        self.assertTrue(started.wait(1))
+        try:
+            with patch("livegallery.app._decode", side_effect=lambda path, _edge:
+                       (decoded.append(path.name) or self.image, (640, 480))):
+                self.window._select_row(0)
+                self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer)
+                self.window._select_row(1)
+                self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer
+                                and self.window._displayed_item.id == "1")
+                self.assertEqual(decoded, ["neighbor-0.jpg", "neighbor-1.jpg"])
+                self.assertFalse(release.is_set())
+        finally:
+            release.set()
+
+    def test_pending_pair_shows_provisional_still_before_analysis_and_refines_without_replay(self):
+        first, better = self.picture("pending.jpg"), self.picture("pending.jpeg")
+        pending = MediaItem("pending", first, self.base / "pending.mov", (first, better), True)
+        self.catalog([pending], cached=True)
+        self.window._cache_preview(better, self.image, (640, 480))
+        self.window.preferences.autoplay = True
+        with patch.object(self.window, "_request_pair"), \
+                patch.object(self.window.viewer, "play_live_once") as once:
+            self.window._select_row(0)
+            self.application.processEvents()
+            self.assertIs(self.window.content.currentWidget(), self.window.viewer)
+            self.assertEqual(self.window._shown_image_path, first)
+            once.assert_called_once()
+            self.window.viewer.zoom_in()
+            zoom = self.window.viewer.zoom_factor()
+            self.window._is_playing = True
+            self.window.viewer._play_requested = True
+            self.window._request_context["refined"] = ("pair", self.window._epoch, pending, 0)
+            self.window._job_finished("refined", PairDecision(better, (first,), False, "better"), None)
+            self.assertEqual(self.window._shown_image_path, first)
+            self.assertIsNotNone(self.window._deferred_candidate)
+            self.window.viewer._play_requested = False
+            self.window._playback_changed(False)
+            self.assertEqual(self.window._shown_image_path, better)
+            self.assertAlmostEqual(self.window.viewer.zoom_factor(), zoom, places=2)
+            self.application.processEvents()
+            once.assert_called_once()
+
+    def test_arrow_autorepeat_coalesces_to_latest_target_and_flushes_release(self):
+        items = [MediaItem(str(index), self.picture(f"key-{index}.jpg")) for index in range(100)]
+        self.catalog(items, cached=False)
+        self.window._current_id = "0"
+        self.window.content.setCurrentWidget(self.window.viewer)
+        self.window.viewer.setFocus()
+        self.application.processEvents()
+        with patch.object(self.window, "_select_row") as select:
+            for _index in range(99):
+                repeat = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier, "", True)
+                QApplication.sendEvent(self.window.viewer, repeat)
+            select.assert_not_called()
+            QTest.keyRelease(self.window.viewer, Qt.Key.Key_Right)
+            select.assert_called_once_with(99)
+
+    def test_editor_result_updates_current_or_adds_copy_without_rescan_or_autoplay(self):
+        first, other = self.picture("cover.jpg"), self.picture("cover.jpeg")
+        original = MediaItem("cover", first, self.base / "cover.mov", (first, other))
+        self.catalog([original], cached=True)
+        self.window.preferences.autoplay = True
+        versions = (file_version(first),)
+        thumbnail = self.window.cache.get_thumbnail(first)
+        overwrite = SimpleNamespace(image_path=first, video_path=original.video_path, created_copy=False)
+        with patch.object(self.window, "load_folder") as rescan, \
+                patch.object(self.window.viewer, "play_live_once") as once:
+            self.window._apply_cover_result(original, overwrite, versions)
+            self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer)
+            self.assertFalse(thumbnail.exists())
+            self.assertEqual(self.window.cache.get_override(original), first)
+            self.assertEqual(len(self.window._primary_items), 1)
+            self.assertEqual([item.image_path for item in self.window._extras[original.id]], [other])
+            new_image = self.picture("cover_v2.jpg")
+            new_video = self.base / "cover_v2.mov"
+            new_video.touch()
+            copy = SimpleNamespace(image_path=new_image, video_path=new_video, created_copy=True)
+            self.window._apply_cover_result(original, copy, versions)
+            self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer
+                            and self.window._displayed_item.image_path == new_image)
+            self.assertEqual(len(self.window._primary_items), 2)
+            self.assertEqual(self.window.viewer._video_path, new_video)
+            once.assert_not_called()
+            rescan.assert_not_called()
+
+    def test_cover_editor_entry_is_live_only_and_cancel_does_not_refresh_files(self):
+        live = self.show_live_item()
+        static = MediaItem("plain", self.picture("plain.png"))
+        self.catalog([live, static])
+        dialog = MagicMock()
+        dialog.exec.return_value = QDialog.DialogCode.Rejected
+        dialog.saved_result = None
+        with patch("livegallery.cover_editor.EditorDialog", return_value=dialog) as editor, \
+                patch.object(self.window, "_apply_cover_result") as refresh:
+            self.window._open_cover_editor(static)
+            editor.assert_not_called()
+            self.window._queue_navigation(1)
+            self.assertEqual(self.window._navigation_target_id, static.id)
+            self.window._open_cover_editor(live)
+            self.assertFalse(self.window._navigation_timer.isActive())
+            self.assertIsNone(self.window._navigation_target_id)
+            QTest.qWait(60)
+            self.assertEqual(self.window._current_id, live.id)
+            editor.assert_called_once_with(live, self.window)
+            dialog.deleteLater.assert_called_once()
+            refresh.assert_not_called()
+            self.assertFalse(self.window._autoplay_armed)
+            dialog.exec.return_value = QDialog.DialogCode.Accepted
+            dialog.saved_result = SimpleNamespace(image_path=live.image_path, video_path=live.video_path)
+            self.window._open_cover_editor(live)
+            self.assertEqual(refresh.call_count, 1)
+            self.assertIs(refresh.call_args.args[1], dialog.saved_result)
+
+    def test_edit_invalidation_rejects_inflight_old_pair_cache_write(self):
+        item = MediaItem("guarded", self.picture("guarded.jpg"), self.base / "guarded.mov")
+        decision = PairDecision(item.image_path, (), False, "obsolete")
+        for manual in (False, True):
+            if manual:
+                self.window.cache.set_override(item, item.image_path)
+            started, release, complete = threading.Event(), threading.Event(), threading.Event()
+            def old_analysis():
+                self.window.cache.get_override(item)
+                if not manual:
+                    self.window.cache.get_decision(item, "test")
+                started.set()
+                release.wait(3)
+                self.window.cache.put_decision(item, "test", decision)
+                complete.set()
+            worker = threading.Thread(target=old_analysis)
+            worker.start()
+            self.assertTrue(started.wait(1))
+            self.window.cache.invalidate_item(item)
+            release.set()
+            self.assertTrue(complete.wait(1))
+            worker.join(1)
+            self.assertIsNone(self.window.cache.get_decision(item, "test"))
 
 
 class OpenWithTests(unittest.TestCase):

@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from fractions import Fraction
 
 from PIL import Image, ImageDraw
 import av
@@ -14,6 +15,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 SIZE = (640, 420)
+VFR_TIMES_MS = (0, 40, 160, 200, 440, 480, 760)
+VFR_COLORS = ("#d43d35", "#42bd51", "#3568d4", "#e2d63c", "#cf42c2", "#3fc2d1", "#df8d32")
 
 
 def picture(index: int = 9) -> Image.Image:
@@ -49,6 +52,29 @@ def codec_name(path: Path) -> str:
         if frame.width < 1 or frame.height < 1:
             raise ValueError(f"No decodable frame in {path}")
         return name
+
+
+def write_vfr_video(path: Path):
+    if not path.is_file():
+        with av.open(str(path), 'w', format='mov') as container:
+            stream = container.add_stream('libx264', rate=25)
+            stream.width, stream.height = 320, 240
+            stream.pix_fmt = 'yuv420p'
+            stream.time_base = stream.codec_context.time_base = Fraction(1, 1000)
+            stream.codec_context.options = {'preset': 'ultrafast', 'crf': '18'}
+            for index, timestamp in enumerate(VFR_TIMES_MS):
+                image = Image.new('RGB', (320, 240), VFR_COLORS[index])
+                ImageDraw.Draw(image).text((15, 15), f'EXACT FRAME {index}', fill='white')
+                frame = av.VideoFrame.from_image(image)
+                frame.pts, frame.time_base = timestamp, Fraction(1, 1000)
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+    with av.open(str(path)) as check:
+        actual = [round(float(frame.pts * frame.time_base) * 1000) for frame in check.decode(video=0)]
+    if actual != list(VFR_TIMES_MS):
+        raise ValueError(f'Variable-rate fixture timestamps changed: {actual}')
 
 
 def write_video(path: Path, requested: str, rotation: int = 0) -> str:
@@ -129,6 +155,13 @@ def generate(folder: Path, require_codecs: bool) -> dict:
             check.load()
         images.append(path.name)
     failures = []
+    try:
+        write_vfr_video(folder / 'VFR_PAIR.MOV')
+        Image.new('RGB', (320, 240), VFR_COLORS[3]).save(folder / 'VFR_PAIR.jpg', quality=95)
+        images.append('VFR_PAIR.jpg')
+        videos.append({'path': 'VFR_PAIR.MOV', 'codec': 'h264', 'frame_times_ms': list(VFR_TIMES_MS)})
+    except Exception as error:
+        failures.append({'path': 'VFR_PAIR.MOV', 'requested_codec': 'h264 VFR', 'error': str(error)})
     for filename, codec in (("Live_H264.MOV", "h264"), ("Live_HEVC.MOV", "hevc"), ("JPEG_PAIR.mov", "h264")):
         try:
             actual = write_video(folder / filename, codec)
