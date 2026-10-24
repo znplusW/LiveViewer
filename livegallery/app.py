@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListView, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QStackedWidget, QTextEdit, QTreeWidget, QTreeWidgetItem,
-    QVBoxLayout, QWidget,
+    QVBoxLayout, QWidget, QWidgetAction,
 )
 
 from .cache import CacheStore
@@ -98,6 +98,69 @@ class _ScanSignals(QObject):
     complete = Signal(int, object, object)
 
 
+class MediaTypeFilter(QPushButton):
+    """A dropdown whose independent checkboxes remain open while selecting."""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.menu = QMenu(self)
+        self.live = self._add_option("Live Photos", True)
+        self.static = self._add_option("静态照片", True)
+        self.menu.addSeparator()
+        self.pending = self._add_option("只显示待检查项目", False)
+        self.setMenu(self.menu)
+        self.setMinimumWidth(165)
+        self._update_label()
+
+    def _add_option(self, text, checked):
+        box = QCheckBox(text)
+        box.setChecked(checked)
+        box.setStyleSheet("QCheckBox { padding: 7px 15px; }")
+        action = QWidgetAction(self.menu)
+        action.setDefaultWidget(box)
+        self.menu.addAction(action)
+        box.toggled.connect(self._selection_changed)
+        return box
+
+    def _selection_changed(self):
+        self._update_label()
+        self.changed.emit()
+
+    def _update_label(self):
+        selected = []
+        if self.live.isChecked():
+            selected.append("Live Photos")
+        if self.static.isChecked():
+            selected.append("静态照片")
+        title = "全部图片" if len(selected) == 2 else " / ".join(selected) or "未选择图片类型"
+        if self.pending.isChecked():
+            title += " · 待检查"
+        self.setText(title)
+
+
+def _shortcut_error(hold: QKeySequence, once: QKeySequence) -> str:
+    if hold.isEmpty() or once.isEmpty():
+        return "请分别设置按住播放、单击播放的按键或组合键。"
+    for sequence in (hold, once):
+        if sequence[0].key() == Qt.Key.Key_Escape:
+            return "Esc 保留用于退出全屏，不能设为播放快捷键。"
+    if hold == once:
+        return "按住播放与单击播放不能使用相同的快捷键，请修改其中一个。"
+    return ""
+
+
+def _shortcut_overrides(hold: QKeySequence, once: QKeySequence) -> list[str]:
+    builtins = {"Left": "上一张", "Right": "下一张", "F11": "进入全屏", "Ctrl+O": "打开文件夹"}
+    overrides = []
+    for label, sequence in (("按住播放", hold), ("单击播放", once)):
+        for key, operation in builtins.items():
+            if sequence == QKeySequence(key):
+                overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
+    return overrides
+
+
 class SettingsDialog(QDialog):
     def __init__(self, preferences: Preferences, parent=None):
         super().__init__(parent)
@@ -109,6 +172,14 @@ class SettingsDialog(QDialog):
         title = QLabel("按你的习惯浏览")
         title.setStyleSheet("font-size:21px;font-weight:600;padding-bottom:6px")
         outer.addWidget(title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_content = QWidget()
+        sections = QVBoxLayout(scroll_content)
+        sections.setContentsMargins(0, 0, 8, 0)
+        scroll.setWidget(scroll_content)
+        outer.addWidget(scroll, 1)
         play_group = QGroupBox("Live Photo 播放")
         form = QFormLayout(play_group)
         form.setVerticalSpacing(13)
@@ -131,12 +202,25 @@ class SettingsDialog(QDialog):
         form.addRow("鼠标／触屏长按", self.hold)
         self.live_key = QKeySequenceEdit(QKeySequence(preferences.live_key))
         self.live_key.setMaximumSequenceLength(1)
+        self.live_key.setFinishingKeyCombinations([])
         form.addRow("按住播放快捷键", self.live_key)
-        help_text = QLabel("松开立即停止。快捷键可包含 Ctrl / Alt / Shift；输入文字时不触发。")
+        self.live_once_key = QKeySequenceEdit(QKeySequence(preferences.live_once_key))
+        self.live_once_key.setMaximumSequenceLength(1)
+        self.live_once_key.setFinishingKeyCombinations([])
+        form.addRow("单击播放到结束快捷键", self.live_once_key)
+        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n可设置单个按键或组合键；输入文字时不触发，Esc 保留用于退出全屏。")
         help_text.setObjectName("muted")
         help_text.setWordWrap(True)
         form.addRow(help_text)
-        outer.addWidget(play_group)
+        self.shortcut_note = QLabel()
+        self.shortcut_note.setWordWrap(True)
+        form.addRow(self.shortcut_note)
+        self.override_keys = QCheckBox("确认替换以上原有快捷键")
+        form.addRow(self.override_keys)
+        self.live_key.keySequenceChanged.connect(self._shortcuts_changed)
+        self.live_once_key.keySequenceChanged.connect(self._shortcuts_changed)
+        self._shortcuts_changed()
+        sections.addWidget(play_group)
         storage_group = QGroupBox("文件夹与本机缓存")
         storage = QFormLayout(storage_group)
         storage.setVerticalSpacing(12)
@@ -161,19 +245,37 @@ class SettingsDialog(QDialog):
         portable_note.setWordWrap(True)
         portable_note.setObjectName("muted")
         storage.addRow(portable_note)
-        outer.addWidget(storage_group)
+        sections.addWidget(storage_group)
+        sections.addStretch()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存设置")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
+        screen = self.screen()
+        available_height = screen.availableGeometry().height() if screen else 900
+        self.resize(620, min(850, max(420, available_height - 70)))
 
     def _accept(self):
-        if self.live_key.keySequence().isEmpty():
-            QMessageBox.information(self, "播放快捷键", "请设置一个按住播放的按键或组合键。")
+        error = _shortcut_error(self.live_key.keySequence(), self.live_once_key.keySequence())
+        if error:
+            QMessageBox.information(self, "播放快捷键", error)
+            return
+        overrides = _shortcut_overrides(self.live_key.keySequence(), self.live_once_key.keySequence())
+        if overrides and not self.override_keys.isChecked():
+            QMessageBox.information(self, "快捷键冲突", "\n".join(overrides) + "\n\n请勾选确认替换，或更换播放快捷键。")
             return
         self.accept()
+
+    def _shortcuts_changed(self, *_args):
+        hold, once = self.live_key.keySequence(), self.live_once_key.keySequence()
+        error = _shortcut_error(hold, once)
+        overrides = _shortcut_overrides(hold, once)
+        self.shortcut_note.setText(error or "\n".join(overrides))
+        self.shortcut_note.setVisible(bool(error or overrides))
+        self.override_keys.setChecked(False)
+        self.override_keys.setVisible(bool(overrides) and not error)
 
 
 class MainWindow(QMainWindow):
@@ -224,10 +326,14 @@ class MainWindow(QMainWindow):
         self._keyboard_live_pressed = False
         self._keyboard_live_key = None
         self._chrome_visible = True
+        self._fullscreen_active = False
+        self._pre_fullscreen_geometry = None
+        self._pre_fullscreen_maximized = False
         self._disk_missing = False
         self._background_pair_id = None
         self._remembered_strip = True
         self._live_sequence = QKeySequence(self.preferences.live_key)
+        self._once_sequence = QKeySequence(self.preferences.live_once_key)
         self._build_ui()
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
                                 self.preferences.preserve_zoom, self.preferences.hold_ms)
@@ -239,10 +345,6 @@ class MainWindow(QMainWindow):
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self.toast.hide)
-        self._chrome_timer = QTimer(self)
-        self._chrome_timer.setSingleShot(True)
-        self._chrome_timer.setInterval(2600)
-        self._chrome_timer.timeout.connect(lambda: self._set_chrome(False))
         self._disk_timer = QTimer(self)
         self._disk_timer.setInterval(5000)
         self._disk_timer.timeout.connect(self._check_disk)
@@ -317,10 +419,8 @@ class MainWindow(QMainWindow):
         self.search.setMaximumWidth(260)
         self.search.textChanged.connect(self._apply_filters)
         filters.addWidget(self.search, 1)
-        self.kind_filter = QComboBox()
-        self.kind_filter.addItems(["全部图片", "仅 LIVE", "普通图片", "待检查"])
-        self.kind_filter.setMaximumWidth(150)
-        self.kind_filter.currentIndexChanged.connect(self._apply_filters)
+        self.kind_filter = MediaTypeFilter()
+        self.kind_filter.changed.connect(self._apply_filters)
         filters.addWidget(self.kind_filter)
         self.sort = QComboBox()
         self.sort.addItems(["文件名排序", "文件时间排序"])
@@ -620,7 +720,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "model"):
             return
         needle = self.search.text().strip().casefold()
-        kind = self.kind_filter.currentIndex()
+        show_live = self.kind_filter.live.isChecked()
+        show_static = self.kind_filter.static.isChecked()
+        pending_only = self.kind_filter.pending.isChecked()
         directory = self._directory_filter
         visible = []
         for item in self._items:
@@ -628,9 +730,9 @@ class MainWindow(QMainWindow):
                 continue
             if needle and needle not in str(item.image_path).casefold():
                 continue
-            if kind == 1 and not item.is_live or kind == 2 and item.is_live:
+            if item.is_live and not show_live or not item.is_live and not show_static:
                 continue
-            if kind == 3 and not (item.pending or item.uncertain):
+            if pending_only and not (item.pending or item.uncertain):
                 continue
             visible.append(item)
         if self.preferences.sort_by == "time":
@@ -965,16 +1067,16 @@ class MainWindow(QMainWindow):
         if self._closed:
             return
         self.toast.setText(str(text))
-        self.toast.show()
+        self.toast.setVisible(not self._fullscreen_active)
         self.statusBar().showMessage(str(text), 8000)
         self._toast_timer.start(6500)
 
     def _toggle_sidebar(self, checked):
-        self.sidebar.setVisible(checked)
+        self.sidebar.setVisible(checked and not self._fullscreen_active)
 
     def _toggle_strip(self, checked):
         self._remembered_strip = checked
-        self.film.setVisible(checked and not self._grid_mode and self._chrome_visible)
+        self.film.setVisible(checked and not self._grid_mode)
 
     def _toggle_grid(self, checked):
         self.viewer.stop_live()
@@ -989,7 +1091,7 @@ class MainWindow(QMainWindow):
             self.content.setCurrentWidget(self.viewer)
         else:
             self.content.setCurrentWidget(self.empty_page)
-        self.film.setVisible(self._remembered_strip and not checked and self._chrome_visible)
+        self.film.setVisible(self._remembered_strip and not checked)
         self.viewer_tools.setVisible(not checked and self._chrome_visible)
 
     def _grid_selected(self, index):
@@ -999,38 +1101,54 @@ class MainWindow(QMainWindow):
         self._select_row(index.row())
 
     def _toggle_fullscreen(self):
+        """Enter immediately; Esc is the only in-app way to leave fullscreen."""
+        if self._fullscreen_active:
+            return
         self.viewer.stop_live()
-        if self.isFullScreen():
-            self.showNormal()
-            self._chrome_timer.stop()
-            self._set_chrome(True)
-            self.fullscreen_button.setText("⛶  全屏")
-        else:
-            self.showFullScreen()
-            self.fullscreen_button.setText("退出全屏")
-            self._set_chrome(True)
-            self._chrome_timer.start()
+        self._keyboard_live_pressed = False
+        self._pre_fullscreen_geometry = self.saveGeometry()
+        self._pre_fullscreen_maximized = self.isMaximized()
+        if self._grid_mode:
+            self.grid_button.setChecked(False)
+            self._toggle_grid(False)
+        self._fullscreen_active = True
+        self._toast_timer.stop()
+        self._set_chrome(False)
+        self.showFullScreen()
+        self.viewer.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _exit_fullscreen(self):
+        if not self._fullscreen_active:
+            return
+        self.viewer.stop_live()
+        self._keyboard_live_pressed = False
+        self._fullscreen_active = False
+        self.showNormal()
+        if self._pre_fullscreen_geometry is not None:
+            self.restoreGeometry(self._pre_fullscreen_geometry)
+        if self._pre_fullscreen_maximized:
+            self.showMaximized()
+        self._set_chrome(True)
 
     def _set_chrome(self, visible):
-        if not self.isFullScreen():
-            visible = True
+        # Fullscreen is a stable viewing mode, so hover, clicks and delayed
+        # status updates can never reveal application controls over the image.
+        visible = not self._fullscreen_active
         self._chrome_visible = visible
         self.header.setVisible(visible)
         self.filterbar.setVisible(visible)
         self.infobar.setVisible(visible)
         self.viewer_tools.setVisible(visible and not self._grid_mode)
-        self.film.setVisible(visible and self._remembered_strip and not self._grid_mode)
+        self.film.setVisible(self._remembered_strip and not self._grid_mode)
+        self.library_label.setVisible(visible)
+        self.analysis_label.setVisible(visible)
         self.sidebar.setVisible(visible and self.sidebar_button.isChecked())
         self.statusBar().setVisible(visible)
         if not visible:
             self.toast.hide()
 
     def _toggle_controls(self):
-        if self.isFullScreen():
-            self._set_chrome(not self._chrome_visible)
-            if self._chrome_visible:
-                self._chrome_timer.start()
-        else:
+        if not self._fullscreen_active:
             self.strip_button.setChecked(not self.strip_button.isChecked())
             self._toggle_strip(self.strip_button.isChecked())
 
@@ -1043,7 +1161,8 @@ class MainWindow(QMainWindow):
 
     def _update_hint(self):
         key = QKeySequence(self.preferences.live_key).toString(QKeySequence.SequenceFormat.NativeText)
-        self.hint_label.setText(f"按住鼠标／触屏／{key} 播放  ·  松开停止  ·  左右滑动切图  ·  双指缩放")
+        once = QKeySequence(self.preferences.live_once_key).toString(QKeySequence.SequenceFormat.NativeText)
+        self.hint_label.setText(f"按住鼠标／触屏／{key} 播放 · 松开停止 · 按 {once} 播完一次 · 左右滑动切图 · 双指缩放")
 
     def open_settings(self):
         self.viewer.stop_live()
@@ -1056,6 +1175,7 @@ class MainWindow(QMainWindow):
         self.preferences.preserve_zoom = dialog.zoom_mode.currentIndex() == 0
         self.preferences.hold_ms = dialog.hold.value()
         self.preferences.live_key = dialog.live_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        self.preferences.live_once_key = dialog.live_once_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         recursive_changed = self.preferences.recursive != dialog.recursive.isChecked()
         self.preferences.recursive = dialog.recursive.isChecked()
         self.preferences.cache_mb = dialog.cache.value()
@@ -1072,6 +1192,7 @@ class MainWindow(QMainWindow):
                 self._show_message("无法切换便携模式，请把软件放到可写文件夹：" + str(error))
                 portable_changed = False
         self._live_sequence = QKeySequence(self.preferences.live_key)
+        self._once_sequence = QKeySequence(self.preferences.live_once_key)
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
                                 self.preferences.preserve_zoom, self.preferences.hold_ms)
         self.sound_button.setChecked(self.preferences.muted)
@@ -1173,13 +1294,9 @@ class MainWindow(QMainWindow):
         if kind in (QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate) and watched is self:
             self._keyboard_live_pressed = False
             self.viewer.stop_live()
-        if kind == QEvent.Type.MouseMove and self.isFullScreen():
-            if not self._chrome_visible:
-                self._set_chrome(True)
-            self._chrome_timer.start()
         if kind not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             return super().eventFilter(watched, event)
-        if QApplication.activeModalWidget() is not None:
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
             return False
         active = QApplication.activeWindow()
         if active is not None and active is not self:
@@ -1190,10 +1307,21 @@ class MainWindow(QMainWindow):
         if kind == QEvent.Type.KeyRelease and self._keyboard_live_pressed:
             if event.key() == self._keyboard_live_key and not event.isAutoRepeat():
                 self._keyboard_live_pressed = False
-                self.viewer.stop_live()
+                self.viewer.release_live()
                 return True
+        if kind == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape and self._fullscreen_active:
+            if not event.isAutoRepeat():
+                self._exit_fullscreen()
+            return True
         if editing:
             return False
+        matches_once = not self._once_sequence.isEmpty() and event.keyCombination() == self._once_sequence[0]
+        if matches_once:
+            if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                if (not self._grid_mode and self._displayed_item is not None
+                        and self.content.currentWidget() is self.viewer):
+                    self.viewer.play_live_once()
+            return True
         matches_live = not self._live_sequence.isEmpty() and event.keyCombination() == self._live_sequence[0]
         if matches_live:
             if not event.isAutoRepeat():
@@ -1206,28 +1334,27 @@ class MainWindow(QMainWindow):
                         self.viewer.start_live()
                 else:
                     self._keyboard_live_pressed = False
-                    self.viewer.stop_live()
+                    self.viewer.release_live()
             return True
         if kind == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Left:
+            if event.key() == Qt.Key.Key_Left and event.modifiers() == Qt.KeyboardModifier.NoModifier:
                 self._navigate(-1)
                 return True
-            if event.key() == Qt.Key.Key_Right:
+            if event.key() == Qt.Key.Key_Right and event.modifiers() == Qt.KeyboardModifier.NoModifier:
                 self._navigate(1)
                 return True
-            if event.key() == Qt.Key.Key_F11 and not event.isAutoRepeat():
+            if (event.key() == Qt.Key.Key_F11 and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and not event.isAutoRepeat()):
                 self._toggle_fullscreen()
                 return True
             if event.key() == Qt.Key.Key_Escape:
-                if self.isFullScreen():
-                    self._toggle_fullscreen()
-                elif self._grid_mode:
+                if self._grid_mode:
                     self.grid_button.setChecked(False)
                     self._toggle_grid(False)
                 else:
                     self.viewer.fit_image()
                 return True
-            if event.key() == Qt.Key.Key_O and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_O and event.modifiers() == Qt.KeyboardModifier.ControlModifier:
                 self.choose_folder()
                 return True
         return super().eventFilter(watched, event)
@@ -1242,7 +1369,6 @@ class MainWindow(QMainWindow):
         self.viewer.stop_live()
         self._disk_timer.stop()
         self._analysis_timer.stop()
-        self._chrome_timer.stop()
         self.jobs.close()
         QApplication.instance().removeEventFilter(self)
         # Running media tasks can still hold the database, especially on

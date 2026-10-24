@@ -27,6 +27,20 @@ def picture(index: int = 9) -> Image.Image:
     return image
 
 
+def portrait_encoded_picture(index: int = 9) -> Image.Image:
+    """Asymmetric quadrants expose missed or twice-applied display rotation."""
+    image = picture(index)
+    draw = ImageDraw.Draw(image)
+    for box, color in (((0, 0, 95, 95), "#ef4035"),
+                       ((544, 0, 639, 95), "#42cd61"),
+                       ((0, 324, 95, 419), "#3568ef"),
+                       ((544, 324, 639, 419), "#f2e23c")):
+        draw.rectangle(box, fill=color)
+    draw.line((320, 0, 320, 419), fill="white", width=5)
+    draw.text((255, 12), "ROTATION TEST", fill="white")
+    return image
+
+
 def codec_name(path: Path) -> str:
     with av.open(str(path)) as container:
         video = container.streams.video[0]
@@ -37,10 +51,13 @@ def codec_name(path: Path) -> str:
         return name
 
 
-def write_video(path: Path, requested: str) -> str:
+def write_video(path: Path, requested: str, rotation: int = 0) -> str:
     if path.is_file():
         actual = codec_name(path)
         if actual == requested:
+            if rotation:
+                with av.open(str(path)) as check:
+                    assert next(check.decode(video=0)).rotation == rotation
             return actual
         raise ValueError(f"Existing fixture {path} is {actual}, expected {requested}")
     encoder = {"h264": "libx264", "hevc": "libx265"}[requested]
@@ -50,19 +67,24 @@ def write_video(path: Path, requested: str) -> str:
             stream = container.add_stream(encoder, rate=15)
             stream.width, stream.height = SIZE
             stream.pix_fmt = "yuv420p"
+            if rotation:
+                stream.set_display_rotation(rotation)
             if requested == "hevc":
                 stream.codec_context.options = {"preset": "ultrafast", "crf": "28", "x265-params": "log-level=error:pools=1:frame-threads=1"}
                 stream.codec_context.codec_tag = "hvc1"
             else:
                 stream.codec_context.options = {"preset": "ultrafast", "crf": "24"}
             for index in range(21):
-                frame = av.VideoFrame.from_ndarray(np.asarray(picture(index)), format="rgb24")
+                image = portrait_encoded_picture(index) if rotation else picture(index)
+                frame = av.VideoFrame.from_ndarray(np.asarray(image), format="rgb24")
                 for packet in stream.encode(frame):
                     container.mux(packet)
             for packet in stream.encode():
                 container.mux(packet)
     except Exception:
         path.unlink(missing_ok=True)
+        if rotation:
+            raise RuntimeError("PyAV must generate and preserve the portrait fixture's display matrix")
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RuntimeError(f"Neither PyAV's {encoder} nor an ffmpeg executable can generate {requested}")
@@ -78,6 +100,9 @@ def write_video(path: Path, requested: str) -> str:
     actual = codec_name(path)
     if actual != requested:
         raise ValueError(f"Generated {actual}, expected {requested}")
+    if rotation:
+        with av.open(str(path)) as check:
+            assert next(check.decode(video=0)).rotation == rotation, "Display rotation was not retained"
     return actual
 
 
@@ -91,6 +116,10 @@ def generate(folder: Path, require_codecs: bool) -> dict:
         if not path.is_file():
             still.save(path, quality=95)
         images.append(filename)
+    portrait_path = folder / "Portrait_HEVC.jpg"
+    if not portrait_path.is_file():
+        portrait_encoded_picture().transpose(Image.Transpose.ROTATE_90).save(portrait_path, quality=95)
+    images.append(portrait_path.name)
     for ext in ("png", "webp", "bmp", "gif", "tiff", "avif"):
         path = folder / f"ordinary.{ext}"
         if not path.is_file():
@@ -106,6 +135,12 @@ def generate(folder: Path, require_codecs: bool) -> dict:
             videos.append({"path": filename, "codec": actual})
         except Exception as error:
             failures.append({"path": filename, "requested_codec": codec, "error": str(error)})
+    try:
+        actual = write_video(folder / "Portrait_HEVC.MOV", "hevc", rotation=90)
+        videos.append({"path": "Portrait_HEVC.MOV", "codec": actual,
+                       "rotation_ccw": 90, "display_size": list(reversed(SIZE))})
+    except Exception as error:
+        failures.append({"path": "Portrait_HEVC.MOV", "requested_codec": "hevc", "error": str(error)})
     try:
         from pi_heif import register_heif_opener
         register_heif_opener()

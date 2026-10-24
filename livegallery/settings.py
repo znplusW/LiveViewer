@@ -29,11 +29,33 @@ class Preferences:
     preserve_zoom: bool = True
     hold_ms: int = 300
     live_key: str = 'Space'
+    live_once_key: str = 'P'
     cache_mb: int = 2048
     recursive: bool = True
     last_folder: str = ''
     last_image: str = ''
     sort_by: str = 'name'
+
+    def normalize_shortcuts(self):
+        """Keep an older hold binding when introducing the separate once key."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeySequence
+
+        def sequence(value):
+            candidate = QKeySequence(value) if isinstance(value, str) else QKeySequence()
+            if (candidate.isEmpty() or candidate.count() != 1
+                    or candidate[0].key() in (Qt.Key.Key_unknown, Qt.Key.Key_Escape)):
+                return QKeySequence()
+            return candidate
+
+        hold = sequence(self.live_key)
+        if hold.isEmpty():
+            hold = QKeySequence('Space')
+        once = sequence(self.live_once_key)
+        if once.isEmpty() or once == hold:
+            once = next(QKeySequence(key) for key in ('P', 'F9', 'Return') if QKeySequence(key) != hold)
+        self.live_key = hold.toString(QKeySequence.SequenceFormat.PortableText)
+        self.live_once_key = once.toString(QKeySequence.SequenceFormat.PortableText)
 
     @classmethod
     def load(cls):
@@ -43,6 +65,7 @@ class Preferences:
             result = cls(**{k: v for k, v in values.items() if k in valid})
             result.hold_ms = max(150, min(1000, int(result.hold_ms)))
             result.cache_mb = max(256, min(16384, int(result.cache_mb)))
+            result.normalize_shortcuts()
             return result
         except (OSError, ValueError, TypeError):
             return cls()

@@ -1,6 +1,7 @@
 """Canvas input tests; these do not replace testing on a physical touchscreen."""
 
 import os
+import ctypes
 import tempfile
 import time
 import unittest
@@ -8,13 +9,19 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QEventPoint, QImage, QTouchEvent
-from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame
-from PySide6.QtTest import QTest
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, Qt, QUrl
+from PySide6.QtGui import QContextMenuEvent, QEventPoint, QImage, QTouchEvent
+from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QtVideo
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from livegallery.viewer import ViewerCanvas
+from livegallery.native_touch import (
+    GC_ALLGESTURES, ImageTouchGestureFilter, TABLET_DISABLE_PRESSANDHOLD,
+    WM_GESTURENOTIFY, WM_TABLET_QUERYSYSTEMGESTURESTATUS,
+    _GestureConfig, _GestureNotify, _Message, _Point,
+    native_client_to_viewport, signed_screen_point,
+)
 
 
 class FakePlayer:
@@ -236,6 +243,243 @@ class CanvasTests(unittest.TestCase):
         QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.WindowDeactivate))
         self.assertFalse(self.canvas._play_requested)
         self.assertTrue(self.canvas._photo.isVisible())
+
+    def test_video_keeps_one_complete_owned_frame_and_centers_its_aspect(self):
+        self.canvas.start_live()
+        image = QImage(160, 90, QImage.Format.Format_RGB32)
+        image.fill("red")
+        self.canvas._video_frame(QVideoFrame(image), self.canvas._generation)
+        shown = self.canvas._video.pixmap().toImage()
+        self.assertEqual(shown.pixelColor(80, 45).name(), "#ff0000")
+        image.fill("blue")
+        self.assertEqual(shown.pixelColor(80, 45).name(), "#ff0000")
+        self.assertAlmostEqual(self.canvas._video.scale(), 15.0)
+        self.assertAlmostEqual(self.canvas._video.pos().y(), 225.0)
+        self.canvas._video_frame(QVideoFrame(image), self.canvas._generation)
+        replaced = self.canvas._video.pixmap().toImage()
+        for y in range(replaced.height()):
+            self.assertEqual(replaced.pixelColor(80, y).name(), "#0000ff")
+
+    def test_frame_display_rotation_and_mirroring_applied_once(self):
+        image = QImage(2, 3, QImage.Format.Format_RGB32)
+        image.fill("black")
+        image.setPixelColor(0, 0, Qt.GlobalColor.red)
+        image.setPixelColor(1, 0, Qt.GlobalColor.green)
+        image.setPixelColor(0, 2, Qt.GlobalColor.blue)
+        image.setPixelColor(1, 2, Qt.GlobalColor.yellow)
+        frame = QVideoFrame(image)
+        frame.setRotation(QtVideo.Rotation.Clockwise90)
+        converted = self.canvas._frame_image(frame)
+        self.assertEqual((converted.width(), converted.height()), (3, 2))
+        self.assertEqual(converted.pixelColor(0, 0).name(), "#0000ff")
+        self.assertEqual(converted.pixelColor(2, 0).name(), "#ff0000")
+        frame.setMirrored(True)
+        converted = self.canvas._frame_image(frame)
+        self.assertEqual(converted.pixelColor(0, 0).name(), "#ff0000")
+        self.assertEqual(converted.pixelColor(2, 0).name(), "#0000ff")
+
+    def test_decoder_handoff_only_presents_latest_and_navigation_rejects_stale_frames(self):
+        self.canvas.start_live()
+        token = self.canvas._generation
+        for value in range(60):
+            image = QImage(16, 12, QImage.Format.Format_RGB32)
+            image.fill(Qt.GlobalColor.red if value < 59 else Qt.GlobalColor.blue)
+            self.canvas._video_sink.setVideoFrame(QVideoFrame(image))
+        self.assertFalse(self.canvas._video.isVisible())
+        self.canvas._present_latest_video_frame()
+        self.assertEqual(self.canvas._video.pixmap().toImage().pixelColor(8, 6).name(), "#0000ff")
+        # Polling an unchanged shared frame must avoid a second image conversion.
+        from unittest.mock import patch
+        with patch.object(self.canvas, "_video_frame") as present:
+            self.canvas._present_latest_video_frame()
+            present.assert_not_called()
+        self.canvas.set_photo(self.image)
+        self.canvas._video_frame(self.frame(), token)
+        self.canvas._present_latest_video_frame()
+        self.assertFalse(self.canvas._video.isVisible())
+        self.assertTrue(self.canvas._video.pixmap().isNull())
+        self.assertFalse(self.canvas._frame_timer.isActive())
+
+    def test_one_shot_ignores_loop_and_release_but_new_pointer_cancels(self):
+        self.canvas.set_options(loop=True)
+        self.canvas.play_live_once()
+        self.assertEqual(self.player.loops, QMediaPlayer.Loops.Once)
+        self.canvas._video_frame(self.frame(), self.canvas._generation)
+        self.canvas.release_live()
+        QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.Leave))
+        self.assertTrue(self.canvas._play_requested)
+        self.canvas._media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertEqual(self.player.play_calls, 1)
+        self.assertFalse(self.canvas._play_requested)
+        self.assertTrue(self.canvas._photo.isVisible())
+        self.canvas.play_live_once()
+        self.canvas.start_live()
+        self.assertFalse(self.canvas._play_once)
+        self.assertEqual(self.player.loops, QMediaPlayer.Loops.Infinite)
+        self.canvas.release_live()
+        self.assertFalse(self.canvas._play_requested)
+        self.canvas.play_live_once()
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        self.assertFalse(self.canvas._play_requested)
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+
+    def test_old_mouse_hold_release_cannot_stop_new_one_shot(self):
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        self.wait_for_play_calls(1)
+        self.canvas._video_frame(self.frame(), self.canvas._generation)
+        # The app's once shortcut calls this while the old mouse is still down.
+        self.canvas.play_live_once()
+        token = self.canvas._generation
+        self.canvas._video_frame(self.frame(), token)
+        QApplication.sendEvent(self.canvas.viewport(), QEvent(QEvent.Type.UngrabMouse))
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        self.assertTrue(self.canvas._play_requested)
+        self.assertTrue(self.canvas._play_once)
+        self.assertEqual(self.canvas._generation, token)
+        self.assertTrue(self.canvas._video.isVisible())
+        self.canvas._media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertFalse(self.canvas._play_requested)
+        self.assertTrue(self.canvas._photo.isVisible())
+
+    def test_old_touch_hold_release_or_cancel_cannot_stop_new_one_shot(self):
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        self.wait_for_play_calls(1)
+        self.canvas._video_frame(self.frame(), self.canvas._generation)
+        self.canvas.play_live_once()
+        token = self.canvas._generation
+        self.canvas._video_frame(self.frame(), token)
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+        self.touch(QEvent.Type.TouchCancel)
+        self.assertTrue(self.canvas._play_requested)
+        self.assertTrue(self.canvas._play_once)
+        self.assertEqual(self.canvas._generation, token)
+        self.assertTrue(self.canvas._video.isVisible())
+        self.canvas._media_status_changed(QMediaPlayer.MediaStatus.EndOfMedia)
+        self.assertFalse(self.canvas._play_requested)
+        self.assertTrue(self.canvas._photo.isVisible())
+
+    def test_touch_image_context_is_suppressed_but_blank_and_mouse_are_preserved(self):
+        portrait = QImage(600, 1200, QImage.Format.Format_RGB32)
+        portrait.fill("red")
+        self.canvas.set_photo(portrait, self.video_path)
+        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        menus = QSignalSpy(self.canvas.customContextMenuRequested)
+        self.assertFalse(self.canvas.image_contains_viewport_point(QPointF(20, 300)))
+        self.assertTrue(self.canvas.image_contains_viewport_point(QPointF(400, 300)))
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        image_menu = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, self.center,
+            self.canvas.viewport().mapToGlobal(self.center),
+        )
+        QApplication.sendEvent(self.canvas.viewport(), image_menu)
+        self.assertEqual(menus.count(), 0)
+        self.touch(QEvent.Type.TouchCancel)
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 20, 300))
+        blank_menu = QContextMenuEvent(
+            QContextMenuEvent.Reason.Mouse, QPoint(20, 300),
+            self.canvas.viewport().mapToGlobal(QPoint(20, 300)),
+        )
+        QApplication.sendEvent(self.canvas.viewport(), blank_menu)
+        self.assertEqual(menus.count(), 1)
+        self.assertFalse(self.canvas._hold_timer.isActive())
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 20, 300))
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.RightButton, pos=self.center)
+        QApplication.sendEvent(self.canvas.viewport(), image_menu)
+        self.assertEqual(menus.count(), 2)
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.RightButton, pos=self.center)
+
+
+class NativeTouchTests(unittest.TestCase):
+    def test_signed_coordinates_include_negative_monitors(self):
+        packed = ((-50 & 0xFFFF) << 16) | (-200 & 0xFFFF)
+        self.assertEqual(signed_screen_point(packed), (-200, -50))
+
+    def test_native_pixels_use_window_scale_before_viewport_offset(self):
+        class Window:
+            def devicePixelRatioF(self):
+                return 1.5
+
+        class Viewport:
+            def mapFrom(self, window, point):
+                return point - QPoint(120, 80)
+
+        class Canvas:
+            def window(self):
+                return Window()
+
+            def viewport(self):
+                return Viewport()
+
+        self.assertEqual(native_client_to_viewport(Canvas(), 480, 270), QPointF(200, 100))
+
+    def test_native_policy_changes_with_contact_and_bubbles_gesture_notify(self):
+        class NativeFunction:
+            def __init__(self, function):
+                self.function = function
+
+            def __call__(self, *args):
+                return self.function(*args)
+
+        class NativeApi:
+            def __init__(self):
+                self.policies = []
+                self.GetAncestor = NativeFunction(lambda hwnd, flag: 123)
+                self.ScreenToClient = NativeFunction(self.screen_to_client)
+                self.SetGestureConfig = NativeFunction(self.configure)
+
+            def screen_to_client(self, hwnd, pointer):
+                point = ctypes.cast(pointer, ctypes.POINTER(_Point)).contents
+                point.x -= 100
+                point.y -= 100
+                return 1
+
+            def configure(self, hwnd, reserved, count, pointer, size):
+                config = ctypes.cast(pointer, ctypes.POINTER(_GestureConfig)).contents
+                self.policies.append((config.dwWant, config.dwBlock))
+                return 1
+
+        class Canvas:
+            def isVisible(self):
+                return True
+
+            def window(self):
+                return self
+
+            def winId(self):
+                return 123
+
+            def devicePixelRatioF(self):
+                return 1.0
+
+            def viewport(self):
+                return self
+
+            def mapFrom(self, window, point):
+                return point
+
+            def image_contains_viewport_point(self, point):
+                return 200 <= point.x() < 400 and 0 <= point.y() < 400
+
+        canvas = Canvas()
+        api = NativeApi()
+        native_filter = ImageTouchGestureFilter(canvas, api)
+        message = _Message()
+        message.hwnd = 123
+        message.message = WM_TABLET_QUERYSYSTEMGESTURESTATUS
+        message.lParam = (200 << 16) | 350  # client point250,100 -> image
+        result = native_filter.nativeEventFilter(QByteArray(b"windows_generic_MSG"), ctypes.addressof(message))
+        self.assertEqual(result, (True, TABLET_DISABLE_PRESSANDHOLD))
+        self.assertEqual(api.policies[-1], (0, GC_ALLGESTURES))
+        message.lParam = (200 << 16) | 150  # client50,100 -> letterbox
+        self.assertEqual(native_filter.nativeEventFilter(b"windows_generic_MSG", ctypes.addressof(message)), (False, 0))
+        self.assertEqual(api.policies[-1], (GC_ALLGESTURES, 0))
+        notice = _GestureNotify()
+        notice.ptsLocation.x, notice.ptsLocation.y = 350, 200
+        message.message = WM_GESTURENOTIFY
+        message.lParam = ctypes.addressof(notice)
+        self.assertEqual(native_filter.nativeEventFilter(b"windows_generic_MSG", ctypes.addressof(message)), (False, 0))
+        self.assertEqual(api.policies[-1], (0, GC_ALLGESTURES))
 
 
 if __name__ == "__main__":

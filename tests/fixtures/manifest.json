@@ -9,6 +9,7 @@
     "Live_H264.jpg",
     "Live_HEVC.jpeg",
     "Live_HEVC.jpg",
+    "Portrait_HEVC.jpg",
     "ordinary.avif",
     "ordinary.bmp",
     "ordinary.gif",
@@ -28,6 +29,15 @@
     {
       "path": "JPEG_PAIR.mov",
       "codec": "h264"
+    },
+    {
+      "path": "Portrait_HEVC.MOV",
+      "codec": "hevc",
+      "rotation_ccw": 90,
+      "display_size": [
+        420,
+        640
+      ]
     }
   ],
   "heic_images": [

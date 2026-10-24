@@ -50,6 +50,7 @@ jobs:
       - name: Test frozen application and media decoding
         shell: pwsh
         run: |
+          $env:QT_QPA_PLATFORM = 'windows'
           $process = Start-Process -FilePath '.\dist\LiveViewer\LiveViewer.exe' -ArgumentList '--self-test', '--fixtures', 'tests/fixtures', '--report-dir', 'reports/frozen' -PassThru
           if (-not $process.WaitForExit(120000)) { Stop-Process -Id $process.Id -Force; throw "Frozen media test timed out" }
           if ($process.ExitCode -ne 0) { throw "Frozen application test failed with exit code $($process.ExitCode)" }
@@ -67,7 +68,7 @@ jobs:
       - name: Upload portable application and corresponding source
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: LiveViewer-Windows-x64-v0.1.0
+          name: LiveViewer-Windows-x64-v0.2.0
           path: release/
           if-no-files-found: error
           retention-days: 3

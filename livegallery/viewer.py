@@ -12,7 +12,7 @@ import math
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QContextMenuEvent,
     QEventPoint,
@@ -24,8 +24,7 @@ from PySide6.QtGui import (
     QTransform,
     QWheelEvent,
 )
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame
-from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -34,6 +33,8 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QWidget,
 )
+
+from .native_touch import install_image_touch_filter
 
 
 class ViewerCanvas(QGraphicsView):
@@ -59,6 +60,10 @@ class ViewerCanvas(QGraphicsView):
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
+        # A complete raster frame must replace the previous video in one paint.
+        # Partial scene updates can otherwise leave horizontal strips from an
+        # earlier frame, particularly with rotated/cropped HEVC on Windows.
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.NoAnchor)
@@ -72,10 +77,10 @@ class ViewerCanvas(QGraphicsView):
         self._photo.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self._photo.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.scene().addItem(self._photo)
-        self._video = QGraphicsVideoItem()
+        self._video = QGraphicsPixmapItem()
         self._video.setZValue(1)
         self._video.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self._video.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
+        self._video.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self._video.setVisible(False)
         self.scene().addItem(self._video)
 
@@ -83,10 +88,18 @@ class ViewerCanvas(QGraphicsView):
         self._audio = QAudioOutput(self)
         self._audio.setMuted(True)
         self._player.setAudioOutput(self._audio)
-        self._player.setVideoOutput(self._video)
+        self._video_sink = QVideoSink(self)
+        self._player.setVideoSink(self._video_sink)
         self._player.mediaStatusChanged.connect(self._media_status_changed)
         self._player.errorOccurred.connect(self._media_error)
-        self._frame_slot = None
+        self._last_presented_frame = QVideoFrame()
+        # Poll the sink's newest frame, instead of queueing a Python callback
+        # for every decoded frame. This bounds storage and avoids entering
+        # Python on the decoder thread while player.stop() waits for it.
+        self._frame_timer = QTimer(self)
+        self._frame_timer.setInterval(16)
+        self._frame_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._frame_timer.timeout.connect(self._present_latest_video_frame)
         self._generation = 0
         self._video_path: Path | None = None
         self._image_rect = QRectF()
@@ -96,6 +109,7 @@ class ViewerCanvas(QGraphicsView):
         self._preserve_zoom = True
         self._hold_ms = 300
         self._play_requested = False
+        self._play_once = False
         self._live_visible = False
         self._saved_view: tuple[QTransform, QPointF, bool] | None = None
         self._temporary_fit_applied = False
@@ -127,13 +141,16 @@ class ViewerCanvas(QGraphicsView):
         self._last_tap_time = 0.0
         self._last_tap_position = QPointF()
         self._window_filter_target: QWidget | None = None
+        self._touch_started_on_image = False
+        self._last_physical_right_press = 0.0
+        self._native_touch_filter = install_image_touch_filter(self)
 
     def set_photo(self, image: QImage, video_path: Path | None = None) -> None:
         """Replace the current image, cancelling every pending playback request."""
         self.stop_live()
         self._click_timer.stop()
         self._player.setSource(QUrl())
-        self._video.videoSink().setVideoFrame(QVideoFrame())
+        self._video_sink.setVideoFrame(QVideoFrame())
         self._video_path = Path(video_path) if video_path else None
         pixmap = QPixmap.fromImage(image)
         pixmap.setDevicePixelRatio(1.0)
@@ -141,8 +158,7 @@ class ViewerCanvas(QGraphicsView):
         self._photo.setVisible(True)
         self._image_rect = QRectF(0, 0, image.width(), image.height())
         self.setSceneRect(self._image_rect)
-        self._video.setSize(QSizeF(image.width(), image.height()))
-        self._video.setOffset(QPointF())
+        self._video.setPixmap(QPixmap())
         self._fit_view()
 
     def clear(self) -> None:
@@ -174,7 +190,7 @@ class ViewerCanvas(QGraphicsView):
         self._photo.setPixmap(pixmap)
         self._image_rect = QRectF(0, 0, image.width(), image.height())
         self.setSceneRect(self._image_rect)
-        self._video.setSize(QSizeF(image.width(), image.height()))
+        self._video.setPixmap(QPixmap())
         self._fit_scale = self._calculate_fit_scale()
         scale = self._fit_scale * relative_zoom
         self.setTransform(QTransform.fromScale(scale, scale))
@@ -217,14 +233,30 @@ class ViewerCanvas(QGraphicsView):
 
     def start_live(self) -> None:
         """Play from the beginning, until release or the end of a single play."""
+        if self._play_once:
+            self.stop_live()
+        self._start_playback(play_once=False)
+
+    def play_live_once(self) -> None:
+        """Start one complete play, independent of the held-input loop setting."""
+        # A new explicit trigger starts again even if an earlier clip is active.
+        self.stop_live()
+        self._start_playback(play_once=True)
+
+    def release_live(self) -> None:
+        """Release a hold binding without cancelling a latched one-shot play."""
+        if not self._play_once:
+            self.stop_live()
+
+    def _start_playback(self, *, play_once: bool) -> None:
         if self._play_requested or self._image_rect.isEmpty() or self._video_path is None:
             return
         if not self._video_path.is_file():
             self.message.emit("视频文件不可用，请检查移动硬盘是否已连接。")
             return
         self._generation += 1
-        generation = self._generation
         self._play_requested = True
+        self._play_once = play_once
         self._temporary_fit_applied = False
         self._saved_view = (
             (QTransform(self.transform()), self._scene_center(), self._fit_mode)
@@ -235,19 +267,17 @@ class ViewerCanvas(QGraphicsView):
         self._photo.show()
         # Clearing the sink prevents a frame left over from a previous hold from
         # being presented as the first frame of the new request.
-        self._video.videoSink().setVideoFrame(QVideoFrame())
-        if self._frame_slot is not None:
-            self._video.videoSink().videoFrameChanged.disconnect(self._frame_slot)
-        self._frame_slot = lambda frame, token=generation: self._video_frame(frame, token)
-        self._video.videoSink().videoFrameChanged.connect(self._frame_slot)
+        self._video_sink.setVideoFrame(QVideoFrame())
+        self._last_presented_frame = QVideoFrame()
         self._player.setLoops(
-            QMediaPlayer.Loops.Infinite if self._loop else QMediaPlayer.Loops.Once
+            QMediaPlayer.Loops.Infinite if self._loop and not play_once else QMediaPlayer.Loops.Once
         )
         source = QUrl.fromLocalFile(str(self._video_path.resolve()))
         if self._player.source() != source:
             self._player.setSource(source)
         self._player.setPosition(0)
         self._load_timer.start()
+        self._frame_timer.start()
         self._player.play()
 
     def stop_live(self) -> None:
@@ -267,11 +297,15 @@ class ViewerCanvas(QGraphicsView):
     def _stop_playback(self) -> None:
         self._generation += 1
         self._play_requested = False
+        self._play_once = False
+        self._frame_timer.stop()
+        self._last_presented_frame = QVideoFrame()
         self._load_timer.stop()
         was_visible = self._live_visible
         self._live_visible = False
         # Switch immediately; QMediaPlayer.stop() may finish asynchronously.
         self._video.hide()
+        self._video.setPixmap(QPixmap())
         self._photo.show()
         self._player.stop()
         if self._saved_view is not None:
@@ -286,9 +320,50 @@ class ViewerCanvas(QGraphicsView):
         if was_visible:
             self.playback_changed.emit(False)
 
+    def _present_latest_video_frame(self) -> None:
+        """GUI-thread pull: skip old frames if painting temporarily falls behind."""
+        if not self._play_requested:
+            return
+        frame = self._video_sink.videoFrame()
+        if not frame.isValid() or frame == self._last_presented_frame:
+            return
+        self._last_presented_frame = frame
+        self._video_frame(frame, self._generation)
+
+    @staticmethod
+    def _frame_image(frame: QVideoFrame) -> QImage:
+        # toImage applies the surface's orientation, crop, pixel stride and
+        # color conversion. Frame-level display transforms are additional and
+        # are deliberately not applied by toImage (Qt QVideoFrame docs).
+        image = frame.toImage()
+        if image.isNull():
+            return image
+        rotation = frame.rotation().value
+        if rotation:
+            image = image.transformed(QTransform().rotate(rotation))
+        if frame.mirrored():
+            image = image.flipped(Qt.Orientation.Horizontal)
+        # Detach from decoder-managed storage before its next frame reuses a
+        # surface. QPixmap then owns a complete immutable CPU-rendered frame.
+        return image.copy()
+
     def _video_frame(self, frame: QVideoFrame, generation: int) -> None:
         if generation != self._generation or not self._play_requested or not frame.isValid():
             return
+        image = self._frame_image(frame)
+        if image.isNull() or generation != self._generation or not self._play_requested:
+            return
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(1.0)
+        self._video.setPixmap(pixmap)
+        scale = min(
+            self._image_rect.width() / image.width(),
+            self._image_rect.height() / image.height(),
+        )
+        self._video.setScale(scale)
+        self._video.setPos(
+            self._image_rect.center() - QPointF(image.width() * scale / 2, image.height() * scale / 2)
+        )
         if not self._live_visible:
             self._load_timer.stop()
             if self._saved_view is not None:
@@ -303,7 +378,7 @@ class ViewerCanvas(QGraphicsView):
         if not self._play_requested:
             return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            if self._loop:
+            if self._loop and not self._play_once:
                 # Qt normally handles infinite looping itself. This fallback
                 # covers backends that surface EndOfMedia at the loop boundary.
                 self._player.setPosition(0)
@@ -419,6 +494,13 @@ class ViewerCanvas(QGraphicsView):
         )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.RightButton and not self._is_synthesized_mouse(event):
+            # Real mouse right-click remains available even immediately after
+            # touching an image. Windows touch-generated mouse events are
+            # marked synthesized by Qt and do not take this route.
+            self._last_physical_right_press = time.monotonic()
+            super().mousePressEvent(event)
+            return
         if self._ignore_mouse(event):
             event.accept()
             return
@@ -432,7 +514,7 @@ class ViewerCanvas(QGraphicsView):
         self._hold_consumed = False
         self._pointer_start = QPointF(event.position())
         self._pointer_last = QPointF(event.position())
-        if self._video_path is not None:
+        if self._video_path is not None and self.image_contains_viewport_point(event.position()):
             self._hold_timer.start(self._hold_ms)
         if self.isVisible():
             self.viewport().grabMouse()
@@ -463,10 +545,15 @@ class ViewerCanvas(QGraphicsView):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
-            was_click = self._mouse_down and not self._mouse_moved and not self._hold_consumed
+            owned_press = self._mouse_down
+            was_click = owned_press and not self._mouse_moved and not self._hold_consumed
             self._mouse_down = False
             self._hold_timer.stop()
-            self._stop_playback()
+            # Switching from a mouse hold to the once shortcut releases this
+            # pointer's ownership. Its eventual button-up cannot stop the new
+            # latched play, nor can a stray release stop keyboard playback.
+            if owned_press and not self._play_once:
+                self._stop_playback()
             self._release_capture()
             self.viewport().unsetCursor()
             if was_click:
@@ -511,7 +598,15 @@ class ViewerCanvas(QGraphicsView):
             QEvent.Type.TouchEnd,
             QEvent.Type.TouchCancel,
         ):
-            self._touch_event(event)
+            if self._touch_event(event):
+                event.accept()
+                return True
+            # Let Windows recognize long-press on letterboxing/empty canvas.
+            event.ignore()
+            return super().viewportEvent(event)
+        if event_type == QEvent.Type.ContextMenu and self._suppress_touch_context(event):
+            # This precedes QWidget's CustomContextMenu handling, which would
+            # otherwise bypass contextMenuEvent and show the app's menu.
             event.accept()
             return True
         if event_type == QEvent.Type.UngrabMouse and not self._releasing_capture:
@@ -519,14 +614,30 @@ class ViewerCanvas(QGraphicsView):
                 self.stop_live()
         return super().viewportEvent(event)
 
-    def _touch_event(self, event) -> None:
+    def image_contains_viewport_point(self, position: QPointF) -> bool:
+        if self._image_rect.isEmpty() or not self.viewport().rect().contains(position.toPoint()):
+            return False
+        return self._image_rect.contains(self.mapToScene(position.toPoint()))
+
+    def _touch_event(self, event) -> bool:
         event_type = event.type()
+        points = event.points()
+        if event_type == QEvent.Type.TouchBegin:
+            self._touch_started_on_image = bool(
+                points and self.image_contains_viewport_point(points[0].position())
+            )
+            if not self._touch_started_on_image:
+                self.stop_live()
+                self._ignore_mouse_until = 0.0
+                return False
+        if not self._touch_started_on_image:
+            return False
         self._ignore_mouse_until = time.monotonic() + 0.65
         if event_type == QEvent.Type.TouchCancel:
-            self.stop_live()
+            if self._touch_active and not self._play_once:
+                self.stop_live()
             self._last_tap_time = 0.0
-            return
-        points = event.points()
+            return True
         active = [p for p in points if p.state() != QEventPoint.State.Released]
         if event_type == QEvent.Type.TouchBegin:
             self.stop_live()
@@ -543,11 +654,11 @@ class ViewerCanvas(QGraphicsView):
             if len(active) == 1 and self._video_path is not None:
                 self._hold_timer.start(self._hold_ms)
         if not self._touch_active:
-            return
+            return True
         if event_type == QEvent.Type.TouchEnd or not active:
             position = QPointF(points[0].position()) if points else self._pointer_last
             self._finish_touch(position)
-            return
+            return True
         previous_count = self._touch_count
         self._touch_count = len(active)
         if len(active) >= 2:
@@ -564,7 +675,7 @@ class ViewerCanvas(QGraphicsView):
             self._pinch_distance = distance
             self._pinch_center = QPointF(center)
             self._pointer_last = QPointF(first)
-            return
+            return True
         position = QPointF(active[0].position())
         if previous_count >= 2:
             # After a pinch, the remaining finger can pan, but it cannot start a
@@ -579,20 +690,24 @@ class ViewerCanvas(QGraphicsView):
             if not self._fit_mode:
                 self._pan_by(position - self._pointer_last)
         self._pointer_last = position
+        return True
 
     def _finish_touch(self, position: QPointF) -> None:
+        owned_press = self._touch_active
         delta = position - self._pointer_start
         had_multi = self._touch_had_multi
         was_fit = self._touch_was_fit
-        was_tap = not had_multi and not self._mouse_moved and not self._hold_consumed
+        was_tap = owned_press and not had_multi and not self._mouse_moved and not self._hold_consumed
         self._hold_timer.stop()
-        self._stop_playback()
+        if owned_press and not self._play_once:
+            self._stop_playback()
         self._touch_active = False
         self._touch_count = 0
         self._touch_had_multi = False
         self._release_capture()
         if (
-            not had_multi
+            owned_press
+            and not had_multi
             and was_fit
             and self._mouse_moved
             and abs(delta.x()) >= max(60, self.viewport().width() * 0.08)
@@ -616,8 +731,19 @@ class ViewerCanvas(QGraphicsView):
         else:
             self._last_tap_time = 0.0
 
+    def _suppress_touch_context(self, event: QContextMenuEvent) -> bool:
+        if event.reason() == QContextMenuEvent.Reason.Keyboard:
+            return False
+        if time.monotonic() - self._last_physical_right_press < 0.75:
+            return False
+        return (
+            self._touch_started_on_image
+            and (self._touch_active or time.monotonic() < self._ignore_mouse_until)
+            and self.image_contains_viewport_point(QPointF(event.pos()))
+        )
+
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
-        if self._touch_active or time.monotonic() < self._ignore_mouse_until:
+        if self._suppress_touch_context(event):
             event.accept()
         else:
             super().contextMenuEvent(event)
@@ -629,7 +755,8 @@ class ViewerCanvas(QGraphicsView):
     def leaveEvent(self, event) -> None:
         # A held pointer leaving the canvas must not leave media running when a
         # release is consumed by a system gesture or a different application.
-        self.stop_live()
+        if not self._play_once:
+            self.stop_live()
         super().leaveEvent(event)
 
     def hideEvent(self, event) -> None:

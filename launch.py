@@ -3,6 +3,11 @@ import argparse
 import os
 from pathlib import Path
 
+# Use Qt's documented CPU texture-conversion fallback for driver compatibility
+# on Windows, before loading Qt. Hardware-assisted decoding remains available.
+if os.name == 'nt':
+    os.environ.setdefault('QT_DISABLE_HW_TEXTURES_CONVERSION', '1')
+
 
 def main():
     parser = argparse.ArgumentParser()

@@ -10,13 +10,14 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QEvent, QPoint, Qt
+from PySide6.QtGui import QImage, QKeyEvent, QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QDialog
 
-from livegallery.app import MainWindow
+from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
+from livegallery.settings import Preferences
 
 
 class WindowTests(unittest.TestCase):
@@ -133,7 +134,7 @@ class WindowTests(unittest.TestCase):
         self.window._rebuild_items()
         self.window._current_id = a.id
         self.window._request_pair = lambda *_args: None
-        self.window.kind_filter.setCurrentIndex(3)
+        self.window.kind_filter.pending.setChecked(True)
         self.window._request_context["complete"] = ("pair", self.window._epoch, a, 0)
         self.window._job_finished("complete", PairDecision(first, (), False, "done"), None)
         self.assertEqual(self.window._current_id, b.id)
@@ -154,6 +155,166 @@ class WindowTests(unittest.TestCase):
         self.window.viewer._play_requested = True
         self.window._schedule_background_pair()
         self.assertEqual(len(requests), 1)
+
+    def show_live_item(self):
+        path = self.picture("still.jpg")
+        item = MediaItem("live", path, self.base / "clip.mov")
+        self.window._displayed_item = item
+        self.window._current_id = item.id
+        self.window._primary_items = [item]
+        self.window._rebuild_items()
+        self.window.viewer.set_photo(self.image, item.video_path)
+        self.window.content.setCurrentWidget(self.window.viewer)
+        self.window.viewer.setFocus()
+        self.application.processEvents()
+        return item
+
+    def assert_fullscreen_has_no_controls(self):
+        self.assertTrue(self.window.isFullScreen())
+        for widget in (self.window.header, self.window.filterbar, self.window.infobar,
+                       self.window.viewer_tools, self.window.sidebar, self.window.statusBar(),
+                       self.window.toast, self.window.library_label, self.window.analysis_label):
+            self.assertFalse(widget.isVisible(), widget.objectName() or type(widget).__name__)
+
+    def test_fullscreen_is_immediate_stable_and_escape_only(self):
+        self.show_live_item()
+        self.window.grid_button.click()
+        self.window.fullscreen_button.click()
+        self.assertFalse(self.window._grid_mode)
+        self.assertIs(self.window.content.currentWidget(), self.window.viewer)
+        self.assert_fullscreen_has_no_controls()
+        self.assertTrue(self.window.film.isVisible())
+        QTest.mouseMove(self.window.viewer.viewport(), QPoint(100, 100))
+        self.window.viewer.controls_toggled.emit()
+        self.window._show_message("后台分析已完成")
+        self.window._set_chrome(True)
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_F11)
+        self.assert_fullscreen_has_no_controls()
+        self.assertTrue(self.window.film.isVisible())
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.isFullScreen())
+        self.assertTrue(self.window.header.isVisible())
+        self.assertTrue(self.window.film.isVisible())
+
+    def test_fullscreen_restores_maximized_state_and_hidden_filmstrip_preference(self):
+        self.show_live_item()
+        self.window.strip_button.click()
+        self.window.showMaximized()
+        self.application.processEvents()
+        self.assertTrue(self.window.isMaximized())
+        self.window._toggle_fullscreen()
+        self.assert_fullscreen_has_no_controls()
+        self.assertFalse(self.window.film.isVisible())
+        self.window.viewer.controls_toggled.emit()
+        self.assertFalse(self.window.film.isVisible())
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        self.assertTrue(self.window.isMaximized())
+        self.assertFalse(self.window.film.isVisible())
+
+    def test_media_type_filter_supports_both_each_and_neither(self):
+        live = MediaItem("live", self.picture("live.jpg"), self.base / "live.mov")
+        static = MediaItem("static", self.picture("static.png"), uncertain=True)
+        self.window._primary_items = [live, static]
+        self.window._rebuild_items()
+        self.window._apply_filters(select_first=False)
+        self.assertEqual({item.id for item in self.window.model.items}, {"live", "static"})
+        self.window.kind_filter.static.setChecked(False)
+        self.assertEqual([item.id for item in self.window.model.items], ["live"])
+        self.window.kind_filter.live.setChecked(False)
+        self.assertEqual(self.window.model.items, [])
+        self.window.kind_filter.static.setChecked(True)
+        self.assertEqual([item.id for item in self.window.model.items], ["static"])
+        self.window.kind_filter.live.setChecked(True)
+        self.assertEqual(len(self.window.model.items), 2)
+        self.window.kind_filter.pending.setChecked(True)
+        self.assertEqual([item.id for item in self.window.model.items], ["static"])
+
+    def test_once_shortcut_is_independent_of_key_release_and_repeat(self):
+        self.show_live_item()
+        with patch.object(self.window.viewer, "play_live_once") as once, \
+                patch.object(self.window.viewer, "stop_live") as stop:
+            QTest.keyPress(self.window.viewer, Qt.Key.Key_P)
+            QTest.keyRelease(self.window.viewer, Qt.Key.Key_P)
+            repeated = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_P,
+                                 Qt.KeyboardModifier.NoModifier, "p", True)
+            QApplication.sendEvent(self.window.viewer, repeated)
+            self.assertEqual(once.call_count, 1)
+            stop.assert_not_called()
+
+    def test_custom_once_combo_overrides_builtin_and_ignores_text_and_modal_dialog(self):
+        self.show_live_item()
+        self.window._once_sequence = QKeySequence("Ctrl+O")
+        with patch.object(self.window.viewer, "play_live_once") as once, \
+                patch.object(self.window, "choose_folder") as choose:
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+            self.assertEqual(once.call_count, 1)
+            choose.assert_not_called()
+            self.window.search.setFocus()
+            self.application.processEvents()
+            QTest.keyClick(self.window.search, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+            self.assertEqual(once.call_count, 1)
+            dialog = SettingsDialog(self.window.preferences, self.window)
+            dialog.show()
+            self.application.processEvents()
+            QTest.keyClick(dialog.live_key, Qt.Key.Key_O, Qt.KeyboardModifier.ControlModifier)
+            self.assertEqual(once.call_count, 1)
+            dialog.reject()
+
+    def test_shortcut_settings_validate_conflicts_and_persist_once_key(self):
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        dialog.live_once_key.setKeySequence(QKeySequence("Space"))
+        with patch("livegallery.app.QMessageBox.information") as message:
+            dialog._accept()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+            self.assertIn("相同", message.call_args.args[2])
+        dialog.live_once_key.setKeySequence(QKeySequence("Esc"))
+        with patch("livegallery.app.QMessageBox.information") as message:
+            dialog._accept()
+            self.assertIn("Esc", message.call_args.args[2])
+        dialog.live_once_key.setKeySequence(QKeySequence("Right"))
+        with patch("livegallery.app.QMessageBox.information") as message:
+            dialog._accept()
+            self.assertIn("下一张", message.call_args.args[2])
+        dialog.override_keys.setChecked(True)
+        dialog._accept()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        preferences = Preferences(live_once_key="Ctrl+Shift+L")
+        preferences.save()
+        self.assertEqual(Preferences.load().live_once_key, "Ctrl+Shift+L")
+        # Settings saved by older versions gain the new default automatically.
+        target = self.base / "data" / "settings.json"
+        target.write_text('{"live_key": "Space"}', encoding="utf-8")
+        self.assertEqual(Preferences.load().live_once_key, "P")
+
+    def test_old_hold_p_binding_survives_once_shortcut_migration(self):
+        target = self.base / "data" / "settings.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        for saved in ('{"live_key": "p"}', '{"live_key": "P", "live_once_key": "p"}',
+                      '{"live_key": "P", "live_once_key": "Esc"}',
+                      '{"live_key": "P", "live_once_key": "not a valid key"}'):
+            target.write_text(saved, encoding="utf-8")
+            loaded = Preferences.load()
+            self.assertEqual(loaded.live_key, "P")
+            self.assertEqual(loaded.live_once_key, "F9")
+        # Reopen from the migrated file as an actual application launch would.
+        self.window.close()
+        self.assertTrue(self.window.wait_for_shutdown(5))
+        self.window.deleteLater()
+        self.application.processEvents()
+        target.write_text('{"live_key": "p"}', encoding="utf-8")
+        self.window = MainWindow()
+        self.window.show()
+        self.show_live_item()
+        with patch.object(self.window.viewer, "start_live") as hold, \
+                patch.object(self.window.viewer, "release_live") as release, \
+                patch.object(self.window.viewer, "play_live_once") as once:
+            QTest.keyPress(self.window.viewer, Qt.Key.Key_P)
+            hold.assert_called_once()
+            once.assert_not_called()
+            QTest.keyRelease(self.window.viewer, Qt.Key.Key_P)
+            release.assert_called_once()
+            QTest.keyClick(self.window.viewer, Qt.Key.Key_F9)
+            once.assert_called_once()
 
 
 if __name__ == "__main__":
