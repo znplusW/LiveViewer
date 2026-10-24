@@ -57,6 +57,33 @@ class CachePreferencesTests(unittest.TestCase):
         self.assertEqual(data_directory(), self.data)
         self.assertFalse((self.app / 'data').exists())
 
+    def test_overview_and_film_sizes_migrate_clamp_and_keep_other_preferences(self):
+        for width, height, expected in ((None, None, (204, 200)),
+                                        (-1, 900, (120, 480)),
+                                        (900, -1, (480, 160)),
+                                        ('bad', True, (204, 200)),
+                                        (300, 280, (300, 280))):
+            values = {'muted': False}
+            if width is not None:
+                values.update(overview_thumbnail_width=width, filmstrip_height=height)
+            (self.data / 'settings.json').write_text(json.dumps(values), encoding='utf-8')
+            loaded = Preferences.load()
+            self.assertEqual((loaded.overview_thumbnail_width, loaded.filmstrip_height), expected)
+            self.assertFalse(loaded.muted)
+        loaded.save()
+        self.assertEqual(Preferences.load(), loaded)
+
+    def test_appearance_defaults_roundtrips_and_rejects_invalid_values(self):
+        self.assertEqual(Preferences.load().theme_mode, 'dark')
+        for mode in ('dark', 'light', 'system'):
+            Preferences(theme_mode=mode).save()
+            self.assertEqual(Preferences.load().theme_mode, mode)
+        for value in ('invalid', None, 7):
+            (self.data / 'settings.json').write_text(json.dumps({'theme_mode': value, 'muted': False}))
+            loaded = Preferences.load()
+            self.assertEqual(loaded.theme_mode, 'dark')
+            self.assertFalse(loaded.muted)
+
 
 if __name__ == '__main__':
     unittest.main()

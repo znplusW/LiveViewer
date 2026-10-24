@@ -3,17 +3,21 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QEventPoint, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QGroupBox, QHBoxLayout, QLabel, QPushButton,
+    QDialog, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton,
     QRadioButton, QSlider, QSizePolicy, QStyle, QStyleOptionSlider, QVBoxLayout,
 )
 
 from .cover_save import CoverSource, SaveResult, save_cover
 from .frame_reader import FrameCancelled, FrameReader
 from .models import MediaItem
+from .frame_export import export_frame
+from .ui_theme import bind_theme, tokens_for
+from .viewer import ViewerCanvas
 
 
 class _Signals(QObject):
@@ -23,6 +27,29 @@ class _Signals(QObject):
     saved = Signal(object)
     failed = Signal(str, int, str)
     cancelled = Signal()
+
+
+class _ExportSignals(QObject):
+    completed = Signal(object, object)
+
+
+class FramePreview(ViewerCanvas):
+    """Photo-only gestures with an unchanged view while frames are replaced."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._frame_key = None
+
+    def show_frame(self, image):
+        if image.isNull() or image.cacheKey() == self._frame_key:
+            return
+        if self._image_rect.size().toSize() == image.size():
+            self._photo.setPixmap(QPixmap.fromImage(image))
+            self.viewport().update()
+        else:
+            self._cancel_zoom_animation()
+            self.replace_photo(image)
+        self._frame_key = image.cacheKey()
 
 
 def _qimage(image) -> QImage:
@@ -54,6 +81,7 @@ class _EditorWorker:
         self._busy = None
         self._sequence = 0
         self._selected_index = 0
+        self.source = None
         self._request_sequences = {}
         self.thread = threading.Thread(target=self._run, name="cover-editor", daemon=True)
 
@@ -126,6 +154,7 @@ class _EditorWorker:
         try:
             self._reader = self._reader_factory(self._item.video_path, cancel_event=self._closing)
             source = CoverSource.capture(self._item, self._closing)
+            self.source = source
             metadata = self._reader.open()
             if self._closing.is_set():
                 return
@@ -323,7 +352,7 @@ class CoverTimelineSlider(QSlider):
                                                 span, option.upsideDown)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        color = QColor("#8cc7db")
+        color = QColor(tokens_for(self)['focus'])
         painter.setPen(QPen(color, 2))
         if horizontal:
             x = groove.x() + handle.width() / 2 + offset
@@ -376,6 +405,7 @@ class SaveModeDialog(QDialog):
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
+        bind_theme(self, lambda _scheme: self._update_warning())
 
     @property
     def mode(self):
@@ -386,12 +416,12 @@ class SaveModeDialog(QDialog):
             self.warning_label.setText(
                 f"新图片校验通过后，永久替换「{self._item.image_path.name}」。不保留备份，保存后无法在 LiveViewer 中撤销；原视频不变。"
             )
-            self.warning_label.setStyleSheet("color:#efb789")
+            self.warning_label.setStyleSheet(f"color:{tokens_for(self)['badge_text']}")
         else:
             self.warning_label.setText(
                 "图片与视频一起创建 v1、v2… 副本，使用同一个版本号。图片格式保持不变，视频完整复制，原文件不变。"
             )
-            self.warning_label.setStyleSheet("color:#a7b2bf")
+            self.warning_label.setStyleSheet(f"color:{tokens_for(self)['muted']}")
 
 
 _DEFAULT_PREVIEW = object()
@@ -425,6 +455,15 @@ class EditorDialog(QDialog):
         self._choosing_save = False
         self._cancel_pending = False
         self._item = item
+        self.last_export_path = None
+        self._export_busy = False
+        self._export_choosing = False
+        self._export_closed = False
+        self._export_cancel_pending = False
+        self._export_cancel = threading.Event()
+        self._export_thread = None
+        self._export_signals = _ExportSignals(self)
+        self._export_signals.completed.connect(self._export_finished)
         self._save_dialog_factory = save_dialog_factory or SaveModeDialog
         if preview_factory is _DEFAULT_PREVIEW:
             if reader_factory is None or reader_factory is FrameReader:
@@ -433,6 +472,7 @@ class EditorDialog(QDialog):
             else:
                 preview_factory = None
         self._build_ui()
+        bind_theme(self, self._apply_theme)
         self._worker = _EditorWorker(item, reader_factory or FrameReader, save_function or save_cover,
                                      preview_factory or None)
         self._worker.signals.opened.connect(self._opened)
@@ -442,7 +482,16 @@ class EditorDialog(QDialog):
         self._worker.signals.failed.connect(self._failed)
         self._worker.signals.cancelled.connect(self._save_cancelled)
         self.finished.connect(lambda _result: self._worker.close())
+        self.finished.connect(self._close_exports)
         self._worker.start()
+
+    def _apply_theme(self, _scheme):
+        colors = tokens_for(self)
+        self.preview.setStyleSheet(
+            f"background:{colors['canvas']};border:1px solid {colors['border']};border-radius:7px")
+        self.preview.apply_theme(colors)
+        self.original_label.setStyleSheet(f"color:{colors['focus']}")
+        self.timeline.update()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -451,12 +500,13 @@ class EditorDialog(QDialog):
         title.setStyleSheet("font-size:19px;font-weight:600")
         title.setWordWrap(True)
         layout.addWidget(title)
-        self.preview = QLabel("正在读取视频…")
+        self.preview = FramePreview(self)
         self.preview.setObjectName("coverPreview")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(max(140, min(280, self.height() - 300)))
         self.preview.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        self.preview.setStyleSheet("background:#080a0d;border:1px solid #303946;border-radius:7px")
+        self.preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.preview.customContextMenuRequested.connect(self._preview_menu)
         layout.addWidget(self.preview, 1)
         self.resolution_label = QLabel("视频帧分辨率可能低于原照片。")
         self.resolution_label.setWordWrap(True)
@@ -477,7 +527,6 @@ class EditorDialog(QDialog):
         self.timeline.valueChanged.connect(self._request_frame)
         layout.addWidget(self.timeline)
         self.original_label = QLabel("正在定位原封面图…")
-        self.original_label.setStyleSheet("color:#8cc7db")
         self.original_label.setWordWrap(True)
         layout.addWidget(self.original_label)
         self.previous_button.clicked.connect(lambda: self._step(-1))
@@ -553,7 +602,7 @@ class EditorDialog(QDialog):
             self.status_label.setText("拖动时间轴选择画面；左右方向键逐帧查看。")
         else:
             self._update_loading_status()
-        self.save_button.setEnabled(exact and not self._choosing_save)
+        self.save_button.setEnabled(exact and not self._choosing_save and not self._export_busy)
 
     def _update_loading_status(self):
         target = self.selected_frame_index + 1
@@ -582,20 +631,113 @@ class EditorDialog(QDialog):
 
     def _render_preview(self):
         if not self._preview_image.isNull():
-            self.preview.setPixmap(QPixmap.fromImage(self._preview_image).scaled(
-                self.preview.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
+            self.preview.show_frame(self._preview_image)
+
+    def _can_export(self):
+        return (not self._saving and not self._choosing_save and not self._export_busy
+                and not self._export_choosing and not self._export_closed
+                and self.metadata is not None and not self._preview_image.isNull()
+                and self.displayed_frame_index == self.selected_frame_index
+                and self._displayed_sequence == self._request_sequence == self._loaded_sequence
+                and self._worker.source is not None)
+
+    def _preview_menu(self, position):
+        menu = QMenu(self)
+        action = menu.addAction('导出静帧画面…', self._export_current_frame)
+        action.setEnabled(self._can_export())
+        try:
+            menu.exec(self.preview.mapToGlobal(position))
+        finally:
+            menu.deleteLater()
+
+    def _choose_export_path(self, index):
+        dialog = QFileDialog(self, '导出静帧画面', str(self._item.image_path.parent))
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+        dialog.setOption(QFileDialog.Option.DontConfirmOverwrite, False)
+        filters = {'PNG 图片 (*.png)': 'png', 'JPEG 图片 (*.jpg *.jpeg)': 'jpg',
+                   'HEIC 图片 (*.heic)': 'heic'}
+        dialog.setNameFilters(list(filters))
+        dialog.setDefaultSuffix('png')
+        dialog.selectFile(f'{self._item.image_path.stem} 帧{index + 1:04d}.png')
+        def change_format(selected):
+            suffix = filters[selected]
+            dialog.setDefaultSuffix(suffix)
+            selected_files = dialog.selectedFiles()
+            if selected_files and Path(selected_files[0]).suffix.casefold() in ('.png', '.jpg', '.jpeg', '.heic'):
+                dialog.selectFile(str(Path(selected_files[0]).with_suffix('.' + suffix)))
+        dialog.filterSelected.connect(change_format)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            selected = dialog.selectedFiles()
+            return Path(selected[0]) if selected else None
+        finally:
+            dialog.deleteLater()
+
+    def _export_current_frame(self):
+        if not self._can_export():
+            return
+        index = self.displayed_frame_index
+        source = self._worker.source.video
+        self._export_choosing = True
+        try:
+            destination = self._choose_export_path(index)
+        finally:
+            self._export_choosing = False
+        if destination is None or self._export_closed:
+            return
+        self._export_busy = True
+        self.save_button.setEnabled(False)
+        cancel = self._export_cancel = threading.Event()
+        self.status_label.setText('正在导出完整分辨率静帧画面…')
+        signals, video = self._export_signals, self._item.video_path
+        def export():
+            result, error = None, None
+            try:
+                result = export_frame(video, index, destination, expected_video=source, cancel_event=cancel)
+            except (FrameCancelled, InterruptedError):
+                error = '已取消导出静帧画面。'
+            except Exception as failure:
+                error = str(failure)
+            try:
+                signals.completed.emit(result, error)
+            except RuntimeError:
+                pass
+        self._export_thread = threading.Thread(target=export, name='cover-frame-export', daemon=True)
+        self._export_thread.start()
+
+    def _export_finished(self, result, error):
+        self._export_busy = False
+        if result is not None and error is None:
+            self.last_export_path = result
+        if self._export_cancel_pending:
+            self._export_cancel_pending = False
+            super().reject()
+            return
+        if self._export_closed:
+            return
+        if error:
+            self.status_label.setText('导出静帧画面未完成：' + error)
+        else:
+            self.status_label.setText('已导出静帧画面：' + Path(result).name)
+        self.save_button.setEnabled(self._loaded_sequence == self._request_sequence
+                                    and not self._saving and not self._choosing_save)
+
+    def _close_exports(self, _result):
+        self._export_closed = True
+        self._export_cancel.set()
 
     def _update_controls(self):
         count = len(self.metadata.frames) if self.metadata is not None else 0
-        enabled = not self._saving and not self._choosing_save
+        enabled = not self._saving and not self._choosing_save and not self._export_cancel_pending
         self.previous_button.setEnabled(enabled and self.selected_frame_index > 0)
         self.next_button.setEnabled(enabled and self.selected_frame_index + 1 < count)
         self.timeline.setEnabled(enabled and count > 0)
 
     def _save(self):
-        if self._saving or self._choosing_save or self._loaded_sequence != self._request_sequence:
+        if (self._saving or self._choosing_save or self._export_busy or self._export_choosing
+                or self._loaded_sequence != self._request_sequence):
             return
         self._choosing_save = True
         self._update_controls()
@@ -644,6 +786,13 @@ class EditorDialog(QDialog):
             self.save_button.setEnabled(self._loaded_sequence == self._request_sequence)
 
     def reject(self):
+        self._export_cancel.set()
+        if self._export_busy:
+            self._export_cancel_pending = True
+            self.status_label.setText('正在取消导出静帧画面，请稍候…')
+            self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(False)
+            self._update_controls()
+            return
         if self._saving:
             self._cancel_pending = True
             self.status_label.setText("正在取消保存，请稍候…")

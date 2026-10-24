@@ -86,18 +86,86 @@ def _check_windows_native_hold_policy(viewer: ViewerCanvas):
     assert not query(blank_corner) & TABLET_DISABLE_PRESSANDHOLD, 'Blank area blocks Windows press-and-hold'
 
 
-def _check_overview_touch_scroll(window, fixtures: Path):
-    """Exercise the shipped overview with many rows without decoding more media."""
+def _check_overview_touch_scroll(window, fixtures: Path, report_dir: Path):
+    """Exercise many rows using a bounded set of synthetic fixture thumbnails."""
     grid = window.grid
     assert isinstance(grid, OverviewGrid)
     original_model = grid.model()
+    original_width = grid.thumbnail_width
+    original_id = window._current_id
     scrolling_model = CatalogModel(grid)
-    scrolling_model.set_items([MediaItem(f'touch-scroll-{row}', fixtures / 'ordinary.png')
+    paths = [fixtures / name for name in ('ordinary.png', 'Portrait_HEVC.jpg', 'Live_H264.jpg')]
+    scrolling_model.set_items([MediaItem(f'touch-scroll-{row}', paths[row % len(paths)])
                                for row in range(3000)])
+    for path in paths:
+        scrolling_model.put_thumbnail(path, _qimage(path))
+    clicked = []
+    def record_click(index):
+        clicked.append(index.row())
+    grid.clicked.connect(record_click)
     grid.setModel(scrolling_model)
     try:
         _wait(lambda: grid.verticalScrollBar().maximum() > 0, 3)
         device = QTest.createTouchDevice()
+        def columns():
+            first = grid.visualRect(scrolling_model.index(0))
+            return sum(grid.visualRect(scrolling_model.index(row)).top() == first.top()
+                       for row in range(40))
+        def pinch(start_half, end_half):
+            center = grid.viewport().rect().center()
+            gesture = QTest.touchEvent(grid.viewport(), device, False)
+            left, right = center - QPoint(start_half, 0), center + QPoint(start_half, 0)
+            gesture.press(0, left, grid.viewport()).press(1, right, grid.viewport()).commit()
+            gesture.move(0, center - QPoint(end_half, 0), grid.viewport()).move(
+                1, center + QPoint(end_half, 0), grid.viewport()).commit()
+            QCoreApplication.processEvents()
+            gesture.release(0, center - QPoint(end_half, 0), grid.viewport()).release(
+                1, center + QPoint(end_half, 0), grid.viewport()).commit()
+            QCoreApplication.processEvents()
+
+        grid.verticalScrollBar().setValue(0)
+        QCoreApplication.processEvents()
+        before_columns = columns()
+        before_width = grid.thumbnail_width
+        window.grab().save(str(report_dir / 'overview-zoom-before.png'))
+        small_half = min(50, grid.viewport().width() // 10)
+        large_half = min(180, grid.viewport().width() // 3)
+        pinch(small_half, large_half)
+        _wait(lambda: grid.thumbnail_width > before_width and columns() < before_columns, 3)
+        large_width, large_columns = grid.thumbnail_width, columns()
+        grid.verticalScrollBar().setValue(0)
+        QCoreApplication.processEvents()
+        window.grab().save(str(report_dir / 'overview-zoom-larger.png'))
+        pinch(large_half, small_half)
+        _wait(lambda: grid.thumbnail_width < large_width and columns() > large_columns, 3)
+        small_width, small_columns = grid.thumbnail_width, columns()
+        grid.verticalScrollBar().setValue(0)
+        QCoreApplication.processEvents()
+        window.grab().save(str(report_dir / 'overview-zoom-smaller.png'))
+
+        grid.setFocus()
+        QTest.keyClick(grid, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
+        assert grid.thumbnail_width > small_width, 'Ctrl+plus did not enlarge overview thumbnails'
+        for _ in range(16):
+            if columns() < small_columns:
+                break
+            QTest.keyClick(grid, Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier)
+            QCoreApplication.processEvents()
+        _wait(lambda: columns() < small_columns, 3)
+        keyboard_width, keyboard_columns = grid.thumbnail_width, columns()
+        QTest.keyClick(grid, Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier)
+        assert grid.thumbnail_width < keyboard_width, 'Ctrl+minus did not shrink overview thumbnails'
+        for _ in range(16):
+            if columns() > keyboard_columns:
+                break
+            QTest.keyClick(grid, Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier)
+            QCoreApplication.processEvents()
+        _wait(lambda: columns() > keyboard_columns, 3)
+        assert not clicked and window._current_id == original_id
+        assert window._grid_mode and window.content.currentWidget() is grid
+        assert not window.viewer._play_requested, 'Overview zoom unexpectedly started video playback'
+
+        grid.verticalScrollBar().setValue(0)
         sequence = QTest.touchEvent(grid.viewport(), device, False)
         center = grid.viewport().rect().center()
         start = center + QPoint(0, 100)
@@ -115,9 +183,176 @@ def _check_overview_touch_scroll(window, fixtures: Path):
         QCoreApplication.processEvents()
         assert grid.verticalScrollBar().value() < after_up, 'Reverse touch swipe did not scroll back'
         assert window._grid_mode and window.content.currentWidget() is grid, 'Reverse swipe opened a photo'
+        assert not clicked and window._current_id == original_id
+        return {'pinch_larger_width': large_width, 'pinch_smaller_width': small_width,
+                'columns_before': before_columns, 'columns_larger': large_columns,
+                'columns_smaller': small_columns, 'pinch_changes_size_and_columns': True,
+                'ctrl_plus_minus_changes_size_and_columns': True,
+                'zoom_does_not_open_or_play_photo': True, 'single_finger_scroll_retained': True}
     finally:
+        grid.clicked.disconnect(record_click)
         grid.setModel(original_model)
+        grid.set_thumbnail_width(original_width)
         scrolling_model.deleteLater()
+
+
+def _check_filmstrip_touch(window, report_dir: Path):
+    from .touch_filmstrip import TouchFilmstrip
+
+    strip = window.strip
+    assert isinstance(strip, TouchFilmstrip)
+    original_id = window._current_id
+    remembered = window._remembered_strip
+    window._toggle_strip(True)
+    bar = strip.horizontalScrollBar()
+    _wait(lambda: strip.isVisible() and bar.maximum() > 0, 3)
+    clicked = []
+    def record_click(index):
+        clicked.append(index.row())
+    strip.clicked.connect(record_click)
+    try:
+        bar.setValue(0)
+        QCoreApplication.processEvents()
+        device = QTest.createTouchDevice()
+        gesture = QTest.touchEvent(strip.viewport(), device, False)
+        center = strip.viewport().rect().center()
+        distance = min(160, strip.viewport().width() // 4)
+        right, left = center + QPoint(distance, 0), center - QPoint(distance, 0)
+        gesture.press(0, right, strip.viewport()).commit()
+        gesture.move(0, center, strip.viewport()).commit()
+        gesture.release(0, left, strip.viewport()).commit()
+        QCoreApplication.processEvents()
+        after_left = bar.value()
+        assert after_left > 0, 'Filmstrip touch swipe did not scroll horizontally'
+        gesture.press(0, left, strip.viewport()).commit()
+        gesture.move(0, center, strip.viewport()).commit()
+        gesture.release(0, right, strip.viewport()).commit()
+        QCoreApplication.processEvents()
+        assert bar.value() < after_left, 'Reverse filmstrip swipe did not scroll back'
+        assert not clicked and window._current_id == original_id, 'Filmstrip swipe changed the current photo'
+        assert not window.viewer._play_requested, 'Filmstrip swipe started playback'
+
+        bar.setValue(0)
+        QCoreApplication.processEvents()
+        row = next(row for row, item in enumerate(window.model.items)
+                   if item.id != original_id and strip.viewport().rect().contains(
+                       strip.visualRect(window.model.index(row)).center()))
+        expected_id = window.model.items[row].id
+        position = strip.visualRect(window.model.index(row)).center()
+        gesture.press(0, position, strip.viewport()).commit()
+        gesture.release(0, position, strip.viewport()).commit()
+        QCoreApplication.processEvents()
+        assert clicked == [row] and window._current_id == expected_id, 'Filmstrip tap did not select exactly once'
+        _wait(lambda: window._displayed_item is not None and window._displayed_item.id == expected_id, 18)
+        assert not window.viewer._play_requested
+        window.grab().save(str(report_dir / 'filmstrip-touch.png'))
+        return {'horizontal_scroll_both_directions': True, 'swipe_keeps_current_photo': True,
+                'tap_selects_once': True, 'no_unexpected_playback': True}
+    finally:
+        strip.clicked.disconnect(record_click)
+        original_row = next(row for row, item in enumerate(window.model.items) if item.id == original_id)
+        window._select_row(original_row, allow_autoplay=False)
+        window._toggle_strip(remembered)
+
+
+def _check_filmstrip_resize(window, report_dir: Path):
+    handle = window.film_resize_handle
+    original_id = window._current_id
+    original_height = window.preferences.filmstrip_height
+    remembered = window._remembered_strip
+    portrait_row = next(row for row, item in enumerate(window.model.items)
+                        if item.image_path.stem == 'Portrait_HEVC')
+    portrait_id = window.model.items[portrait_row].id
+    window._select_row(portrait_row, allow_autoplay=False)
+    window._toggle_strip(True)
+    _wait(lambda: window._displayed_item is not None and window._displayed_item.id == portrait_id
+          and not window.viewer._photo.pixmap().isNull() and handle.isVisible(), 18)
+    window.viewer.fit_image()
+    device = QTest.createTouchDevice()
+
+    def state():
+        item = window.strip.visualRect(window.model.index(0))
+        fitted = window.viewer.mapFromScene(window.viewer._image_rect).boundingRect()
+        return {'film': window.film.height(), 'preview_width': item.width(), 'preview_height': item.height(),
+                'viewer': window.viewer.viewport().height(), 'fitted_image': fitted.height()}
+
+    def drag(amount, touch=False):
+        start = handle.rect().center()
+        end = handle.mapToGlobal(start) + QPoint(0, amount)
+        if touch:
+            gesture = QTest.touchEvent(handle, device, False)
+            gesture.press(0, start, handle).commit()
+            gesture.move(0, handle.mapFromGlobal(end), handle).commit()
+            QCoreApplication.processEvents()
+            gesture.release(0, handle.mapFromGlobal(end), handle).commit()
+        else:
+            QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=start)
+            QTest.mouseMove(handle, handle.mapFromGlobal(end))
+            QCoreApplication.processEvents()
+            QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(end))
+        QCoreApplication.processEvents()
+
+    def assert_larger(before):
+        def resized():
+            current = state()
+            return (current['film'] > before['film']
+                    and current['preview_width'] > before['preview_width']
+                    and current['preview_height'] > before['preview_height']
+                    and current['viewer'] < before['viewer']
+                    and current['fitted_image'] < before['fitted_image'])
+        _wait(resized, 3)
+        after = state()
+        assert after['preview_width'] > before['preview_width'] and after['preview_height'] > before['preview_height']
+        assert after['viewer'] < before['viewer'] and after['fitted_image'] < before['fitted_image']
+        assert abs(window.viewer.zoom_factor() - 1) < .01, 'Resizing lost fit-to-window mode'
+        assert window._current_id == portrait_id and not window.viewer._play_requested
+        return after
+
+    try:
+        QCoreApplication.processEvents()
+        before = state()
+        window.grab().save(str(report_dir / 'filmstrip-resize-before.png'))
+        drag(-70)
+        mouse_large = assert_larger(before)
+        window.grab().save(str(report_dir / 'filmstrip-resize-larger.png'))
+        drag(mouse_large['film'] - before['film'])
+        _wait(lambda: abs(window.film.height() - before['film']) <= 2
+              and state()['viewer'] >= before['viewer'] - 2
+              and state()['fitted_image'] >= before['fitted_image'] - 2, 3)
+        assert state()['viewer'] >= before['viewer'] - 2 and state()['fitted_image'] >= before['fitted_image'] - 2
+
+        drag(-70, touch=True)
+        touch_large = assert_larger(before)
+        window._toggle_strip(False)
+        _wait(lambda: not window.film.isVisible() and not handle.isVisible()
+              and window.viewer.viewport().height() > touch_large['viewer'], 3)
+        assert not window.film.isVisible() and not handle.isVisible()
+        assert window.viewer.viewport().height() > touch_large['viewer']
+        window._toggle_strip(True)
+        QCoreApplication.processEvents()
+        assert window.film.isVisible() and handle.isVisible()
+        window._toggle_fullscreen()
+        QCoreApplication.processEvents()
+        assert window._fullscreen_active and window.film.isVisible()
+        window._toggle_fullscreen()
+        QCoreApplication.processEvents()
+        assert not window._fullscreen_active and window.film.isVisible() and handle.isVisible()
+        drag(window.film.height() - before['film'], touch=True)
+        _wait(lambda: abs(window.film.height() - before['film']) <= 2
+              and state()['viewer'] >= before['viewer'] - 2
+              and state()['fitted_image'] >= before['fitted_image'] - 2, 3)
+        assert state()['preview_height'] <= before['preview_height'] + 2
+        assert state()['viewer'] >= before['viewer'] - 2 and state()['fitted_image'] >= before['fitted_image'] - 2
+        return {'mouse_and_touch_resize': True, 'preview_tracks_filmstrip_height': True,
+                'viewer_space_and_fit_update': True, 'reverse_drag_restores_layout': True,
+                'hidden_and_fullscreen_remain_usable': True}
+    finally:
+        if window._fullscreen_active:
+            window._toggle_fullscreen()
+        window._set_film_height(original_height)
+        row = next(row for row, item in enumerate(window.model.items) if item.id == original_id)
+        window._select_row(row, allow_autoplay=False)
+        window._toggle_strip(remembered)
 
 
 def _check_canvas_touch_and_wheel(viewer: ViewerCanvas, fixtures: Path):
@@ -443,6 +678,110 @@ def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
                 'copy_and_overwrite': True, 'video_bytes_unchanged': True}
 
 
+def _check_editor_preview_export(dialog, folder: Path, still: Path, video: Path, report_dir: Path):
+    from PySide6.QtCore import QMetaObject
+    from PySide6.QtWidgets import QFileDialog, QMenu
+
+    preview = dialog.preview
+    assert isinstance(preview, ViewerCanvas)
+    before_image, before_video = _file_digest(still), _file_digest(video)
+    movies_before = {path.name for path in folder.iterdir() if path.suffix.casefold() == '.mov'}
+    selected = dialog.selected_frame_index
+    assert selected == 4 and dialog.displayed_frame_index == 4
+    viewport = preview.viewport()
+    center = viewport.rect().center()
+    before_zoom = preview.zoom_factor()
+    wheel = QWheelEvent(QPointF(center), QPointF(viewport.mapToGlobal(center)), QPoint(), QPoint(0, 120),
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    QCoreApplication.sendEvent(viewport, wheel)
+    QCoreApplication.processEvents()
+    assert preview.zoom_factor() > before_zoom, 'Editor preview wheel did not zoom'
+    before_pinch = preview.zoom_factor()
+    device = QTest.createTouchDevice()
+    gesture = QTest.touchEvent(viewport, device, False)
+    gesture.press(0, center - QPoint(40, 0), viewport).press(1, center + QPoint(40, 0), viewport).commit()
+    gesture.move(0, center - QPoint(85, 0), viewport).move(1, center + QPoint(85, 0), viewport).commit()
+    gesture.release(0, center - QPoint(85, 0), viewport).release(1, center + QPoint(85, 0), viewport).commit()
+    QCoreApplication.processEvents()
+    assert preview.zoom_factor() > before_pinch, 'Editor preview pinch did not zoom'
+    before_pan = preview._scene_center()
+    gesture.press(0, center, viewport).commit()
+    gesture.move(0, center + QPoint(55, 25), viewport).commit()
+    gesture.release(0, center + QPoint(80, 35), viewport).commit()
+    QCoreApplication.processEvents()
+    assert (preview._scene_center() - before_pan).manhattanLength() > .5, 'Editor preview did not pan after zoom'
+    assert dialog.selected_frame_index == selected and not preview._play_requested
+    dialog.grab().save(str(report_dir / 'editor-preview-zoom.png'))
+    preview.fit_image()
+
+    target = folder / '导出静帧.png'
+    errors, choices = [], []
+    attempts = [0]
+    def choose_file():
+        prompt = QApplication.activeModalWidget()
+        if not isinstance(prompt, QFileDialog):
+            attempts[0] += 1
+            if attempts[0] < 200:
+                QTimer.singleShot(25, choose_file)
+                return
+            errors.append(AssertionError('导出静帧画面 did not open a SaveAs dialog'))
+            if prompt is not None:
+                prompt.reject()
+            return
+        try:
+            assert prompt.acceptMode() == QFileDialog.AcceptMode.AcceptSave
+            prompt.setDirectory(str(folder))
+            png_filter = next(value for value in prompt.nameFilters() if '*.png' in value.lower())
+            prompt.selectNameFilter(png_filter)
+            prompt.selectFile(str(target))
+            choices.append(str(target))
+            QMetaObject.invokeMethod(prompt, 'accept', Qt.ConnectionType.QueuedConnection)
+        except Exception as error:
+            errors.append(error)
+            prompt.reject()
+
+    def choose_export():
+        menu = QApplication.activePopupWidget()
+        try:
+            assert isinstance(menu, QMenu), 'Editor preview context menu did not open'
+            action = next(action for action in menu.actions() if action.text().startswith('导出静帧画面'))
+            assert action.isEnabled()
+            menu.grab().save(str(report_dir / 'editor-frame-export-menu.png'))
+            QTimer.singleShot(0, choose_file)
+            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center())
+        except Exception as error:
+            errors.append(error)
+            if menu is not None:
+                menu.hide()
+
+    previous_native = QApplication.testAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
+    try:
+        QTimer.singleShot(0, choose_export)
+        dialog._preview_menu(center)
+        _wait(lambda: bool(errors or choices), 6)
+    finally:
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, previous_native)
+    if errors:
+        raise errors[0]
+    assert choices == [str(target)]
+    _wait(lambda: dialog.last_export_path == target and not dialog._export_busy, 25)
+    _wait(lambda: dialog._export_thread is None or not dialog._export_thread.is_alive(), 5)
+    assert target.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+    image = load_image(target, None)
+    assert image.size == (320, 240), 'Frame export used the scaled or zoomed preview resolution'
+    expected = (207, 66, 194)
+    assert max(abs(a - b) for a, b in zip(image.getpixel((160, 120)), expected)) < 10
+    assert _file_digest(still) == before_image and _file_digest(video) == before_video
+    assert {path.name for path in folder.iterdir() if path.suffix.casefold() == '.mov'} == movies_before
+    assert dialog.saved_result is None and dialog.selected_frame_index == selected
+    assert dialog.save_button.isEnabled() and dialog.timeline.isEnabled()
+    return {'wheel_pinch_and_pan': True, 'context_menu_label': '导出静帧画面',
+            'save_as_dialog_exercised': True, 'exported_frame_index': 4, 'full_size': [320, 240],
+            'original_media_unchanged': True, 'no_video_copy': True, 'cover_save_not_triggered': True,
+            'file_dialog_automation': 'Qt SaveAs dialog'}
+
+
 def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
     from .cover_editor import EditorDialog, SaveModeDialog
     with tempfile.TemporaryDirectory(prefix='editor-vfr-', dir=report_dir) as temporary:
@@ -489,6 +828,7 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
             assert shown_while_pressed == [1, 2, 4] and not slider.isSliderDown()
             _wait(lambda: dialog.selected_frame_index == 4 and dialog.save_button.isEnabled(), 20)
             assert abs(dialog.metadata.frames[4].pts_seconds - .44) < .000001
+            preview_export = _check_editor_preview_export(dialog, folder, still, video, report_dir)
             dialog.grab().save(str(report_dir / 'cover-editor.png'))
             choices, errors = [], []
             def choose_copy():
@@ -533,7 +873,8 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
                 'copy_preserves_originals_and_video_bytes': True, 'cancel_no_changes': True,
                 'save_mode_prompt_after_save': True, 'maximize_button_available': True,
                 'original_cover_marker_frame': 3,
-                'touch_scrub_updates_before_release': shown_while_pressed}
+                'touch_scrub_updates_before_release': shown_while_pressed,
+                'preview_export': preview_export}
 
 
 def _check_filter_blank_click(window):
@@ -582,7 +923,8 @@ def _check_settings_controls(settings, window, report_dir: Path):
 
     wheel_events = 0
     targets = [(combo, combo.currentIndex) for combo in
-               (settings.mode, settings.zoom_mode, settings.horizontal_scroll_mode, settings.cache_location)]
+               (settings.theme_mode, settings.mode, settings.zoom_mode,
+                settings.horizontal_scroll_mode, settings.cache_location)]
     targets.extend((control, control.value) for control in (settings.hold, settings.cache))
     targets.extend((control.lineEdit(), control.value) for control in (settings.hold, settings.cache))
     for target, value in targets:
@@ -655,6 +997,139 @@ def _check_settings_controls(settings, window, report_dir: Path):
             'angle_and_pixel_scroll_page_once': True, 'opened_dropdown_selectable': True,
             'checkbox_accessibility_preserved': True, 'click_space_touch_toggle': True,
             'disabled_switch_unchanged': True, 'overview_filter_remains_checkboxes': True}
+
+
+def _check_application_theme(window, report_dir: Path):
+    from .app import SettingsDialog
+    from .settings import Preferences
+
+    app = QApplication.instance()
+    controller = window.theme_controller
+    original_mode = window.preferences.theme_mode
+    original_provider = controller.system_provider
+    original_grid_mode = window._grid_mode
+    provider_state = ['dark']
+    controller.system_provider = lambda: provider_state[0]
+    window._toggle_grid(False)
+    _wait(lambda: not window.viewer._photo.pixmap().isNull(), 8)
+    _wait(lambda: all(not item.pending for item in window._primary_items), 20)
+    window.viewer.fit_image()
+    window.viewer.zoom_in()
+    window.viewer.zoom_in()
+    QCoreApplication.processEvents()
+    window.viewer._pan_by(QPointF(20, -15))
+    QTest.qWait(80)
+
+    def image_digest():
+        image = window.viewer._photo.pixmap().toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+        return hashlib.sha256(image.constBits()).hexdigest()
+
+    epoch, selected = window._epoch, window._current_id
+    scale, center = window.viewer.transform().m11(), window.viewer._scene_center()
+    before_geometry = {'scale': scale, 'fit_scale': window.viewer._fit_scale,
+                       'viewport': [window.viewer.viewport().width(), window.viewer.viewport().height()],
+                       'center': [center.x(), center.y()]}
+    image_before = image_digest()
+    grid_width = window.grid.thumbnail_width
+    resets = []
+    def record_reset():
+        resets.append(True)
+    window.model.modelReset.connect(record_reset)
+
+    def save_mode(mode, accept=True):
+        errors = []
+        def choose():
+            dialog = app.activeModalWidget()
+            try:
+                assert isinstance(dialog, SettingsDialog)
+                assert [dialog.theme_mode.itemData(index) for index in range(dialog.theme_mode.count())] == [
+                    'dark', 'light', 'system']
+                dialog.theme_mode.setCurrentIndex(dialog.theme_mode.findData(mode))
+                dialog._accept() if accept else dialog.reject()
+            except Exception as error:
+                errors.append(error)
+                if dialog is not None:
+                    dialog.reject()
+        QTimer.singleShot(0, choose)
+        window.open_settings()
+        if errors:
+            raise errors[0]
+        QCoreApplication.processEvents()
+
+    def background(widget):
+        return widget.grab().toImage().pixelColor(3, 3).lightness()
+
+    dialog = None
+    menu = window.kind_filter.menu
+    try:
+        save_mode('dark')
+        assert controller.mode == 'dark' and controller.effective_theme == 'dark'
+        assert background(window.header) < 100
+        save_mode('light')
+        assert controller.mode == 'light' and controller.effective_theme == 'light'
+        assert background(window.header) > 180, 'Light mode did not change the rendered window'
+        assert Preferences.load().theme_mode == 'light'
+        restored = SettingsDialog(Preferences.load(), window)
+        assert restored.theme_mode.currentData() == 'light'
+        restored.close()
+        window.grab().save(str(report_dir / 'theme-light-window.png'))
+
+        save_mode('system')
+        assert controller.mode == 'system' and controller.effective_theme == 'dark'
+        dialog = SettingsDialog(window.preferences, window)
+        dialog.show()
+        QCoreApplication.processEvents()
+        assert background(dialog) < 100
+        provider_state[0] = 'light'
+        controller.refresh_system()
+        QCoreApplication.processEvents()
+        assert controller.effective_theme == 'light' and background(dialog) > 180
+        assert dialog.isVisible() and dialog.theme_mode.currentData() == 'system'
+        dialog.grab().save(str(report_dir / 'theme-light-settings.png'))
+        dialog.close()
+        dialog = None
+        menu.popup(window.kind_filter.mapToGlobal(QPoint(0, window.kind_filter.height())))
+        QCoreApplication.processEvents()
+        assert menu.isVisible() and background(menu) > 180
+        provider_state[0] = 'dark'
+        controller.refresh_system()
+        QCoreApplication.processEvents()
+        assert menu.isVisible() and background(menu) < 100
+        provider_state[0] = 'light'
+        controller.refresh_system()
+        QCoreApplication.processEvents()
+        assert menu.isVisible() and background(menu) > 180
+        menu.grab().save(str(report_dir / 'theme-light-filter.png'))
+        menu.hide()
+        assert Preferences.load().theme_mode == 'system'
+        save_mode('dark', accept=False)
+        assert window.preferences.theme_mode == 'system' and controller.mode == 'system'
+        assert Preferences.load().theme_mode == 'system'
+        assert window._epoch == epoch and not resets, 'Changing appearance rescanned or reset the gallery'
+        assert window._current_id == selected and window.grid.thumbnail_width == grid_width
+        after_center = window.viewer._scene_center()
+        after_geometry = {'scale': window.viewer.transform().m11(), 'fit_scale': window.viewer._fit_scale,
+                          'viewport': [window.viewer.viewport().width(), window.viewer.viewport().height()],
+                          'center': [after_center.x(), after_center.y()]}
+        assert abs(after_geometry['scale'] - scale) < .00001, (before_geometry, after_geometry)
+        assert (window.viewer._scene_center() - center).manhattanLength() < 1.5
+        assert image_digest() == image_before, 'Theme changed the displayed image pixels'
+        return {'three_modes_and_saved_restore': True, 'cancel_preserves_saved_mode': True,
+                'rendered_light_palette_verified': True, 'system_changes_update_open_settings_and_menu': True,
+                'selection_zoom_and_gallery_preserved': True, 'image_pixels_unchanged': True,
+                'view_geometry_before': before_geometry, 'view_geometry_after': after_geometry,
+                'zoom_basis': 'actual_image_transform',
+                'system_change_source': 'injected_provider', 'windows_registry_modified': False,
+                'powertoys_started': False}
+    finally:
+        if dialog is not None:
+            dialog.close()
+        menu.hide()
+        window.model.modelReset.disconnect(record_reset)
+        controller.system_provider = original_provider
+        save_mode(original_mode)
+        window.viewer.fit_image()
+        window._toggle_grid(original_grid_mode)
 
 
 def _check_library_cache(fixtures: Path, report_dir: Path):
@@ -996,13 +1471,15 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         assert window.content.currentWidget() is window.grid and window.grid.isVisible()
         assert not window.film.isVisible() and not window.fullscreen_live_badge.isVisible()
         assert not window.header.isVisible() and not window.filterbar.isVisible()
-        _check_overview_touch_scroll(window, fixtures)
+        overview_zoom = _check_overview_touch_scroll(window, fixtures, report_dir)
         window.grab().save(str(report_dir / 'fullscreen-overview.png'))
         QTest.keyClick(window.grid, Qt.Key.Key_Escape)
         assert not window._fullscreen_active and window._grid_mode
         report['checks'].append({'check': 'fullscreen_preserves_overview_and_touch_scroll',
                                  'virtual_rows': 3000, 'swipe_never_opens_photo': True,
                                  'status': 'passed'})
+        report['checks'].append({'check': 'overview_pinch_and_keyboard_thumbnail_zoom',
+                                 **overview_zoom, 'status': 'passed'})
         window.grid_button.setChecked(False)
         window._toggle_grid(False)
         window.grab().save(str(report_dir / 'main-window.png'))
@@ -1049,6 +1526,12 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         window._select_row(live_row)
         _wait(lambda: window._displayed_item is not None
               and window._displayed_item.image_path.stem == 'JPEG_PAIR', 18)
+        filmstrip_touch = _check_filmstrip_touch(window, report_dir)
+        report['checks'].append({'check': 'filmstrip_single_finger_scroll_and_tap',
+                                 **filmstrip_touch, 'status': 'passed'})
+        filmstrip_resize = _check_filmstrip_resize(window, report_dir)
+        report['checks'].append({'check': 'filmstrip_mouse_touch_resize_and_viewer_fit',
+                                 **filmstrip_resize, 'status': 'passed'})
         window.activateWindow()
         window.viewer.setFocus()
         QTest.qWait(50)
@@ -1171,9 +1654,15 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         settings.grab().save(str(report_dir / 'settings-cache.png'))
         settings.close()
         report['checks'].append({'check': 'main_window_scan_navigation_grid_and_settings', 'status': 'passed'})
+        theme_result = _check_application_theme(window, report_dir)
+        report['checks'].append({'check': 'application_appearance_modes_and_system_changes',
+                                 **theme_result, 'status': 'passed'})
         editor_result = _check_real_cover_editor(fixtures, report_dir, window)
+        preview_export = editor_result.pop('preview_export')
         report['checks'].append({'check': 'real_vfr_cover_editor_copy_and_cancel',
                                  **editor_result, 'status': 'passed'})
+        report['checks'].append({'check': 'cover_editor_preview_and_standalone_frame_export',
+                                 **preview_export, 'status': 'passed'})
         report['status'] = 'passed'
     except Exception as error:
         report['error'] = f'{type(error).__name__}: {error}'

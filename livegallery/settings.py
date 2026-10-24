@@ -60,6 +60,9 @@ class Preferences:
     last_folder: str = ''
     last_image: str = ''
     sort_by: str = 'name'
+    overview_thumbnail_width: int = 204
+    filmstrip_height: int = 200
+    theme_mode: str = 'dark'
 
     def normalize_shortcuts(self):
         """Keep an older hold binding when introducing the separate once key."""
@@ -95,8 +98,22 @@ class Preferences:
             result = cls(**{k: v for k, v in values.items() if k in valid})
             if values.get('cache_location') not in ('user', 'program', 'library'):
                 result.cache_location = default_cache_location()
+            if result.theme_mode not in ('dark', 'light', 'system'):
+                result.theme_mode = 'dark'
             result.hold_ms = max(150, min(1000, int(result.hold_ms)))
             result.cache_mb = max(256, min(16384, int(result.cache_mb)))
+            try:
+                if isinstance(result.overview_thumbnail_width, bool):
+                    raise ValueError('not a width')
+                result.overview_thumbnail_width = max(120, min(480, int(result.overview_thumbnail_width)))
+            except (ValueError, TypeError):
+                result.overview_thumbnail_width = 204
+            try:
+                if isinstance(result.filmstrip_height, bool):
+                    raise ValueError('not a height')
+                result.filmstrip_height = max(160, min(480, int(result.filmstrip_height)))
+            except (ValueError, TypeError):
+                result.filmstrip_height = 200
             result.normalize_shortcuts()
             if not isinstance(result.filmstrip_visible, bool):
                 result.filmstrip_visible = True

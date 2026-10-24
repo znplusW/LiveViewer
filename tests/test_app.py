@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
-from PySide6.QtGui import QContextMenuEvent, QImage, QKeyEvent, QKeySequence
-from PySide6.QtTest import QTest
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QTimer
+from PySide6.QtGui import QContextMenuEvent, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPalette
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu
 
 from livegallery.app import MainWindow, SettingsDialog
@@ -408,6 +408,88 @@ class WindowTests(unittest.TestCase):
             self.assertTrue((directory / 'portable.flag').is_file())
             cancelled.deleteLater()
 
+    def test_appearance_save_cancel_and_live_switch_preserve_photo_view_and_model(self):
+        path = self.picture('appearance.jpg')
+        self.catalog([MediaItem('current', path)], cached=True)
+        self.window._select_row(0)
+        self.application.processEvents()
+        viewer = self.window.viewer
+        viewer._zoom_at(2, QPointF(viewer.viewport().rect().center()))
+        image_key = viewer._photo.pixmap().cacheKey()
+        scale = viewer.transform().m11()
+        center = viewer._scene_center()
+        resets = QSignalSpy(self.window.model.modelReset)
+        for mode, accepted in (('light', True), ('dark', False), ('dark', True), ('system', True)):
+            before = self.window.theme_controller.mode
+            dialog = SettingsDialog(self.window.preferences, self.window)
+            dialog.theme_mode.setCurrentIndex(dialog.theme_mode.findData(mode))
+            with patch('livegallery.app.SettingsDialog', return_value=dialog), \
+                    patch.object(dialog, 'exec', return_value=QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected), \
+                    patch.object(self.window, 'load_folder') as scan:
+                self.window.open_settings()
+            self.application.processEvents()
+            self.assertEqual(self.window.theme_controller.mode, mode if accepted else before)
+            self.assertEqual(Preferences.load().theme_mode, mode if accepted else before)
+            self.assertEqual(self.window._current_id, 'current')
+            self.assertEqual(viewer._photo.pixmap().cacheKey(), image_key)
+            self.assertAlmostEqual(viewer.transform().m11(), scale)
+            self.assertLess((viewer._scene_center() - center).manhattanLength(), 2)
+            scan.assert_not_called()
+            dialog.deleteLater()
+        self.assertEqual(resets.count(), 0)
+        viewer._play_requested = True
+        with patch.object(viewer._player, 'stop') as stop:
+            self.window.theme_controller.set_mode('light')
+            self.application.processEvents()
+            self.assertTrue(viewer._play_requested)
+            stop.assert_not_called()
+        viewer._play_requested = False
+
+    def test_system_appearance_updates_open_settings_menu_and_keeps_overview_scroll(self):
+        path = self.picture('grid-appearance.jpg')
+        self.catalog([MediaItem(str(row), path) for row in range(500)], cached=True)
+        self.window._select_row(200)
+        self.window._toggle_grid(True)
+        self.application.processEvents()
+        grid = self.window.grid
+        grid.setFocus()
+        self.application.processEvents()
+        scroll = grid.verticalScrollBar().value()
+        controller = self.window.theme_controller
+        provider = controller.system_provider
+        system = ['dark']
+        controller.system_provider = lambda: system[0]
+        settings = SettingsDialog(self.window.preferences, self.window)
+        try:
+            controller.set_mode('system')
+            settings.show()
+            self.application.processEvents()
+            system[0] = 'light'
+            controller.refresh_system()
+            self.application.processEvents()
+            self.assertEqual(controller.mode, 'system')
+            self.assertEqual(settings.property('liveviewerTheme'), 'light')
+            self.assertGreater(settings.palette().color(QPalette.ColorRole.Window).lightness(), 200)
+            self.assertLess(settings.autoplay.palette().color(QPalette.ColorRole.WindowText).lightness(), 100)
+            settings.reject()
+            menu = self.window.kind_filter.menu
+            menu.popup(self.window.kind_filter.mapToGlobal(QPoint(0, 0)))
+            self.application.processEvents()
+            system[0] = 'dark'
+            controller.refresh_system()
+            self.application.processEvents()
+            self.assertTrue(menu.isVisible())
+            self.assertIn('#303b48', self.window.kind_filter.live.styleSheet())
+            self.assertEqual(self.window._current_id, '200')
+            self.assertEqual(grid.verticalScrollBar().value(), scroll)
+            self.assertEqual(grid.thumbnail_width, self.window.preferences.overview_thumbnail_width)
+            menu.close()
+        finally:
+            settings.reject()
+            settings.deleteLater()
+            controller.system_provider = provider
+            controller.set_mode('dark')
+
     def test_all_internal_shortcut_conflicts_are_shown_while_editing(self):
         dialog = SettingsDialog(self.window.preferences, self.window)
         dialog.show()
@@ -448,6 +530,151 @@ class WindowTests(unittest.TestCase):
             navigate.assert_not_called()
             QTest.keyClick(self.window.viewer, Qt.Key.Key_Left)
             navigate.assert_called_once_with(-1)
+
+    def test_overview_zoom_keys_reflow_keep_selection_cache_and_skip_editors(self):
+        path = self.picture('grid.jpg')
+        items = [MediaItem(str(row), path) for row in range(500)]
+        self.catalog(items, cached=True)
+        self.window._select_row(200)
+        self.window._toggle_grid(True)
+        self.window.grid.setFocus()
+        self.application.processEvents()
+        grid = self.window.grid
+        reset = QSignalSpy(self.window.model.modelReset)
+        current = self.window._current_id
+        for key, modifiers, direction in (
+                (Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier, 1),
+                (Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier, 1),
+                (Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier, 1),
+                (Qt.Key.Key_Plus, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.KeypadModifier, 1),
+                (Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.KeypadModifier, -1),
+                (Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier, -1)):
+            before = grid.thumbnail_width
+            QTest.keyClick(grid, key, modifiers)
+            self.assertEqual(grid.thumbnail_width, before + direction * grid.ZOOM_STEP)
+            self.assertEqual(self.window._current_id, current)
+        self.assertGreater(grid.verticalScrollBar().value(), 0)
+        self.assertEqual(reset.count(), 0)
+        before = grid.thumbnail_width
+        for editor in (self.window.search, self.window.filename_label):
+            editor.setFocus()
+            QTest.keyClick(editor, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+            self.assertEqual(grid.thumbnail_width, before)
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        dialog.show()
+        self.application.processEvents()
+        QTest.keyClick(dialog.live_key, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(grid.thumbnail_width, before)
+        dialog.reject()
+        self.window._toggle_grid(False)
+        self.window.viewer.setFocus()
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(grid.thumbnail_width, before)
+        self.wait_until(lambda: Preferences.load().overview_thumbnail_width == before)
+
+    def test_overview_zoom_shortcuts_warn_and_allow_existing_custom_override(self):
+        path = self.picture('grid.jpg')
+        self.catalog([MediaItem('grid', path)], cached=True)
+        self.window._select_row(0)
+        self.window._toggle_grid(True)
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        for name in ('Ctrl+=', 'Ctrl++', 'Ctrl+Shift+=', 'Ctrl+Num++', 'Ctrl+-', 'Ctrl+Num+-'):
+            dialog.filmstrip_key.setKeySequence(QKeySequence(name))
+            self.assertIn('总览缩略图', dialog.shortcut_note.text(), name)
+            self.assertFalse(dialog.override_keys.isChecked())
+        dialog.filmstrip_key.setKeySequence(QKeySequence('Ctrl+='))
+        with patch('livegallery.app.QMessageBox.information') as message:
+            dialog._accept()
+            message.assert_called_once()
+        dialog.override_keys.setChecked(True)
+        dialog._accept()
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.window._filmstrip_sequence = QKeySequence('Ctrl+=')
+        self.window.grid.setFocus()
+        before = self.window.grid.thumbnail_width
+        with patch.object(self.window, '_toggle_strip_shortcut') as toggle:
+            QTest.keyClick(self.window.grid, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+            toggle.assert_called_once()
+        self.assertEqual(self.window.grid.thumbnail_width, before)
+
+    def test_film_height_drag_changes_real_preview_and_viewer_and_persists(self):
+        path = self.picture('strip.jpg')
+        self.catalog([MediaItem(str(row), path) for row in range(80)], cached=True)
+        self.window._select_row(30)
+        self.application.processEvents()
+        strip = self.window.strip
+        strip.scrollTo(self.window.model.index(30))
+        self.application.processEvents()
+        film_height = self.window.film.height()
+        size = strip.visualRect(self.window.model.index(30)).size()
+        viewer_height = self.window.viewer.viewport().height()
+        handle = self.window.film_resize_handle
+        start = handle.rect().center()
+        global_start = handle.mapToGlobal(start)
+        QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=start)
+        point = handle.mapFromGlobal(global_start - QPoint(0, 80))
+        event = QMouseEvent(QEvent.Type.MouseMove, QPointF(point),
+                            QPointF(global_start - QPoint(0, 80)), Qt.MouseButton.NoButton,
+                            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(handle, event)
+        self.application.processEvents()
+        QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.rect().center())
+        self.application.processEvents()
+        self.assertGreater(self.window.film.height(), film_height)
+        self.assertGreater(strip.visualRect(self.window.model.index(30)).width(), size.width())
+        self.assertGreater(strip.visualRect(self.window.model.index(30)).height(), size.height())
+        self.assertLess(self.window.viewer.viewport().height(), viewer_height)
+        self.assertGreaterEqual(self.window.viewer.viewport().height(), 150)
+        self.assertEqual(self.window._current_id, '30')
+        self.assertGreater(strip.horizontalScrollBar().value(), 0)
+        self.wait_until(lambda: Preferences.load().filmstrip_height == self.window.film.height())
+        self.window._hide_strip()
+        self.assertFalse(handle.isVisible())
+        self.window._toggle_strip_shortcut()
+        self.application.processEvents()
+        self.assertTrue(handle.isVisible())
+        self.window._set_film_height(9999)
+        self.application.processEvents()
+        self.assertGreaterEqual(self.window.viewer.viewport().height(), 150)
+        self.assertLessEqual(self.window.film.height(), 480)
+        self.window._hide_strip()
+        self.window.resize(940, 650)
+        self.application.processEvents()
+        self.window._toggle_strip_shortcut()
+        for _ in range(3):
+            self.application.processEvents()
+        self.assertGreaterEqual(self.window.viewer.viewport().height(), 150)
+        self.assertTrue(handle.isVisible())
+        self.window.resize(1420, 930)
+        self.application.processEvents()
+        self.window._set_film_height(480)
+        self.window._toggle_grid(True)
+        self.window.resize(940, 650)
+        self.application.processEvents()
+        self.window._toggle_grid(False)
+        for _ in range(3):
+            self.application.processEvents()
+        self.assertGreaterEqual(self.window.viewer.viewport().height(), 150)
+        self.assertTrue(handle.isVisible())
+
+    def test_few_film_thumbnails_do_not_oscillate_and_manual_view_zoom_is_preserved(self):
+        path = self.picture('one.jpg')
+        self.catalog([MediaItem('one', path)], cached=True)
+        self.window._select_row(0)
+        self.application.processEvents()
+        self.window.viewer._zoom_at(2, QPointF(self.window.viewer.viewport().rect().center()))
+        scale = self.window.viewer.transform().m11()
+        changes = QSignalSpy(self.window.strip.viewportHeightChanged)
+        self.window._set_film_height(330)
+        for _ in range(5):
+            self.application.processEvents()
+        first = self.window.strip.itemDelegate().thumbnail_height
+        for _ in range(10):
+            self.application.processEvents()
+        self.assertEqual(self.window.strip.itemDelegate().thumbnail_height, first)
+        self.assertLess(changes.count(), 8)
+        self.assertFalse(self.window.viewer._fit_mode)
+        self.assertAlmostEqual(self.window.viewer.transform().m11(), scale)
 
     def test_old_hold_p_binding_survives_once_shortcut_migration(self):
         target = self.base / "data" / "settings.json"

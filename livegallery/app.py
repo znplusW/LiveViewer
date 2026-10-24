@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
     QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListView, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QSplitter, QStackedWidget, QTextEdit, QTreeWidget, QTreeWidgetItem,
+    QSpinBox, QSplitter, QStackedWidget, QStyle, QTextEdit, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget, QWidgetAction,
 )
 
@@ -33,61 +33,15 @@ from .models import MediaItem
 from .reveal_file import reveal_in_folder
 from .settings import Preferences, app_directory, cache_data_roots, data_directory
 from .settings_controls import PillSwitch, SettingsScrollArea, SettingsWheelGuard, TickCheckBox
+from .theme import DARK_STYLE, stylesheet_for
+from .ui_theme import application_theme, bind_theme, tokens_for
 from .system_open import enumerate_apps, open_with
 from .touch_grid import OverviewGrid
+from .touch_filmstrip import FilmstripResizeHandle, TouchFilmstrip
 from .viewer import ViewerCanvas
 
 
-STYLE = """
-QWidget { background: #11151a; color: #e9edf2; font-family: 'Segoe UI', 'PingFang SC', sans-serif; font-size: 13px; }
-QLabel { background: transparent; }
-QMainWindow, QDialog { background: #11151a; }
-QFrame#header { background: #161b22; border-bottom: 1px solid #2a3039; }
-QFrame#filterbar { background: #14191f; border-bottom: 1px solid #262d36; }
-QFrame#sidebar { background: #151a20; border-right: 1px solid #29303a; }
-QFrame#infobar { background: #151a20; border-bottom: 1px solid #242b34; }
-QFrame#film { background: #14191f; border-top: 1px solid #2a313b; }
-QLabel#brand { color: #f1d19b; font-size: 25px; font-weight: 700; }
-QLabel#subtitle, QLabel#muted { color: #83909f; }
-QLabel#emptyTitle { color: #e7edf5; font-size: 25px; font-weight: 600; }
-QLabel#emptyIcon { color: #e6ba72; font-size: 66px; }
-QLabel#emptyBody { color: #8e9baa; font-size: 14px; line-height: 150%; }
-QLineEdit#filename, QLineEdit#filename:focus { font-size: 15px; font-weight: 600; background: transparent; border: none; border-radius: 0; padding: 0; }
-QLabel#liveBadge { color: #f1cf91; border: 1px solid #775e38; border-radius: 5px; padding: 4px 7px; background: #31281c; }
-QLabel#toast { background: #3a3020; color: #f5d69e; border: 1px solid #6b5533; padding: 9px 14px; }
-QPushButton { border: 1px solid #39424e; border-radius: 7px; background: #232b35; color: #dce3ec; padding: 8px 13px; min-height: 20px; }
-QPushButton:hover { background: #303b48; border-color: #5a697b; }
-QPushButton:pressed, QPushButton:checked { background: #463a27; border-color: #bf965a; color: #f4d49f; }
-QPushButton#primary { background: #d8ae6b; color: #181b20; border-color: #d8ae6b; font-weight: 600; }
-QPushButton#primary:hover { background: #eac187; }
-QPushButton:disabled { color: #56616e; border-color: #2b323b; background: #1b2128; }
-QLineEdit, QComboBox, QSpinBox, QKeySequenceEdit { padding: 7px 9px; border: 1px solid #35404d; border-radius: 6px; background: #1b222b; min-height: 20px; selection-background-color: #83663e; }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QKeySequenceEdit:focus { border-color: #c7a166; }
-QComboBox QAbstractItemView { background: #222b36; border: 1px solid #485565; selection-background-color: #57472f; }
-QListView, QTreeWidget { border: none; background: transparent; outline: none; }
-QTreeWidget::item { min-height: 32px; padding: 2px 4px; border-radius: 5px; }
-QTreeWidget::item:selected { background: #3c3326; color: #f1d19b; }
-QTreeWidget::item:hover { background: #252d38; }
-QScrollBar:horizontal { background: #151a20; height: 10px; border: none; }
-QScrollBar:vertical { background: #151a20; width: 10px; border: none; }
-QScrollBar::handle { background: #3c4857; border-radius: 4px; min-width: 35px; min-height: 35px; }
-QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
-QGroupBox { border: 1px solid #34404c; border-radius: 8px; margin-top: 13px; padding: 20px 13px 12px; }
-QGroupBox::title { color: #dfc59b; subcontrol-origin: margin; left: 12px; padding: 0 5px; }
-QCheckBox { spacing: 9px; padding: 4px; }
-QCheckBox::indicator { width: 17px; height: 17px; border: 1px solid #586678; border-radius: 3px; background: #202833; }
-QCheckBox::indicator:checked { background: #d8ae6b; border: 3px solid #d8ae6b; }
-QRadioButton { spacing: 9px; padding: 4px; }
-QRadioButton::indicator { width: 17px; height: 17px; border: 1px solid #586678; border-radius: 9px; background: #202833; }
-QRadioButton::indicator:checked { background: #d8ae6b; border-color: #d8ae6b; }
-QMenu { background: #202833; border: 1px solid #465260; padding: 6px; }
-QMenu::item { padding: 8px 22px; border-radius: 4px; }
-QMenu::item:selected { background: #4a3d29; }
-QMenu::separator { height: 1px; background: #3a4553; margin: 5px; }
-QStatusBar { background: #11161c; color: #7e8c9c; border-top: 1px solid #252c35; font-size: 11px; }
-QSplitter::handle { background: #252d37; width: 1px; }
-QToolTip { background: #28323e; color: #edf1f7; border: 1px solid #586678; padding: 6px; }
-"""
+STYLE = DARK_STYLE
 
 
 def _pil_to_qimage(image) -> QImage:
@@ -164,18 +118,26 @@ class MediaTypeFilter(QPushButton):
     def _add_option(self, text, checked):
         box = TickCheckBox(text)
         box.setChecked(checked)
-        box.setStyleSheet("""
-            QCheckBox { padding: 7px 15px; spacing: 10px; background: transparent; }
-            QCheckBox:hover { background: #303b48; }
-            QCheckBox::indicator { width: 18px; height: 18px; border: 1px solid #8e9aa8;
-                                  border-radius: 3px; background: transparent; }
-            QCheckBox::indicator:checked { border-color: #3b82f6; background: #3b82f6; }
-        """)
+        box.setStyleSheet(self._option_style())
         action = QWidgetAction(self.menu)
         action.setDefaultWidget(box)
         self.menu.addAction(action)
         box.toggled.connect(self._selection_changed)
         return box
+
+    def _option_style(self):
+        colors = tokens_for(self)
+        return f"""
+            QCheckBox {{ padding: 7px 15px; spacing: 10px; background: transparent; }}
+            QCheckBox:hover {{ background: {colors['hover']}; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border: 1px solid {colors['muted']};
+                                   border-radius: 3px; background: transparent; }}
+            QCheckBox::indicator:checked {{ border-color: {colors['switch_on']}; background: {colors['switch_on']}; }}
+        """
+
+    def apply_theme(self):
+        for box in (self.live, self.static, self.pending):
+            box.setStyleSheet(self._option_style())
 
     def _selection_changed(self):
         self._update_label()
@@ -205,6 +167,16 @@ def _matches_shortcut(event, name: str) -> bool:
     return event.keyCombination() == QKeySequence(APP_SHORTCUTS[name][0])[0]
 
 
+def _overview_zoom_direction(key, modifiers):
+    modifiers = modifiers & ~Qt.KeyboardModifier.KeypadModifier
+    control = Qt.KeyboardModifier.ControlModifier
+    if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal) and modifiers in (control, control | Qt.KeyboardModifier.ShiftModifier):
+        return 1
+    if key == Qt.Key.Key_Minus and modifiers == control:
+        return -1
+    return 0
+
+
 def _shortcut_error(hold: QKeySequence, once: QKeySequence, filmstrip: QKeySequence) -> str:
     sequences = (("按住播放", hold), ("单击播放", once), ("切换胶片条", filmstrip))
     if any(sequence.isEmpty() for _label, sequence in sequences):
@@ -228,6 +200,12 @@ def _shortcut_overrides(hold: QKeySequence, once: QKeySequence, filmstrip: QKeyS
                     overrides.append(f"F11：窗口模式改为“{label}”；全屏时仍用于退出全屏")
                 else:
                     overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
+        if not sequence.isEmpty():
+            combination = sequence[0]
+            direction = _overview_zoom_direction(combination.key(), combination.keyboardModifiers())
+            if direction:
+                operation = '放大总览缩略图' if direction > 0 else '缩小总览缩略图'
+                overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
     return overrides
 
 
@@ -250,6 +228,18 @@ class SettingsDialog(QDialog):
         sections.setContentsMargins(0, 0, 8, 0)
         scroll.setWidget(scroll_content)
         outer.addWidget(scroll, 1)
+        appearance = QGroupBox('外观')
+        appearance_form = QFormLayout(appearance)
+        self.theme_mode = QComboBox()
+        for label, mode in (('深色', 'dark'), ('浅色', 'light'), ('跟随系统', 'system')):
+            self.theme_mode.addItem(label, mode)
+        self.theme_mode.setCurrentIndex(max(0, self.theme_mode.findData(preferences.theme_mode)))
+        appearance_form.addRow('界面主题', self.theme_mode)
+        theme_help = QLabel('跟随系统时，自动响应 Windows 的应用外观变化。')
+        theme_help.setObjectName('muted')
+        theme_help.setWordWrap(True)
+        appearance_form.addRow(theme_help)
+        sections.addWidget(appearance)
         play_group = QGroupBox("Live Photo 播放")
         form = QFormLayout(play_group)
         form.setVerticalSpacing(13)
@@ -354,11 +344,12 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         outer.addWidget(buttons)
         self._wheel_guard = SettingsWheelGuard(scroll)
-        self._wheel_guard.protect(self.mode, self.zoom_mode, self.horizontal_scroll_mode,
+        self._wheel_guard.protect(self.theme_mode, self.mode, self.zoom_mode, self.horizontal_scroll_mode,
                                   self.cache_location, self.hold, self.cache)
         screen = self.screen()
         available_height = screen.availableGeometry().height() if screen else 900
         self.resize(620, min(850, max(420, available_height - 70)))
+        bind_theme(self)
 
     def _accept(self):
         sequences = (self.live_key.keySequence(), self.live_once_key.keySequence(), self.filmstrip_key.keySequence())
@@ -392,8 +383,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("LiveViewer · 本地 Live Photo 浏览器")
         self.resize(1420, 930)
         self.setMinimumSize(940, 650)
-        self.setStyleSheet(STYLE)
         self.preferences = Preferences.load()
+        self.theme_controller = application_theme(self.preferences.theme_mode)
+        self.setStyleSheet(stylesheet_for(self.theme_controller.effective_theme))
         self._data_base = data_directory()
         self._user_cache_base, self._program_cache_base = cache_data_roots()
         bootstrap = 'program' if self.preferences.cache_location == 'program' else 'user'
@@ -503,9 +495,26 @@ class MainWindow(QMainWindow):
         self._navigation_timer.setSingleShot(True)
         self._navigation_timer.setInterval(45)
         self._navigation_timer.timeout.connect(self._flush_navigation)
+        self._grid_size_save_timer = QTimer(self)
+        self._grid_size_save_timer.setSingleShot(True)
+        self._grid_size_save_timer.setInterval(250)
+        self._grid_size_save_timer.timeout.connect(self._save_preferences)
+        self.grid.thumbnail_size_changed.connect(self._overview_size_changed)
         QApplication.instance().installEventFilter(self)
         self._update_hint()
         self.statusBar().showMessage("本地浏览 · JPG / JPEG / HEIC + MOV · 支持触屏与普通图片")
+        bind_theme(self, self._apply_theme)
+
+    def _apply_theme(self, _scheme):
+        colors = tokens_for(self)
+        self.kind_filter.apply_theme()
+        self.viewer.apply_theme(colors)
+        self.fullscreen_live_badge.setStyleSheet(
+            f"QLabel {{ color: {colors['badge_text']}; background: {colors['badge_background']}; "
+            f"border: 1px solid {colors['badge_border']}; border-radius: 5px; padding: 5px 8px; font-weight: 600; }}")
+        self.grid.viewport().update()
+        self.strip.viewport().update()
+        self.film_resize_handle.update()
 
     @staticmethod
     def _button(text, callback=None, *, checkable=False, name=None):
@@ -596,7 +605,8 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout(self.sidebar)
         side.setContentsMargins(12, 17, 8, 12)
         title = QLabel("文件夹")
-        title.setStyleSheet("font-size:12px;color:#83909f;font-weight:600;padding-left:5px")
+        title.setObjectName('muted')
+        title.setStyleSheet("font-size:12px;font-weight:600;padding-left:5px")
         side.addWidget(title)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
@@ -676,6 +686,7 @@ class MainWindow(QMainWindow):
         self.grid.setMovement(QListView.Movement.Static)
         self.grid.setUniformItemSizes(True)
         self.grid.setSpacing(5)
+        self.grid.set_thumbnail_width(self.preferences.overview_thumbnail_width)
         self.grid.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.grid.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -705,8 +716,11 @@ class MainWindow(QMainWindow):
         self.film = QFrame()
         self.film.setObjectName("film")
         film_layout = QVBoxLayout(self.film)
-        film_layout.setContentsMargins(12, 8, 12, 5)
+        film_layout.setContentsMargins(12, 0, 12, 5)
         film_layout.setSpacing(2)
+        self.film_resize_handle = FilmstripResizeHandle(self.film)
+        self.film_resize_handle.heightRequested.connect(self._set_film_height)
+        film_layout.addWidget(self.film_resize_handle)
         collapse_row = QHBoxLayout()
         collapse_row.addStretch()
         self.collapse_strip_button = self._button("⌄", self._hide_strip)
@@ -728,7 +742,7 @@ class MainWindow(QMainWindow):
         self.analysis_label.setObjectName("muted")
         film_header.addWidget(self.analysis_label)
         film_layout.addLayout(film_header)
-        self.strip = QListView()
+        self.strip = TouchFilmstrip()
         self.strip.setModel(self.model)
         self.strip.setItemDelegate(ThumbnailDelegate(self.strip))
         self.strip.setFlow(QListView.Flow.LeftToRight)
@@ -738,11 +752,13 @@ class MainWindow(QMainWindow):
         self.strip.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.strip.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.strip.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.strip.setFixedHeight(127)
+        self.strip.setMinimumHeight(80)
+        self.strip.viewportHeightChanged.connect(self._resize_strip_thumbnails)
         self.strip.clicked.connect(lambda index: self._select_row(index.row()))
         self.strip.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.strip.customContextMenuRequested.connect(lambda pos: self._list_context_menu(self.strip, pos))
-        film_layout.addWidget(self.strip)
+        film_layout.addWidget(self.strip, 1)
+        self.film.setFixedHeight(self.preferences.filmstrip_height)
         right_layout.addWidget(self.film)
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
@@ -750,7 +766,6 @@ class MainWindow(QMainWindow):
         root.addWidget(splitter, 1)
         self.fullscreen_live_badge = QLabel("◉ LIVE", central)
         self.fullscreen_live_badge.setObjectName("fullscreenLiveBadge")
-        self.fullscreen_live_badge.setStyleSheet("QLabel { color: #f1cf91; background: rgba(20, 23, 28, 170); border: 1px solid #80673e; border-radius: 5px; padding: 5px 8px; font-weight: 600; }")
         self.fullscreen_live_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.fullscreen_live_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.fullscreen_live_badge.adjustSize()
@@ -1475,6 +1490,7 @@ class MainWindow(QMainWindow):
         self._remembered_strip = checked
         self.preferences.filmstrip_visible = checked
         self.film.setVisible(checked and not self._grid_mode)
+        QTimer.singleShot(0, self._clamp_film_height)
         self._save_preferences()
 
     def _toggle_strip_shortcut(self):
@@ -1499,8 +1515,54 @@ class MainWindow(QMainWindow):
         else:
             self.content.setCurrentWidget(self.empty_page)
         self.film.setVisible(self._remembered_strip and not checked)
+        QTimer.singleShot(0, self._clamp_film_height)
         self.viewer_tools.setVisible(not checked and self._chrome_visible)
         self._update_live_overlay()
+
+    def _overview_size_changed(self, width):
+        self.preferences.overview_thumbnail_width = width
+        self._grid_size_save_timer.start()
+
+    def _set_film_height(self, requested, remember=True):
+        available = self.content.height() + (self.film.height() if self.film.isVisible() else 0)
+        maximum = max(160, min(480, available - 160))
+        height = max(160, min(maximum, int(requested)))
+        self.film.setFixedHeight(height)
+        if remember:
+            self.preferences.filmstrip_height = height
+            self._grid_size_save_timer.start()
+
+    def _resize_strip_thumbnails(self, _viewport_height):
+        delegate = self.strip.itemDelegate()
+        # Reserve the scrollbar even while it is hidden. Its appearance must
+        # not change the cell height and trigger an endless relayout cycle.
+        scroll_height = self.strip.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        height = max(64, self.strip.height() - 2 * self.strip.frameWidth() - scroll_height - 4)
+        if height == delegate.thumbnail_height:
+            return
+        center = self.strip.viewport().rect().center()
+        index = self.strip.indexAt(center)
+        if not index.isValid() and self.model.rowCount():
+            width = max(1, delegate.sizeHint(None, None).width())
+            row = (self.strip.horizontalScrollBar().value() + center.x()) // width
+            index = self.model.index(min(self.model.rowCount() - 1, row))
+        before = self.strip.visualRect(index).center().x() if index.isValid() else None
+        delegate.set_thumbnail_height(height)
+        self.strip.doItemsLayout()
+        if before is not None:
+            delta = self.strip.visualRect(index).center().x() - before
+            bar = self.strip.horizontalScrollBar()
+            bar.setValue(bar.value() + delta)
+        self.strip.viewport().update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'film'):
+            QTimer.singleShot(0, self._clamp_film_height)
+
+    def _clamp_film_height(self):
+        if not self._closed and self.film.isVisible():
+            self._set_film_height(self.preferences.filmstrip_height, remember=False)
 
     def _grid_selected(self, index):
         self._grid_mode = False
@@ -1546,6 +1608,7 @@ class MainWindow(QMainWindow):
         self.infobar.setVisible(visible)
         self.viewer_tools.setVisible(visible and not self._grid_mode)
         self.film.setVisible(self._remembered_strip and not self._grid_mode)
+        QTimer.singleShot(0, self._clamp_film_height)
         self.library_label.setVisible(visible)
         self.analysis_label.setVisible(visible)
         self.sidebar.setVisible(visible and self.sidebar_button.isChecked())
@@ -1593,6 +1656,8 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.preferences.loop = dialog.mode.currentIndex() == 1
+        self.preferences.theme_mode = dialog.theme_mode.currentData()
+        self.theme_controller.set_mode(self.preferences.theme_mode)
         self.preferences.autoplay = dialog.autoplay.isChecked()
         self.preferences.muted = dialog.muted.isChecked()
         self.preferences.preserve_zoom = dialog.zoom_mode.currentIndex() == 0
@@ -2052,6 +2117,10 @@ class MainWindow(QMainWindow):
                     self.viewer.release_live()
             return True
         if kind == QEvent.Type.KeyPress:
+            zoom = _overview_zoom_direction(event.key(), event.modifiers())
+            if zoom and self._grid_mode and self.content.currentWidget() is self.grid:
+                self.grid.zoom_step(zoom)
+                return True
             if _matches_shortcut(event, "previous"):
                 if event.isAutoRepeat():
                     self._queue_navigation(-1)
@@ -2089,6 +2158,7 @@ class MainWindow(QMainWindow):
         self._disk_timer.stop()
         self._analysis_timer.stop()
         self._navigation_timer.stop()
+        self._grid_size_save_timer.stop()
         self.jobs.close()
         QApplication.instance().removeEventFilter(self)
         # Running media tasks can still hold the database, especially on
@@ -2137,15 +2207,6 @@ def run(folder: Path | None = None, screenshot: Path | None = None) -> int:
     icon_path = Path(getattr(sys, "_MEIPASS", app_directory())) / "assets" / "LiveViewer.png"
     if icon_path.is_file():
         application.setWindowIcon(QIcon(str(icon_path)))
-    palette = QPalette()
-    palette.setColor(QPalette.ColorRole.Window, QColor("#11151a"))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor("#e9edf2"))
-    palette.setColor(QPalette.ColorRole.Base, QColor("#1b222b"))
-    palette.setColor(QPalette.ColorRole.Text, QColor("#e9edf2"))
-    palette.setColor(QPalette.ColorRole.Button, QColor("#232b35"))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#e9edf2"))
-    palette.setColor(QPalette.ColorRole.Highlight, QColor("#83663e"))
-    application.setPalette(palette)
     window = MainWindow()
     window.show()
     if screenshot is not None:

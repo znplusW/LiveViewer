@@ -4,6 +4,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen, QWheel
 from PySide6.QtWidgets import (
     QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QScrollArea, QSizePolicy, QStyle, QStyleOptionButton,
 )
+from .ui_theme import tokens_for
 
 
 class PillSwitch(QCheckBox):
@@ -40,7 +41,8 @@ class PillSwitch(QCheckBox):
         left = self.width() - self.TRACK_WIDTH - 4 if rtl else 4
         track = QRectF(left, (self.height() - self.TRACK_HEIGHT) / 2,
                        self.TRACK_WIDTH, self.TRACK_HEIGHT)
-        color = QColor('#3b82f6' if self.isChecked() else '#58616d')
+        colors = tokens_for(self)
+        color = QColor(colors['switch_on' if self.isChecked() else 'switch_off'])
         if self.isDown():
             color = color.darker(112)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -49,11 +51,11 @@ class PillSwitch(QCheckBox):
         diameter = self.TRACK_HEIGHT - 4
         thumb_on_right = self.isChecked() != rtl
         thumb_left = track.right() - diameter - 2 if thumb_on_right else track.left() + 2
-        painter.setBrush(QColor('#ffffff'))
+        painter.setBrush(QColor(colors['switch_thumb']))
         painter.drawEllipse(QRectF(thumb_left, track.top() + 2, diameter, diameter))
         if self.hasFocus():
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(QPen(QColor('#9ac5ff'), 2))
+            painter.setPen(QPen(QColor(colors['focus']), 2))
             painter.drawRoundedRect(track.adjusted(-3, -3, 3, 3), 16, 16)
         text = QRectF(4, 0, max(0, track.left() - 14), self.height()) if rtl else QRectF(
             track.right() + 10, 0, max(0, self.width() - track.right() - 14), self.height())
@@ -84,7 +86,7 @@ class TickCheckBox(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if not self.isEnabled():
             painter.setOpacity(0.45)
-        pen = QPen(QColor('#ffffff'), 2)
+        pen = QPen(QColor(tokens_for(self)['tick']), 2)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)

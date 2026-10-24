@@ -12,15 +12,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QKeyEvent, QMouseEvent, QTouchEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QPalette, QTouchEvent, QWheelEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QGroupBox
+from PySide6.QtWidgets import QApplication, QDialog, QGroupBox, QMenu
 
 from livegallery.cover_editor import CoverTimelineSlider, EditorDialog, SaveModeDialog
 from livegallery.cover_preview import PreviewSession
 from livegallery.frame_reader import FrameCancelled, FrameReader
 from livegallery.frame_tools import resolve_frame_tools
 from livegallery.models import MediaItem
+from livegallery.ui_theme import application_theme
 
 
 class FakeReader:
@@ -166,6 +167,184 @@ class CoverEditorTests(unittest.TestCase):
         self.wait(lambda: not dialog.isMaximized())
         self.assertEqual(dialog.size(), before_size)
         self.assertEqual(dialog.selected_frame_index, before_frame)
+        self.assert_originals()
+
+    def test_preview_wheel_pinch_pan_and_frame_changes_preserve_zoomed_view(self):
+        dialog = self.open_dialog()
+        view = dialog.preview
+        viewport = view.viewport()
+        center = viewport.rect().center()
+        event = QWheelEvent(QPointF(center), QPointF(viewport.mapToGlobal(center)),
+                            QPoint(), QPoint(0, 120), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(viewport, event)
+        self.assertGreater(view.zoom_factor(), 1)
+        device = QTest.createTouchDevice()
+        touch = QTest.touchEvent(viewport, device, False)
+        touch.press(0, center - QPoint(50, 0), viewport).press(1, center + QPoint(50, 0), viewport).commit()
+        touch.move(0, center - QPoint(100, 0), viewport).move(1, center + QPoint(100, 0), viewport).commit()
+        touch.release(0, center - QPoint(100, 0), viewport).release(1, center + QPoint(100, 0), viewport).commit()
+        self.app.processEvents()
+        self.assertGreater(view.zoom_factor(), 2)
+        before_pan = view._scene_center()
+        touch.press(0, center, viewport).commit()
+        touch.move(0, center + QPoint(30, 35), viewport).commit()
+        touch.release(0, center + QPoint(30, 35), viewport).commit()
+        self.app.processEvents()
+        self.assertGreater((view._scene_center() - before_pan).manhattanLength(), 1)
+        transform, position = view.transform(), view._scene_center()
+        dialog.timeline.setValue(3)
+        self.wait(lambda: dialog.displayed_frame_index == 3 and dialog.save_button.isEnabled())
+        self.assertEqual(view.transform(), transform)
+        self.assertLess((view._scene_center() - position).manhattanLength(), 1)
+        dialog._render_preview()
+        dialog._render_preview()
+        self.assertEqual(view.transform(), transform)
+        self.assertEqual(dialog.selected_frame_index, 3)
+
+    def test_export_menu_only_enables_for_exact_selected_preview(self):
+        dialog = self.open_dialog()
+        states = []
+        def inspect():
+            menu = QApplication.activePopupWidget()
+            if not isinstance(menu, QMenu):
+                QTimer.singleShot(5, inspect)
+                return
+            states.append([(action.text(), action.isEnabled()) for action in menu.actions()])
+            menu.close()
+        QTimer.singleShot(0, inspect)
+        dialog._preview_menu(dialog.preview.rect().center())
+        self.assertEqual(states[-1], [('导出静帧画面…', True)])
+        reader = FakeReader.instances[0]
+        reader.block_index = 2
+        dialog.timeline.setValue(2)
+        self.assertTrue(reader.entered.wait(1))
+        QTimer.singleShot(0, inspect)
+        dialog._preview_menu(dialog.preview.rect().center())
+        self.assertEqual(states[-1], [('导出静帧画面…', False)])
+        with patch.object(dialog, '_choose_export_path') as choose:
+            dialog._export_current_frame()
+            choose.assert_not_called()
+        reader.gate.set()
+        self.wait(lambda: dialog.displayed_frame_index == 2 and dialog.save_button.isEnabled())
+        self.assertTrue(dialog._can_export())
+
+    def test_export_captures_displayed_index_and_original_video_without_blocking_preview(self):
+        dialog = self.open_dialog()
+        destination = self.folder / 'export.png'
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def export(video, index, target, *, expected_video, cancel_event):
+            calls.append((video, index, expected_video, threading.get_ident()))
+            entered.set()
+            while not release.wait(.01):
+                if cancel_event.is_set():
+                    raise FrameCancelled('closed')
+            Image.new('RGB', (120, 90), (index * 25, 30, 60)).save(target, 'PNG')
+            return target
+        try:
+            with patch('livegallery.cover_editor.export_frame', side_effect=export), \
+                    patch.object(dialog, '_choose_export_path', return_value=destination):
+                dialog._export_current_frame()
+                self.assertTrue(entered.wait(1))
+                dialog.timeline.setValue(3)
+                self.wait(lambda: dialog.displayed_frame_index == 3 and
+                          dialog._loaded_sequence == dialog._request_sequence)
+                self.assertTrue(dialog._export_busy)
+                self.assertTrue(dialog.timeline.isEnabled())
+                self.assertFalse(dialog.save_button.isEnabled())
+                with patch.object(dialog._worker, 'request_save') as save:
+                    dialog._save()
+                    save.assert_not_called()
+                release.set()
+                self.wait(lambda: dialog.last_export_path == destination and not dialog._export_busy)
+        finally:
+            release.set()
+        self.assertEqual(calls[0][:2], (self.video, 0))
+        self.assertIs(calls[0][2], dialog._worker.source.video)
+        self.assertNotEqual(calls[0][3], threading.get_ident())
+        with Image.open(destination) as exported:
+            self.assertEqual(exported.size, (120, 90))
+            self.assertEqual(exported.getpixel((1, 1)), (0, 30, 60))
+        self.assertIsNone(dialog.saved_result)
+        self.assertEqual(len(list(self.folder.glob('*.MOV'))), 1)
+        self.assert_originals()
+
+    def test_export_save_as_cancel_and_close_cancel_leave_no_file(self):
+        dialog = self.open_dialog()
+        with patch.object(dialog, '_choose_export_path', return_value=None), \
+                patch('livegallery.cover_editor.export_frame') as export:
+            dialog._export_current_frame()
+            export.assert_not_called()
+            self.assertFalse(dialog._export_busy)
+        entered, cancelled, cleanup = threading.Event(), threading.Event(), threading.Event()
+        destination = self.folder / 'cancelled.png'
+        def wait_cancel(video, index, target, *, expected_video, cancel_event):
+            entered.set()
+            cancel_event.wait(2)
+            self.assertTrue(cancel_event.is_set())
+            cancelled.set()
+            cleanup.wait(2)
+            raise FrameCancelled('closed')
+        with patch.object(dialog, '_choose_export_path', return_value=destination), \
+                patch('livegallery.cover_editor.export_frame', side_effect=wait_cancel):
+            dialog._export_current_frame()
+            self.assertTrue(entered.wait(1))
+            dialog.reject()
+            self.assertTrue(cancelled.wait(1))
+            self.assertTrue(dialog.isVisible())
+            self.assertTrue(dialog._export_cancel_pending)
+            cleanup.set()
+            dialog._export_thread.join(2)
+            self.assertFalse(dialog._export_thread.is_alive())
+            self.wait(lambda: not dialog.isVisible() and not dialog._export_busy)
+        self.assertFalse(destination.exists())
+        self.assert_originals()
+
+    def test_live_themes_update_editor_save_prompt_without_changing_frame_or_pixels(self):
+        dialog = self.open_dialog()
+        view = dialog.preview
+        view._zoom_at(2, QPointF(view.viewport().rect().center()))
+        transform, image_key = view.transform(), view._photo.pixmap().cacheKey()
+        controller = application_theme()
+        prompt = SaveModeDialog(self.item, dialog)
+        prompt.overwrite_choice.setChecked(True)
+        try:
+            for mode, light in (('light', True), ('dark', False)):
+                controller.set_mode(mode)
+                self.app.processEvents()
+                self.assertEqual(dialog.property('liveviewerTheme'), mode)
+                self.assertEqual(prompt.property('liveviewerTheme'), mode)
+                self.assertEqual(view.transform(), transform)
+                self.assertEqual(view._photo.pixmap().cacheKey(), image_key)
+                self.assertEqual(dialog.displayed_frame_index, 0)
+                self.assertEqual(view.backgroundBrush().color().lightness() > 127, light)
+                self.assertEqual(prompt.warning_label.palette().color(QPalette.ColorRole.WindowText).lightness() < 127, light)
+        finally:
+            controller.set_mode('dark')
+            prompt.deleteLater()
+
+    def test_export_late_committed_result_is_retained_when_close_was_requested(self):
+        dialog = self.open_dialog()
+        entered = threading.Event()
+        destination = self.folder / 'committed.png'
+        def committed(video, index, target, *, expected_video, cancel_event):
+            entered.set()
+            self.assertTrue(cancel_event.wait(2))
+            # The service has already passed its atomic commit point when a
+            # late cancellation arrives; its successful result is final.
+            Image.new('RGB', (120, 90), 'blue').save(target, 'PNG')
+            return target
+        with patch.object(dialog, '_choose_export_path', return_value=destination), \
+                patch('livegallery.cover_editor.export_frame', side_effect=committed):
+            dialog._export_current_frame()
+            self.assertTrue(entered.wait(1))
+            dialog.reject()
+            self.wait(lambda: not dialog.isVisible() and not dialog._export_busy)
+        self.assertEqual(dialog.last_export_path, destination)
+        with Image.open(destination) as image:
+            image.load()
+            self.assertEqual(image.size, (120, 90))
         self.assert_originals()
 
     def test_initial_window_fits_scaled_small_desktop(self):

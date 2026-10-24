@@ -2,6 +2,16 @@ from collections import OrderedDict
 from PySide6.QtCore import QAbstractListModel, Qt, QSize, QRect, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QFont
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
+from .ui_theme import tokens_for
+
+
+OVERVIEW_DEFAULT_WIDTH = 204
+OVERVIEW_MIN_WIDTH = 120
+OVERVIEW_MAX_WIDTH = 480
+
+
+def overview_tile_size(width):
+    return QSize(width, round((width - 20) * 2 / 3) + 43)
 
 
 class CatalogModel(QAbstractListModel):
@@ -61,17 +71,30 @@ class ThumbnailDelegate(QStyledItemDelegate):
     def __init__(self, parent=None, large=False):
         super().__init__(parent)
         self.large = large
+        self.thumbnail_width = OVERVIEW_DEFAULT_WIDTH
+        self.thumbnail_height = 116
+
+    def set_thumbnail_width(self, width):
+        self.thumbnail_width = width
+
+    def set_thumbnail_height(self, height):
+        height = max(64, int(height))
+        changed = self.thumbnail_height != height
+        self.thumbnail_height = height
+        return changed
 
     def sizeHint(self, option, index):
-        return QSize(204, 166) if self.large else QSize(144, 116)
+        return (overview_tile_size(self.thumbnail_width) if self.large else
+                QSize(round(self.thumbnail_height * 144 / 116), self.thumbnail_height))
 
     def paint(self, painter, option, index):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        colors = tokens_for(option.widget or self.parent())
         rect = option.rect.adjusted(5, 5, -5, -5)
-        painter.setPen(QPen(QColor('#e6ba72' if selected else '#30343b'), 2 if selected else 1))
-        painter.setBrush(QColor('#23272d' if selected else '#1a1e23'))
+        painter.setPen(QPen(QColor(colors['thumbnail_selected_border' if selected else 'thumbnail_border']), 2 if selected else 1))
+        painter.setBrush(QColor(colors['thumbnail_selected' if selected else 'thumbnail']))
         painter.drawRoundedRect(rect, 8, 8)
         image_rect = rect.adjusted(5, 5, -5, -29)
         pixmap = index.data(Qt.ItemDataRole.DecorationRole)
@@ -81,23 +104,23 @@ class ThumbnailDelegate(QStyledItemDelegate):
             y = image_rect.y() + (image_rect.height() - scaled.height()) // 2
             painter.drawPixmap(x, y, scaled)
         else:
-            painter.setPen(QColor('#66717d'))
+            painter.setPen(QColor(colors['muted']))
             painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, '· · ·')
         item = index.data(Qt.ItemDataRole.UserRole)
         if item.is_live:
             badge = QRect(image_rect.x()+4, image_rect.y()+4, 47, 20)
-            painter.fillRect(badge, QColor(17, 19, 22, 210))
-            painter.setPen(QColor('#f1d39e'))
+            painter.fillRect(badge, QColor(colors['badge_background']))
+            painter.setPen(QColor(colors['badge_text']))
             font = QFont(option.font)
             font.setPointSize(8)
             font.setBold(True)
             painter.setFont(font)
             painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, '◉ LIVE')
         if item.pending or item.uncertain:
-            painter.setPen(QColor('#e6ba72'))
+            painter.setPen(QColor(colors['thumbnail_selected_border']))
             painter.drawText(image_rect.adjusted(0, 0, -4, -2), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, '…' if item.pending else '!')
         painter.setFont(option.font)
-        painter.setPen(QColor('#f4eee5' if selected else '#aab1bb'))
+        painter.setPen(QColor(colors['thumbnail_selected_text' if selected else 'thumbnail_text']))
         title = option.fontMetrics.elidedText(item.image_path.name, Qt.TextElideMode.ElideMiddle, rect.width()-12)
         painter.drawText(rect.adjusted(6, rect.height()-24, -6, -4), Qt.AlignmentFlag.AlignCenter, title)
         painter.restore()

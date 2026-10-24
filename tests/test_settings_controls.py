@@ -68,8 +68,10 @@ class SettingsControlTests(unittest.TestCase):
         return event
 
     def test_closed_fields_and_spin_editors_scroll_page_once_even_with_focus(self):
-        controls = (self.dialog.mode, self.dialog.zoom_mode, self.dialog.horizontal_scroll_mode,
-                    self.dialog.cache_location, self.dialog.hold, self.dialog.cache)
+        combos = (self.dialog.theme_mode, self.dialog.mode, self.dialog.zoom_mode,
+                  self.dialog.horizontal_scroll_mode, self.dialog.cache_location)
+        spins = (self.dialog.hold, self.dialog.cache)
+        controls = (*combos, *spins)
         targets = (*controls, self.dialog.hold.lineEdit(), self.dialog.cache.lineEdit())
         for pixels, angle in (((0, 0), (0, -120)), ((0, -23), (0, 0)), ((0, -23), (0, -120))):
             midpoint = self.bar.maximum() // 2
@@ -85,13 +87,13 @@ class SettingsControlTests(unittest.TestCase):
                             target.setFocus()
                         self.application.processEvents()
                         focus = self.application.focusWidget()
-                        values = [field.currentIndex() for field in controls[:4]] + [field.value() for field in controls[4:]]
+                        values = [field.currentIndex() for field in combos] + [field.value() for field in spins]
                         self.bar.setValue(midpoint)
                         event = self.wheel(target, pixels=pixels, angle=angle)
                         self.assertTrue(event.isAccepted())
                         self.assertEqual(self.bar.value() - midpoint, expected)
-                        self.assertEqual(values, [field.currentIndex() for field in controls[:4]] +
-                                         [field.value() for field in controls[4:]])
+                        self.assertEqual(values, [field.currentIndex() for field in combos] +
+                                         [field.value() for field in spins])
                         self.assertIs(self.application.focusWidget(), focus)
                         self.assertFalse(target.focusPolicy() & Qt.FocusPolicy.WheelFocus == Qt.FocusPolicy.WheelFocus)
 

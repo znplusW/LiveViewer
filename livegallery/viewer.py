@@ -15,6 +15,7 @@ from pathlib import Path
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QContextMenuEvent,
+    QColor,
     QEventPoint,
     QImage,
     QMouseEvent,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .native_touch import install_image_touch_filter
+from .ui_theme import tokens_for
 
 
 class ViewerCanvas(QGraphicsView):
@@ -53,11 +55,15 @@ class ViewerCanvas(QGraphicsView):
     message = Signal(str)
     controls_toggled = Signal()
 
+    def apply_theme(self, colors):
+        self.setBackgroundBrush(QColor(colors['canvas']))
+        self.viewport().update()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setBackgroundBrush(Qt.GlobalColor.black)
+        self.apply_theme(tokens_for(self))
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
@@ -568,7 +574,14 @@ class ViewerCanvas(QGraphicsView):
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         self._cancel_zoom_animation()
-        old_center = self._scene_center()
+        old_size = event.oldSize()
+        if old_size.isValid():
+            frame = 2 * self.frameWidth()
+            old_point = QPointF(max(0, old_size.width() - frame - 1) // 2,
+                                max(0, old_size.height() - frame - 1) // 2)
+            old_center = self.mapToScene(old_point.toPoint())
+        else:
+            old_center = self._scene_center()
         was_fit = self._fit_mode
         super().resizeEvent(event)
         if not hasattr(self, "_image_rect"):
