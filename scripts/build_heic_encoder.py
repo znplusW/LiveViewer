@@ -5,13 +5,16 @@ The build recipe and source URLs travel with the portable/source distributions.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
+import struct
 import sys
 import tarfile
 import urllib.request
@@ -26,6 +29,90 @@ PINS = ROOT / 'dependencies/heic-encoder.json'
 def digest(path):
     with path.open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def source_inputs():
+    paths = [ROOT / name for name in ('scripts/build_heic_encoder.py',
+                                      'dependencies/heic-encoder.json',
+                                      'requirements-build.txt', 'requirements.txt')]
+    paths.extend(sorted(path for path in (ROOT / 'native/heic_encoder').rglob('*') if path.is_file()))
+    if not paths[4:]:
+        raise RuntimeError('HEIC helper source files are absent')
+    if any(not path.is_file() or path.is_symlink() for path in paths):
+        raise RuntimeError('HEIC build inputs must be regular source files')
+    return {path.relative_to(ROOT).as_posix(): digest(path) for path in paths}
+
+
+def build_platform():
+    return {'platform': sys.platform, 'machine': platform.machine().casefold(),
+            'pointer_bits': struct.calcsize('P') * 8,
+            'image_os': os.environ.get('ImageOS', ''), 'image_version': os.environ.get('ImageVersion', '')}
+
+
+def _regular_files(folder):
+    if not folder.is_dir() or folder.is_symlink() or getattr(folder, 'is_junction', lambda: False)():
+        raise RuntimeError(f'HEIC artifact directory is absent or linked: {folder}')
+    paths = list(folder.iterdir())
+    if any(not path.is_file() or path.is_symlink() for path in paths):
+        raise RuntimeError(f'HEIC artifacts must contain regular files only: {folder}')
+    return paths
+
+
+def _verify_amd64(path):
+    with path.open('rb') as source:
+        if source.read(2) != b'MZ':
+            raise RuntimeError(f'HEIC component is not a PE executable: {path.name}')
+        source.seek(0x3c)
+        offset = source.read(4)
+        if len(offset) != 4 or not 64 <= struct.unpack('<I', offset)[0] <= 1024 ** 2:
+            raise RuntimeError(f'HEIC component has an invalid PE header: {path.name}')
+        source.seek(struct.unpack('<I', offset)[0])
+        if source.read(6) != b'PE\0\0\x64\x86':
+            raise RuntimeError(f'HEIC component is not Windows AMD64: {path.name}')
+
+
+def verify():
+    """Validate a restored native output against the current build inputs."""
+    notices = ROOT / 'licenses/HEIC'
+    metadata = notices / 'provenance.json'
+    if metadata.is_symlink() or not metadata.is_file() or metadata.stat().st_size > 1024 ** 2:
+        raise RuntimeError('HEIC source-build provenance is absent or invalid')
+    record = json.loads(metadata.read_text(encoding='utf-8'))
+    pins = json.loads(PINS.read_text(encoding='utf-8'))
+    if (not isinstance(record, dict) or record.get('sources') != pins
+            or record.get('source_inputs') != source_inputs()
+            or record.get('build_platform') != build_platform()
+            or record.get('recipe') != 'scripts/build_heic_encoder.py'
+            or record.get('helper_license') != 'MIT' or record.get('shared_libraries') is not True
+            or record.get('x265') is not False or record.get('gpl_encoder') is not False):
+        raise RuntimeError('HEIC cache does not match the current pinned sources, recipe or platform')
+    files = _regular_files(DESTINATION)
+    hashes = {path.name: digest(path) for path in files}
+    if not hashes or record.get('binaries') != hashes:
+        raise RuntimeError('HEIC cache binary list or SHA-256 differs from its provenance')
+    license_hashes = {path.name: digest(path) for path in _regular_files(notices) if path.name != 'provenance.json'}
+    if record.get('license_files') != license_hashes or not all(name in license_hashes for name in
+            ('Kvazaar-LICENSE.txt', 'libheif-COPYING.txt', 'README.txt')):
+        raise RuntimeError('HEIC cache license files differ from their provenance')
+    executable = 'LiveViewer.HeicEncoder' + ('.exe' if sys.platform == 'win32' else '')
+    if executable not in hashes or any('x265' in name.casefold() for name in hashes):
+        raise RuntimeError('HEIC cache has missing or unexpected encoder components')
+    if sys.platform == 'win32':
+        for pattern in ('*heif*.dll', '*kvazaar*.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'):
+            if not list(DESTINATION.glob(pattern)):
+                raise RuntimeError(f'HEIC cache is missing a required Windows runtime: {pattern}')
+        for path in files:
+            if path.suffix.casefold() not in ('.exe', '.dll'):
+                raise RuntimeError(f'Unexpected HEIC runtime file: {path.name}')
+            _verify_amd64(path)
+    observed = subprocess.run([str(DESTINATION / executable), '--version'], capture_output=True,
+                              text=True, check=True, timeout=30).stdout.strip()
+    expected = f'LiveViewer.HeicEncoder libheif {pins["libheif"]["version"]} / Kvazaar'
+    if observed != expected or record.get('runtime_version') != observed:
+        raise RuntimeError('HEIC helper runtime version differs from the pinned native build')
+    return {'status': 'passed', 'source_inputs': len(record['source_inputs']),
+            'binaries': len(files), 'license_files': len(license_hashes), 'runtime_version': observed,
+            'build_platform': record['build_platform']}
 
 
 def cmake_command():
@@ -123,11 +210,11 @@ def build():
     for source in libheif.glob('LICENSE*'):
         if source.is_file():
             shutil.copy2(source, notices / ('libheif-' + source.name))
-    provenance = {'sources': pins, 'helper_license': 'MIT', 'shared_libraries': True,
+    provenance = {'sources': pins, 'source_inputs': source_inputs(), 'build_platform': build_platform(),
+                  'helper_license': 'MIT', 'shared_libraries': True,
                   'x265': False, 'gpl_encoder': False, 'runtime_version': report.stdout.strip(),
                   'recipe': 'scripts/build_heic_encoder.py',
                   'binaries': {path.name: digest(path) for path in DESTINATION.iterdir() if path.is_file()}}
-    (notices / 'provenance.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     (notices / 'README.txt').write_text(
         'HEIC cover export uses libheif (LGPL-3.0-or-later) and Kvazaar (BSD-3-Clause).\n'
         'These shared libraries are replaceable in _internal/tools/heic. No x265 is used.\n'
@@ -135,8 +222,16 @@ def build():
         'Full reproducible build recipe and helper source are in the accompanying source ZIP:\n'
         'scripts/build_heic_encoder.py, dependencies/heic-encoder.json, native/heic_encoder/.\n'
         'You may replace these libraries, rebuild the helper, and debug your modifications.\n', encoding='utf-8')
+    provenance['license_files'] = {path.name: digest(path) for path in notices.iterdir()
+                                 if path.is_file() and path.name != 'provenance.json'}
+    (notices / 'provenance.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     print(report.stdout.strip())
 
 
 if __name__ == '__main__':
-    build()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--verify-only', action='store_true', help='Validate existing native output without rebuilding')
+    arguments = parser.parse_args()
+    if not arguments.verify_only:
+        build()
+    print(json.dumps(verify(), ensure_ascii=False))
