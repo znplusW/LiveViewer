@@ -902,6 +902,7 @@ def _check_filter_blank_click(window):
 def _check_settings_controls(settings, window, report_dir: Path):
     """Send real wheel/key/touch events through the shipped settings dialog."""
     from PySide6.QtGui import QAccessible
+    from PySide6.QtTest import QSignalSpy
     from PySide6.QtWidgets import QCheckBox
     from .settings_controls import PillSwitch
 
@@ -972,17 +973,26 @@ def _check_settings_controls(settings, window, report_dir: Path):
     before = control.isChecked()
     scroll.ensureWidgetVisible(control)
     control.setFocus()
+    QCoreApplication.processEvents()
     position = QPoint(20, control.height() // 2)
     QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=position)
     assert control.isChecked() != before, 'Pill switch did not respond to a click'
     QTest.keyClick(control, Qt.Key.Key_Space)
     assert control.isChecked() == before, 'Pill switch did not respond to Space'
+    QCoreApplication.processEvents()
+    target_window = settings.windowHandle()
+    assert target_window is not None and target_window.isExposed(), 'Settings window must be exposed for touch injection'
+    window_position = control.mapTo(settings, position)
+    assert settings.rect().contains(window_position), 'Mapped touch point is outside the settings window'
+    touch_toggled, touch_clicked = QSignalSpy(control.toggled), QSignalSpy(control.clicked)
     device = QTest.createTouchDevice()
-    touch = QTest.touchEvent(control, device, False)
-    touch.press(0, position, control).commit()
-    touch.release(0, position, control).commit()
+    touch = QTest.touchEvent(target_window, device, False)
+    touch.press(0, window_position, target_window).commit()
+    touch.release(0, window_position, target_window).commit()
     QCoreApplication.processEvents()
     assert control.isChecked() != before, 'Pill switch did not respond to simulated touch'
+    touch_toggle_count, touch_click_count = touch_toggled.count(), touch_clicked.count()
+    assert touch_toggle_count == 1 and touch_click_count == 1, 'A touch must toggle and click the switch exactly once'
     control.setChecked(before)
     control.setEnabled(False)
     QTest.mouseClick(control, Qt.MouseButton.LeftButton, pos=position)
@@ -996,6 +1006,9 @@ def _check_settings_controls(settings, window, report_dir: Path):
             'focused_controls_and_spinbox_children_protected': True,
             'angle_and_pixel_scroll_page_once': True, 'opened_dropdown_selectable': True,
             'checkbox_accessibility_preserved': True, 'click_space_touch_toggle': True,
+            'touch_target': 'settings_qwindow', 'touch_toggle_count': touch_toggle_count,
+            'touch_click_count': touch_click_count,
+            'touch_window_position': [window_position.x(), window_position.y()],
             'disabled_switch_unchanged': True, 'overview_filter_remains_checkboxes': True}
 
 
