@@ -1254,6 +1254,9 @@ class MainWindow(QMainWindow):
                     close_video_probe()
                 finally:
                     self.jobs.wait()
+                    # A worker that was already comparing images may have
+                    # entered the shared decoder while shutdown was starting.
+                    close_video_probe()
                     self.cache.close()
             except Exception as error:
                 self._shutdown_error = str(error)
