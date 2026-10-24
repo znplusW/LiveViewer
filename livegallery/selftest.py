@@ -697,17 +697,26 @@ def _check_editor_preview_export(dialog, folder: Path, still: Path, video: Path,
     QCoreApplication.processEvents()
     assert preview.zoom_factor() > before_zoom, 'Editor preview wheel did not zoom'
     before_pinch = preview.zoom_factor()
+    dialog.activateWindow()
+    QCoreApplication.processEvents()
+    target_window = dialog.windowHandle()
+    assert target_window is not None and target_window.isExposed(), 'Editor window must be exposed for touch injection'
+    def window_position(position):
+        return viewport.mapTo(dialog, position)
     device = QTest.createTouchDevice()
-    gesture = QTest.touchEvent(viewport, device, False)
-    gesture.press(0, center - QPoint(40, 0), viewport).press(1, center + QPoint(40, 0), viewport).commit()
-    gesture.move(0, center - QPoint(85, 0), viewport).move(1, center + QPoint(85, 0), viewport).commit()
-    gesture.release(0, center - QPoint(85, 0), viewport).release(1, center + QPoint(85, 0), viewport).commit()
+    gesture = QTest.touchEvent(target_window, device, False)
+    gesture.press(0, window_position(center - QPoint(40, 0)), target_window).press(
+        1, window_position(center + QPoint(40, 0)), target_window).commit()
+    gesture.move(0, window_position(center - QPoint(85, 0)), target_window).move(
+        1, window_position(center + QPoint(85, 0)), target_window).commit()
+    gesture.release(0, window_position(center - QPoint(85, 0)), target_window).release(
+        1, window_position(center + QPoint(85, 0)), target_window).commit()
     QCoreApplication.processEvents()
     assert preview.zoom_factor() > before_pinch, 'Editor preview pinch did not zoom'
     before_pan = preview._scene_center()
-    gesture.press(0, center, viewport).commit()
-    gesture.move(0, center + QPoint(55, 25), viewport).commit()
-    gesture.release(0, center + QPoint(80, 35), viewport).commit()
+    gesture.press(0, window_position(center), target_window).commit()
+    gesture.move(0, window_position(center + QPoint(55, 25)), target_window).commit()
+    gesture.release(0, window_position(center + QPoint(80, 35)), target_window).commit()
     QCoreApplication.processEvents()
     assert (preview._scene_center() - before_pan).manhattanLength() > .5, 'Editor preview did not pan after zoom'
     assert dialog.selected_frame_index == selected and not preview._play_requested
@@ -807,23 +816,27 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
                 span = max(1, groove.width() - handle.width())
                 x = groove.x() + handle.width() / 2 + span * index / slider.maximum()
                 return QPoint(round(x), handle.center().y())
+            dialog.activateWindow()
+            QCoreApplication.processEvents()
+            target_window = dialog.windowHandle()
+            assert target_window is not None and target_window.isExposed(), 'Editor window must be exposed for touch injection'
             device = QTest.createTouchDevice()
-            touch = QTest.touchEvent(slider, device, False)
+            touch = QTest.touchEvent(target_window, device, False)
             last = handle.center()
-            touch.press(0, last, slider).commit()
+            touch.press(0, slider.mapTo(dialog, last), target_window).commit()
             QCoreApplication.processEvents()
             shown_while_pressed = []
             try:
                 assert slider.isSliderDown(), 'Touch begin did not capture the cover timeline'
                 for index in (1, 2, 4):
                     last = slider_position(index)
-                    touch.move(0, last, slider).commit()
+                    touch.move(0, slider.mapTo(dialog, last), target_window).commit()
                     _wait(lambda index=index: dialog.selected_frame_index == index
                           and dialog.displayed_frame_index == index and dialog.save_button.isEnabled(), 8)
                     assert slider.isSliderDown(), 'Finger was released before preview changed'
                     shown_while_pressed.append(dialog.displayed_frame_index)
             finally:
-                touch.release(0, last, slider).commit()
+                touch.release(0, slider.mapTo(dialog, last), target_window).commit()
                 QCoreApplication.processEvents()
             assert shown_while_pressed == [1, 2, 4] and not slider.isSliderDown()
             _wait(lambda: dialog.selected_frame_index == 4 and dialog.save_button.isEnabled(), 20)
