@@ -1,12 +1,13 @@
 """Window integration and asynchronous-result ownership regressions."""
 
+import ctypes
 import os
 import tempfile
 import time
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import QApplication, QDialog
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
 from livegallery.settings import Preferences
+from livegallery.system_open import (E_ABORT, HRESULT_CANCELLED, OAIF_EXEC,
+                                     OAIF_HIDE_REGISTRATION, OPENASINFO, open_with)
 
 
 class WindowTests(unittest.TestCase):
@@ -163,6 +166,7 @@ class WindowTests(unittest.TestCase):
         self.window._current_id = item.id
         self.window._primary_items = [item]
         self.window._rebuild_items()
+        self.window.model.set_items([item])
         self.window.viewer.set_photo(self.image, item.video_path)
         self.window.content.setCurrentWidget(self.window.viewer)
         self.window.viewer.setFocus()
@@ -178,7 +182,6 @@ class WindowTests(unittest.TestCase):
 
     def test_fullscreen_is_immediate_stable_and_f11_or_escape_exit(self):
         self.show_live_item()
-        self.window.grid_button.click()
         self.window.fullscreen_button.click()
         self.assertFalse(self.window._grid_mode)
         self.assertIs(self.window.content.currentWidget(), self.window.viewer)
@@ -310,9 +313,10 @@ class WindowTests(unittest.TestCase):
         dialog.show()
         self.application.processEvents()
         try:
-            for editor in (dialog.live_key, dialog.live_once_key):
+            for editor in (dialog.live_key, dialog.live_once_key, dialog.filmstrip_key):
                 dialog.live_key.setKeySequence(QKeySequence("Space"))
                 dialog.live_once_key.setKeySequence(QKeySequence("P"))
+                dialog.filmstrip_key.setKeySequence(QKeySequence("F"))
                 for key, description in (("Left", "上一张"), ("Right", "下一张"),
                                          ("F11", "全屏"), ("Ctrl+O", "打开文件夹")):
                     with self.subTest(editor=editor, key=key):
@@ -321,6 +325,7 @@ class WindowTests(unittest.TestCase):
                         self.assertIn(description, dialog.shortcut_note.text())
                         self.assertTrue(dialog.override_keys.isVisible())
                         self.assertFalse(dialog.override_keys.isChecked())
+            dialog.filmstrip_key.setKeySequence(QKeySequence("F"))
             dialog.live_once_key.setKeySequence(QKeySequence("F11"))
             self.assertIn("全屏时仍用于退出", dialog.shortcut_note.text())
             dialog.live_once_key.setKeySequence(QKeySequence("Space"))
@@ -373,6 +378,210 @@ class WindowTests(unittest.TestCase):
             release.assert_called_once()
             QTest.keyClick(self.window.viewer, Qt.Key.Key_F9)
             once.assert_called_once()
+
+    def test_fullscreen_overview_preserves_mode_and_opened_photo_stays_fullscreen(self):
+        self.show_live_item()
+        self.window.grid_button.click()
+        self.window.fullscreen_button.click()
+        self.assert_fullscreen_has_no_controls()
+        self.assertTrue(self.window._grid_mode)
+        self.assertIs(self.window.content.currentWidget(), self.window.grid)
+        self.assertFalse(self.window.film.isVisible())
+        self.assertFalse(self.window.fullscreen_live_badge.isVisible())
+        QTest.mouseMove(self.window.grid.viewport(), QPoint(200, 100))
+        QTest.keyClick(self.window.grid, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.isFullScreen())
+        self.assertTrue(self.window._grid_mode)
+        QTest.keyClick(self.window.grid, Qt.Key.Key_Escape)
+        self.assertTrue(self.window._grid_mode)
+        QTest.keyClick(self.window.grid, Qt.Key.Key_F11)
+        self.window._grid_selected(self.window.model.index(0))
+        self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer)
+        self.assertTrue(self.window.isFullScreen())
+        self.assertFalse(self.window._grid_mode)
+        self.assertTrue(self.window.fullscreen_live_badge.isVisible())
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        self.assertFalse(self.window.isFullScreen())
+        self.assertFalse(self.window._grid_mode)
+        repeated = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                             Qt.KeyboardModifier.NoModifier, "", True)
+        QApplication.sendEvent(self.window.viewer, repeated)
+        self.assertFalse(self.window._grid_mode)
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_Escape)
+        self.assertTrue(self.window._grid_mode)
+        self.assertIs(self.window.content.currentWidget(), self.window.grid)
+
+    def test_fullscreen_live_badge_tracks_displayed_media_and_fixed_client_corner(self):
+        live = self.show_live_item()
+        self.assertFalse(self.window.fullscreen_live_badge.isVisible())
+        self.window._toggle_fullscreen()
+        badge = self.window.fullscreen_live_badge
+        self.assertTrue(badge.isVisible())
+        self.assertIs(badge.parentWidget(), self.window.centralWidget())
+        self.assertTrue(badge.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents))
+        position = badge.mapTo(self.window.centralWidget(), QPoint())
+        self.assertEqual(position, QPoint(16, 16))
+        self.window._current_full = True
+        self.window.viewer.zoom_in()
+        self.window._toggle_strip_shortcut()
+        self.assertEqual(badge.mapTo(self.window.centralWidget(), QPoint()), position)
+        self.window._toggle_grid(True)
+        self.assertFalse(badge.isVisible())
+        self.window._toggle_grid(False)
+        self.assertTrue(badge.isVisible())
+        static = MediaItem("static", self.picture("ordinary.png"))
+        self.window._primary_items = [live, static]
+        self.window._rebuild_items()
+        self.window._current_id = static.id
+        self.window._display_image(static, self.image, (640, 480))
+        self.assertFalse(badge.isVisible())
+        self.window._current_id = live.id
+        self.window._display_image(live, self.image, (640, 480))
+        self.assertTrue(badge.isVisible())
+        self.window.kind_filter.live.setChecked(False)
+        self.wait_until(lambda: self.window._displayed_item is not None and
+                        self.window._displayed_item.id == static.id)
+        self.assertFalse(badge.isVisible())
+        self.window.kind_filter.static.setChecked(False)
+        self.assertFalse(badge.isVisible())
+
+    def test_live_badge_waits_for_pending_pair_and_hides_during_loading(self):
+        live = self.show_live_item()
+        pending = MediaItem("pending", self.picture("pending.jpg"), self.base / "pending.mov",
+                            (), True)
+        self.window._primary_items.append(pending)
+        self.window._rebuild_items()
+        self.window.model.set_items([live, pending])
+        self.window._toggle_fullscreen()
+        with patch.object(self.window, "_request_pair"):
+            self.window._select_row(1)
+        self.assertFalse(self.window.fullscreen_live_badge.isVisible())
+        self.window._request_context["pair-ready"] = ("pair", self.window._epoch, pending, 0)
+        self.window._job_finished("pair-ready", PairDecision(pending.image_path, (), False, "ready"), None)
+        self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer)
+        self.assertTrue(self.window.fullscreen_live_badge.isVisible())
+
+    def test_filmstrip_shortcut_fullscreen_grid_input_safety_and_persistence(self):
+        self.show_live_item()
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_F)
+        self.assertFalse(self.window.film.isVisible())
+        self.assertFalse(Preferences.load().filmstrip_visible)
+        self.window._toggle_fullscreen()
+        QTest.keyPress(self.window.viewer, Qt.Key.Key_F)
+        QTest.keyRelease(self.window.viewer, Qt.Key.Key_F)
+        self.assertTrue(self.window.film.isVisible())
+        repeated = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_F, Qt.KeyboardModifier.NoModifier, "f", True)
+        QApplication.sendEvent(self.window.viewer, repeated)
+        self.assertTrue(self.window.film.isVisible())
+        self.window._toggle_grid(True)
+        QTest.keyClick(self.window.grid, Qt.Key.Key_F)
+        self.assertFalse(self.window._remembered_strip)
+        self.assertFalse(self.window.film.isVisible())
+        self.window._toggle_grid(False)
+        self.assertFalse(self.window.film.isVisible())
+        self.window._exit_fullscreen()
+        self.window.search.setFocus()
+        QTest.keyClick(self.window.search, Qt.Key.Key_F)
+        self.assertFalse(self.window._remembered_strip)
+        self.window.search.clear()
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        dialog.show()
+        self.application.processEvents()
+        QTest.keyClick(dialog.filmstrip_key, Qt.Key.Key_F)
+        self.assertFalse(self.window._remembered_strip)
+        dialog.reject()
+        saved = Preferences(live_key="F", live_once_key="F10", filmstrip_key="F", filmstrip_visible=False)
+        saved.save()
+        loaded = Preferences.load()
+        self.assertEqual(loaded.live_key, "F")
+        self.assertEqual(loaded.live_once_key, "F10")
+        self.assertEqual(loaded.filmstrip_key, "F8")
+        self.assertFalse(loaded.filmstrip_visible)
+        saved.filmstrip_key = "Ctrl+Shift+G"
+        saved.save()
+        self.assertEqual(Preferences.load().filmstrip_key, "Ctrl+Shift+G")
+
+    def test_filmstrip_conflicts_with_both_playback_keys_and_reserves_esc(self):
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        for key, label in (("Space", "按住播放"), ("P", "单击播放"), ("Esc", "Esc 保留")):
+            dialog.filmstrip_key.setKeySequence(QKeySequence(key))
+            self.assertIn(label, dialog.shortcut_note.text())
+            with patch("livegallery.app.QMessageBox.information"):
+                dialog._accept()
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+
+    def test_saving_custom_filmstrip_key_rebinds_the_actual_action(self):
+        self.show_live_item()
+        dialog = SettingsDialog(self.window.preferences, self.window)
+        dialog.filmstrip_key.setKeySequence(QKeySequence("Ctrl+G"))
+        with patch("livegallery.app.SettingsDialog", return_value=dialog), \
+                patch.object(dialog, "exec", return_value=QDialog.DialogCode.Accepted):
+            self.window.open_settings()
+        self.assertEqual(self.window.preferences.filmstrip_key, "Ctrl+G")
+        self.assertEqual(Preferences.load().filmstrip_key, "Ctrl+G")
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_G, Qt.KeyboardModifier.ControlModifier)
+        self.assertFalse(self.window.film.isVisible())
+        QTest.keyClick(self.window.viewer, Qt.Key.Key_F)
+        self.assertFalse(self.window.film.isVisible())
+
+    def test_open_with_menu_uses_selected_static_source_and_cancel_is_quiet(self):
+        self.show_live_item()
+        heic = self.base / "照片 空格 'literal'" / "配对静态.HEIC"
+        heic.parent.mkdir()
+        heic.touch()
+        item = MediaItem("chosen-heic", heic, self.base / "never-open.MOV")
+        self.window._primary_items = [item]
+        self.window._rebuild_items()
+        self.window._current_id = item.id
+        menu = MagicMock()
+        callbacks = {}
+        menu.addAction.side_effect = lambda text, callback: callbacks.setdefault(text, callback)
+        with patch("livegallery.app.QMenu", return_value=menu), \
+                patch("livegallery.app.open_with", return_value=False) as chooser, \
+                patch.object(self.window, "_show_message") as message:
+            self.window._item_menu(QPoint())
+            callbacks["以其他软件打开…"]()
+            chooser.assert_called_once_with(heic, int(self.window.winId()))
+            message.assert_not_called()
+        with patch("livegallery.app.open_with", side_effect=OSError("native failure")), \
+                patch.object(self.window, "_show_message") as message:
+            self.window._open_with_other_app(item)
+            message.assert_called_once_with("native failure")
+        self.window._toggle_fullscreen()
+        with patch("livegallery.app.open_with", side_effect=OSError("native failure")), \
+                patch("livegallery.app.QMessageBox.warning") as warning:
+            self.window._open_with_other_app(item)
+            warning.assert_called_once_with(self.window, "无法打开", "native failure")
+
+
+class OpenWithTests(unittest.TestCase):
+    def test_native_unicode_path_flags_owner_cancel_and_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "中文 空格 'and&symbols'.HEIC"
+            target.touch()
+            calls = []
+            shell = MagicMock()
+            def choose(owner, pointer):
+                info = ctypes.cast(pointer, ctypes.POINTER(OPENASINFO)).contents
+                calls.append((owner, info.pcszFile, info.pcszClass, info.oaifInFlags))
+                return 0
+            shell.SHOpenWithDialog.side_effect = choose
+            with patch("livegallery.system_open._load_shell32", return_value=shell):
+                self.assertTrue(open_with(target, 12345))
+                self.assertEqual(calls, [(12345, str(target.resolve()), None,
+                                          OAIF_EXEC | OAIF_HIDE_REGISTRATION)])
+                self.assertEqual(shell.SHOpenWithDialog.restype, ctypes.c_int32)
+                for cancelled in (HRESULT_CANCELLED, ctypes.c_int32(HRESULT_CANCELLED).value, E_ABORT):
+                    shell.SHOpenWithDialog.side_effect = None
+                    shell.SHOpenWithDialog.return_value = cancelled
+                    self.assertFalse(open_with(target))
+                shell.SHOpenWithDialog.return_value = 0x80004005
+                with self.assertRaisesRegex(OSError, "80004005"):
+                    open_with(target)
+            with patch("livegallery.system_open._load_shell32") as load:
+                with self.assertRaises(FileNotFoundError):
+                    open_with(target.with_name("missing.heic"))
+                load.assert_not_called()
 
 
 if __name__ == "__main__":

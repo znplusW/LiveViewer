@@ -29,6 +29,8 @@ from .library import natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
 from .settings import Preferences, app_directory, data_directory
+from .system_open import open_with
+from .touch_grid import OverviewGrid
 from .viewer import ViewerCanvas
 
 
@@ -152,20 +154,23 @@ def _matches_shortcut(event, name: str) -> bool:
     return event.keyCombination() == QKeySequence(APP_SHORTCUTS[name][0])[0]
 
 
-def _shortcut_error(hold: QKeySequence, once: QKeySequence) -> str:
-    if hold.isEmpty() or once.isEmpty():
-        return "请分别设置按住播放、单击播放的按键或组合键。"
-    for sequence in (hold, once):
+def _shortcut_error(hold: QKeySequence, once: QKeySequence, filmstrip: QKeySequence) -> str:
+    sequences = (("按住播放", hold), ("单击播放", once), ("切换胶片条", filmstrip))
+    if any(sequence.isEmpty() for _label, sequence in sequences):
+        return "请分别设置按住播放、单击播放、切换胶片条的按键或组合键。"
+    for _label, sequence in sequences:
         if sequence[0].key() == Qt.Key.Key_Escape:
-            return "Esc 保留用于退出全屏，不能设为播放快捷键。"
-    if hold == once:
-        return "按住播放与单击播放不能使用相同的快捷键，请修改其中一个。"
+            return "Esc 保留用于退出全屏和返回总览，不能设为自定义快捷键。"
+    for index, (label, sequence) in enumerate(sequences):
+        for other_label, other_sequence in sequences[index + 1:]:
+            if sequence == other_sequence:
+                return f"{label}与{other_label}不能使用相同的快捷键，请修改其中一个。"
     return ""
 
 
-def _shortcut_overrides(hold: QKeySequence, once: QKeySequence) -> list[str]:
+def _shortcut_overrides(hold: QKeySequence, once: QKeySequence, filmstrip: QKeySequence) -> list[str]:
     overrides = []
-    for label, sequence in (("按住播放", hold), ("单击播放", once)):
+    for label, sequence in (("按住播放", hold), ("单击播放", once), ("切换胶片条", filmstrip)):
         for key, operation in APP_SHORTCUTS.values():
             if sequence == QKeySequence(key):
                 if key == "F11":
@@ -222,7 +227,11 @@ class SettingsDialog(QDialog):
         self.live_once_key.setMaximumSequenceLength(1)
         self.live_once_key.setFinishingKeyCombinations([])
         form.addRow("单击播放到结束快捷键", self.live_once_key)
-        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n可设置单个按键或组合键；输入文字时不触发。Esc 保留用于退出全屏；全屏时 F11 始终退出全屏。")
+        self.filmstrip_key = QKeySequenceEdit(QKeySequence(preferences.filmstrip_key))
+        self.filmstrip_key.setMaximumSequenceLength(1)
+        self.filmstrip_key.setFinishingKeyCombinations([])
+        form.addRow("显示／隐藏胶片条快捷键", self.filmstrip_key)
+        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n胶片条快捷键在全屏同样可用，总览中记住选择。可设置单键或组合键；输入文字时不触发。Esc 保留用于退出全屏和返回总览；全屏时 F11 始终退出全屏。")
         help_text.setObjectName("muted")
         help_text.setWordWrap(True)
         form.addRow(help_text)
@@ -233,6 +242,7 @@ class SettingsDialog(QDialog):
         form.addRow(self.override_keys)
         self.live_key.keySequenceChanged.connect(self._shortcuts_changed)
         self.live_once_key.keySequenceChanged.connect(self._shortcuts_changed)
+        self.filmstrip_key.keySequenceChanged.connect(self._shortcuts_changed)
         self._shortcuts_changed()
         sections.addWidget(play_group)
         storage_group = QGroupBox("文件夹与本机缓存")
@@ -272,20 +282,21 @@ class SettingsDialog(QDialog):
         self.resize(620, min(850, max(420, available_height - 70)))
 
     def _accept(self):
-        error = _shortcut_error(self.live_key.keySequence(), self.live_once_key.keySequence())
+        sequences = (self.live_key.keySequence(), self.live_once_key.keySequence(), self.filmstrip_key.keySequence())
+        error = _shortcut_error(*sequences)
         if error:
             QMessageBox.information(self, "播放快捷键", error)
             return
-        overrides = _shortcut_overrides(self.live_key.keySequence(), self.live_once_key.keySequence())
+        overrides = _shortcut_overrides(*sequences)
         if overrides and not self.override_keys.isChecked():
             QMessageBox.information(self, "快捷键冲突", "\n".join(overrides) + "\n\n请勾选确认替换，或更换播放快捷键。")
             return
         self.accept()
 
     def _shortcuts_changed(self, *_args):
-        hold, once = self.live_key.keySequence(), self.live_once_key.keySequence()
-        error = _shortcut_error(hold, once)
-        overrides = _shortcut_overrides(hold, once)
+        sequences = (self.live_key.keySequence(), self.live_once_key.keySequence(), self.filmstrip_key.keySequence())
+        error = _shortcut_error(*sequences)
+        overrides = _shortcut_overrides(*sequences)
         self.shortcut_note.setText(error or "\n".join(overrides))
         self.shortcut_note.setVisible(bool(error or overrides))
         self.override_keys.setChecked(False)
@@ -345,9 +356,10 @@ class MainWindow(QMainWindow):
         self._pre_fullscreen_maximized = False
         self._disk_missing = False
         self._background_pair_id = None
-        self._remembered_strip = True
+        self._remembered_strip = self.preferences.filmstrip_visible
         self._live_sequence = QKeySequence(self.preferences.live_key)
         self._once_sequence = QKeySequence(self.preferences.live_once_key)
+        self._filmstrip_sequence = QKeySequence(self.preferences.filmstrip_key)
         self._build_ui()
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
                                 self.preferences.preserve_zoom, self.preferences.hold_ms)
@@ -409,7 +421,7 @@ class MainWindow(QMainWindow):
         self.grid_button = self._button("▦  总览", self._toggle_grid, checkable=True)
         header.addWidget(self.grid_button)
         self.strip_button = self._button("胶片条", self._toggle_strip, checkable=True)
-        self.strip_button.setChecked(True)
+        self.strip_button.setChecked(self._remembered_strip)
         header.addWidget(self.strip_button)
         self.fullscreen_button = self._button("⛶  全屏", self._toggle_fullscreen)
         self.fullscreen_button.setToolTip("F11 进入／退出全屏；Esc 退出全屏")
@@ -531,7 +543,7 @@ class MainWindow(QMainWindow):
         self.viewer.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.viewer.customContextMenuRequested.connect(self._viewer_context_menu)
         self.content.addWidget(self.viewer)
-        self.grid = QListView()
+        self.grid = OverviewGrid()
         self.grid.setModel(self.model)
         self.grid.setItemDelegate(ThumbnailDelegate(self.grid, large=True))
         self.grid.setViewMode(QListView.ViewMode.IconMode)
@@ -599,6 +611,16 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([220, 1200])
         root.addWidget(splitter, 1)
+        self.fullscreen_live_badge = QLabel("◉ LIVE", central)
+        self.fullscreen_live_badge.setObjectName("fullscreenLiveBadge")
+        self.fullscreen_live_badge.setStyleSheet("QLabel { color: #f1cf91; background: rgba(20, 23, 28, 170); border: 1px solid #80673e; border-radius: 5px; padding: 5px 8px; font-weight: 600; }")
+        self.fullscreen_live_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.fullscreen_live_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fullscreen_live_badge.adjustSize()
+        self.fullscreen_live_badge.move(16, 16)
+        self.fullscreen_live_badge.hide()
+        self.content.currentChanged.connect(self._update_live_overlay)
+        self.film.setVisible(self._remembered_strip)
         self._update_navigation()
 
     def choose_folder(self):
@@ -777,6 +799,7 @@ class MainWindow(QMainWindow):
             self.empty_open.hide()
         self._update_navigation()
         self.analysis_label.setText(f"待分析 {sum(item.pending for item in self._primary_items):,} 项 · 本机缓存")
+        self._update_live_overlay()
 
     def _sort_changed(self, index):
         self.preferences.sort_by = "time" if index == 1 else "name"
@@ -829,6 +852,7 @@ class MainWindow(QMainWindow):
         self._update_navigation()
         self._update_hint()
         self._prefetch_neighbors(row)
+        self._update_live_overlay()
 
     def _sync_selection(self, row, scroll=True):
         index = self.model.index(row)
@@ -861,6 +885,7 @@ class MainWindow(QMainWindow):
         self.filename_label.setText(item.image_path.name)
         self.live_badge.setVisible(item.is_live)
         self.live_badge.setText("! LIVE" if item.uncertain else "◉ LIVE")
+        self._update_live_overlay()
         self.preferences.last_image = str(item.image_path)
         self.statusBar().showMessage(item.note or f"{original_size[0]:,} × {original_size[1]:,} · {item.image_path.parent}")
         self._update_hint()
@@ -1076,6 +1101,7 @@ class MainWindow(QMainWindow):
         self.empty_icon.setText(icon)
         if not self._grid_mode:
             self.content.setCurrentWidget(self.empty_page)
+        self._update_live_overlay()
 
     def _show_message(self, text):
         if self._closed:
@@ -1090,7 +1116,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_strip(self, checked):
         self._remembered_strip = checked
+        self.preferences.filmstrip_visible = checked
         self.film.setVisible(checked and not self._grid_mode)
+        self._save_preferences()
+
+    def _toggle_strip_shortcut(self):
+        self.strip_button.setChecked(not self._remembered_strip)
+        self._toggle_strip(self.strip_button.isChecked())
 
     def _toggle_grid(self, checked):
         self.viewer.stop_live()
@@ -1107,6 +1139,7 @@ class MainWindow(QMainWindow):
             self.content.setCurrentWidget(self.empty_page)
         self.film.setVisible(self._remembered_strip and not checked)
         self.viewer_tools.setVisible(not checked and self._chrome_visible)
+        self._update_live_overlay()
 
     def _grid_selected(self, index):
         self._grid_mode = False
@@ -1123,14 +1156,11 @@ class MainWindow(QMainWindow):
         self._keyboard_live_pressed = False
         self._pre_fullscreen_geometry = self.saveGeometry()
         self._pre_fullscreen_maximized = self.isMaximized()
-        if self._grid_mode:
-            self.grid_button.setChecked(False)
-            self._toggle_grid(False)
         self._fullscreen_active = True
         self._toast_timer.stop()
         self._set_chrome(False)
         self.showFullScreen()
-        self.viewer.setFocus(Qt.FocusReason.OtherFocusReason)
+        (self.grid if self._grid_mode else self.viewer).setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _exit_fullscreen(self):
         if not self._fullscreen_active:
@@ -1161,6 +1191,19 @@ class MainWindow(QMainWindow):
         self.statusBar().setVisible(visible)
         if not visible:
             self.toast.hide()
+        self._update_live_overlay()
+
+    def _update_live_overlay(self, *_args):
+        if not hasattr(self, "fullscreen_live_badge"):
+            return
+        item = self._displayed_item
+        visible = (self._fullscreen_active and not self._grid_mode
+                   and self.content.currentWidget() is self.viewer
+                   and item is not None and item.id == self._current_id and item.is_live)
+        self.fullscreen_live_badge.setVisible(visible)
+        if visible:
+            self.fullscreen_live_badge.move(16, 16)
+            self.fullscreen_live_badge.raise_()
 
     def _toggle_controls(self):
         if not self._fullscreen_active:
@@ -1191,6 +1234,7 @@ class MainWindow(QMainWindow):
         self.preferences.hold_ms = dialog.hold.value()
         self.preferences.live_key = dialog.live_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         self.preferences.live_once_key = dialog.live_once_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
+        self.preferences.filmstrip_key = dialog.filmstrip_key.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
         recursive_changed = self.preferences.recursive != dialog.recursive.isChecked()
         self.preferences.recursive = dialog.recursive.isChecked()
         self.preferences.cache_mb = dialog.cache.value()
@@ -1208,6 +1252,7 @@ class MainWindow(QMainWindow):
                 portable_changed = False
         self._live_sequence = QKeySequence(self.preferences.live_key)
         self._once_sequence = QKeySequence(self.preferences.live_once_key)
+        self._filmstrip_sequence = QKeySequence(self.preferences.filmstrip_key)
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
                                 self.preferences.preserve_zoom, self.preferences.hold_ms)
         self.sound_button.setChecked(self.preferences.muted)
@@ -1249,11 +1294,26 @@ class MainWindow(QMainWindow):
             choices.addSeparator()
             choices.addAction("恢复自动择图", lambda item=item: self._choose_source(item, None))
         menu.addAction("文件与配对详情", lambda item=item: self._show_details(item))
+        menu.addAction("以其他软件打开…", lambda item=item: self._open_with_other_app(item))
         menu.addAction("打开所在文件夹", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(item.image_path.parent))))
         menu.addAction("打开缓存位置", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.cache.base))))
         menu.addSeparator()
         menu.addAction("重新扫描当前文件夹", self._rescan)
         menu.exec(position)
+
+    def _open_with_other_app(self, item=None):
+        item = item or self._item_by_id(self._current_id)
+        if item is None:
+            return
+        self.viewer.stop_live()
+        self._keyboard_live_pressed = False
+        try:
+            open_with(item.image_path, int(self.winId()))
+        except OSError as error:
+            if self._fullscreen_active:
+                QMessageBox.warning(self, "无法打开", str(error))
+            else:
+                self._show_message(str(error))
 
     def _choose_source(self, item, path):
         try:
@@ -1335,6 +1395,12 @@ class MainWindow(QMainWindow):
             return True
         if editing:
             return False
+        matches_filmstrip = (not self._filmstrip_sequence.isEmpty()
+                             and event.keyCombination() == self._filmstrip_sequence[0])
+        if matches_filmstrip:
+            if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                self._toggle_strip_shortcut()
+            return True
         matches_once = not self._once_sequence.isEmpty() and event.keyCombination() == self._once_sequence[0]
         if matches_once:
             if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
@@ -1367,11 +1433,9 @@ class MainWindow(QMainWindow):
                 self._toggle_fullscreen()
                 return True
             if event.key() == Qt.Key.Key_Escape:
-                if self._grid_mode:
-                    self.grid_button.setChecked(False)
-                    self._toggle_grid(False)
-                else:
-                    self.viewer.fit_image()
+                if not event.isAutoRepeat() and not self._grid_mode:
+                    self.grid_button.setChecked(True)
+                    self._toggle_grid(True)
                 return True
             if _matches_shortcut(event, "open_folder"):
                 self.choose_folder()

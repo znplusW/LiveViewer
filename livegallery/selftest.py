@@ -16,9 +16,12 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from .cache import CacheStore
+from .catalog_model import CatalogModel
 from .imaging import load_image
 from .library import scan_folder
 from .matching import close_video_probe, resolve_pair, _video_samples
+from .models import MediaItem
+from .touch_grid import OverviewGrid
 from .viewer import ViewerCanvas
 
 
@@ -76,6 +79,40 @@ def _check_windows_native_hold_policy(viewer: ViewerCanvas):
 
     assert query(image_center) & TABLET_DISABLE_PRESSANDHOLD, 'Image permits Windows press-and-hold'
     assert not query(blank_corner) & TABLET_DISABLE_PRESSANDHOLD, 'Blank area blocks Windows press-and-hold'
+
+
+def _check_overview_touch_scroll(window, fixtures: Path):
+    """Exercise the shipped overview with many rows without decoding more media."""
+    grid = window.grid
+    assert isinstance(grid, OverviewGrid)
+    original_model = grid.model()
+    scrolling_model = CatalogModel(grid)
+    scrolling_model.set_items([MediaItem(f'touch-scroll-{row}', fixtures / 'ordinary.png')
+                               for row in range(3000)])
+    grid.setModel(scrolling_model)
+    try:
+        _wait(lambda: grid.verticalScrollBar().maximum() > 0, 3)
+        device = QTest.createTouchDevice()
+        sequence = QTest.touchEvent(grid.viewport(), device, False)
+        center = grid.viewport().rect().center()
+        start = center + QPoint(0, 100)
+        end = center - QPoint(0, 100)
+        sequence.press(0, start, grid.viewport()).commit()
+        sequence.move(0, center, grid.viewport()).commit()
+        sequence.release(0, end, grid.viewport()).commit()
+        QCoreApplication.processEvents()
+        after_up = grid.verticalScrollBar().value()
+        assert after_up > 0, 'Touch swipe did not scroll the overview'
+        assert window._grid_mode and window.content.currentWidget() is grid, 'Swipe opened a photo'
+        sequence.press(0, end, grid.viewport()).commit()
+        sequence.move(0, center, grid.viewport()).commit()
+        sequence.release(0, start, grid.viewport()).commit()
+        QCoreApplication.processEvents()
+        assert grid.verticalScrollBar().value() < after_up, 'Reverse touch swipe did not scroll back'
+        assert window._grid_mode and window.content.currentWidget() is grid, 'Reverse swipe opened a photo'
+    finally:
+        grid.setModel(original_model)
+        scrolling_model.deleteLater()
 
 
 def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
@@ -204,6 +241,17 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         _wait(lambda: not viewer._video.isVisible(), 8)
         assert viewer._photo.isVisible()
         report['checks'].append({'check': 'single_click_ignores_hold_loop_and_release', 'status': 'passed'})
+        viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'))
+        center = viewer.viewport().rect().center()
+        for target in (2.0, 1.0):
+            QTest.mouseDClick(viewer.viewport(), Qt.MouseButton.LeftButton, pos=center)
+            assert viewer.is_zoom_animating(), 'Double-click did not start a zoom animation'
+            viewer._zoom_animation.setCurrentTime(viewer._zoom_animation.duration() // 2)
+            assert 1.01 < viewer.zoom_factor() < 1.99, 'Zoom animation has no intermediate scale'
+            _wait(lambda: not viewer.is_zoom_animating(), 3)
+            assert abs(viewer.zoom_factor() - target) < .005, 'Double-click missed its 1x/2x target'
+        report['checks'].append({'check': 'double_click_animated_fit_to_two_times_zoom',
+                                 'intermediate_scale': True, 'status': 'passed'})
         if sys.platform == 'win32' and app.platformName() == 'windows':
             viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'))
             QCoreApplication.processEvents()
@@ -231,6 +279,19 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         QCoreApplication.processEvents()
         assert window.content.currentWidget() is window.grid
         window.grab().save(str(report_dir / 'main-window-grid.png'))
+        window._toggle_fullscreen()
+        QCoreApplication.processEvents()
+        assert window._fullscreen_active and window._grid_mode
+        assert window.content.currentWidget() is window.grid and window.grid.isVisible()
+        assert not window.film.isVisible() and not window.fullscreen_live_badge.isVisible()
+        assert not window.header.isVisible() and not window.filterbar.isVisible()
+        _check_overview_touch_scroll(window, fixtures)
+        window.grab().save(str(report_dir / 'fullscreen-overview.png'))
+        QTest.keyClick(window.grid, Qt.Key.Key_Escape)
+        assert not window._fullscreen_active and window._grid_mode
+        report['checks'].append({'check': 'fullscreen_preserves_overview_and_touch_scroll',
+                                 'virtual_rows': 3000, 'swipe_never_opens_photo': True,
+                                 'status': 'passed'})
         window.grid_button.setChecked(False)
         window._toggle_grid(False)
         window.grab().save(str(report_dir / 'main-window.png'))
@@ -268,12 +329,26 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         window._toggle_fullscreen()
         QCoreApplication.processEvents()
         assert window._fullscreen_active and not window.film.isVisible()
+        assert window.fullscreen_live_badge.isVisible(), 'Fullscreen LIVE item has no overlay badge'
+        badge_position = window.fullscreen_live_badge.pos()
+        window.viewer.zoom_in()
+        window.viewer._pan_by(QPointF(30, -20))
+        QCoreApplication.processEvents()
+        assert window.fullscreen_live_badge.pos() == badge_position, 'LIVE badge moved with the image'
+        assert badge_position.x() < 50 and badge_position.y() < 50
+        window.viewer.fit_image()
         chrome = (window.header, window.filterbar, window.infobar, window.viewer_tools,
                   window.sidebar, window.statusBar(), window.toast)
         assert not any(widget.isVisible() for widget in chrome), 'Fullscreen exposed a toolbar'
         QTest.mouseMove(window.viewer.viewport(), QPoint(30, 30))
         QTest.qWait(100)
         assert not any(widget.isVisible() for widget in chrome), 'Mouse movement restored fullscreen controls'
+        QTest.keyClick(window.viewer, Qt.Key.Key_F)
+        assert window.film.isVisible(), 'Filmstrip shortcut failed to reveal the filmstrip'
+        QTest.keyClick(window.viewer, Qt.Key.Key_F)
+        assert not window.film.isVisible(), 'Filmstrip shortcut failed to hide the filmstrip'
+        QCoreApplication.processEvents()
+        report['checks'].append({'check': 'filmstrip_shortcut_works_inside_fullscreen', 'status': 'passed'})
         window.grab().save(str(report_dir / 'fullscreen-photo-only.png'))
         QTest.keyClick(window.viewer, Qt.Key.Key_F11)
         assert not window._fullscreen_active and window.header.isVisible(), 'F11 did not exit fullscreen'
@@ -290,12 +365,36 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         window.grab().save(str(report_dir / 'fullscreen-with-filmstrip.png'))
         QTest.keyClick(window.viewer, Qt.Key.Key_Escape)
         assert not window._fullscreen_active and window.header.isVisible()
+        assert not window.fullscreen_live_badge.isVisible()
         report['checks'].append({'check': 'immediate_clean_fullscreen_until_escape_or_f11',
                                  'filmstrip_optional': True, 'status': 'passed'})
+
+        static_row = next(i for i, value in enumerate(window.model.items) if not value.is_live)
+        static_path = window.model.items[static_row].image_path
+        window._select_row(static_row)
+        _wait(lambda: window._displayed_item is not None and window._displayed_item.image_path == static_path, 18)
+        window._toggle_fullscreen()
+        QCoreApplication.processEvents()
+        assert not window.fullscreen_live_badge.isVisible(), 'Static photo incorrectly has a LIVE overlay'
+        QTest.keyClick(window.viewer, Qt.Key.Key_Escape)
+        assert not window._fullscreen_active and not window._grid_mode
+        QTest.keyClick(window.viewer, Qt.Key.Key_Escape)
+        assert window._grid_mode and window.content.currentWidget() is window.grid
+        assert not window.fullscreen_live_badge.isVisible()
+        report['checks'].append({'check': 'live_overlay_visibility_fixed_corner_and_escape_to_overview',
+                                 'live_only': True, 'two_escape_sequence': True, 'status': 'passed'})
+
+        if sys.platform == 'win32':
+            import ctypes
+            from .system_open import open_with
+            assert callable(open_with) and ctypes.WinDLL('shell32').SHOpenWithDialog
+            report['checks'].append({'check': 'windows_open_with_api_available',
+                                     'dialog_launched': False, 'status': 'passed'})
 
         settings = SettingsDialog(window.preferences, window)
         assert not settings.live_key.keySequence().isEmpty()
         assert not settings.live_once_key.keySequence().isEmpty()
+        assert not settings.filmstrip_key.keySequence().isEmpty()
         settings.live_once_key.setKeySequence(QKeySequence('F9'))
         assert settings.live_once_key.keySequence().toString() == 'F9'
         settings.show()

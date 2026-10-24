@@ -10,7 +10,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QContextMenuEvent, QEventPoint, QImage, QTouchEvent
+from PySide6.QtGui import QContextMenuEvent, QEventPoint, QImage, QTouchEvent, QWheelEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QtVideo
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
@@ -100,6 +100,12 @@ class CanvasTests(unittest.TestCase):
             f"requested={self.canvas._play_requested}, "
             f"active_window_is_canvas={active is self.canvas}",
         )
+
+    def finish_zoom_animation(self):
+        deadline = time.monotonic() + 1.5
+        while self.canvas.is_zoom_animating() and time.monotonic() < deadline:
+            QTest.qWait(10)
+        self.assertFalse(self.canvas.is_zoom_animating(), "zoom animation did not finish")
 
     def touch(self, event_type, *points):
         if event_type == QEvent.Type.TouchCancel:
@@ -197,6 +203,157 @@ class CanvasTests(unittest.TestCase):
         self.assertLess(abs(center.y() / 3600 - old_center.y() / 1800), 0.005)
         self.assertEqual(self.canvas._video_path, self.video_path)
         self.assertEqual(self.player.play_calls, 0)
+
+    def test_mouse_double_click_animates_to_exactly_twice_fit_around_subject(self):
+        position = QPoint(500, 340)
+        subject = self.canvas.mapToScene(position)
+        changed = QSignalSpy(self.canvas.zoom_animation_changed)
+        QTest.mouseDClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        self.assertTrue(self.canvas.is_zoom_animating())
+        self.canvas._zoom_animation.setCurrentTime(100)
+        self.assertGreater(self.canvas.zoom_factor(), 1.0)
+        self.assertLess(self.canvas.zoom_factor(), 2.0)
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 2.0, places=8)
+        self.assertLess((self.canvas.mapFromScene(subject) - position).manhattanLength(), 4)
+        self.assertEqual(changed.count(), 2)
+        QTest.mouseDClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        self.canvas._zoom_animation.setCurrentTime(100)
+        self.assertGreater(self.canvas.zoom_factor(), 1.0)
+        self.assertLess(self.canvas.zoom_factor(), 2.0)
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0, places=8)
+        self.assertTrue(self.canvas._fit_mode)
+
+    def test_double_click_from_other_zoom_returns_fit_and_rapid_retarget_is_continuous(self):
+        self.canvas.zoom_in()
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0, places=8)
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.canvas._zoom_animation.setCurrentTime(100)
+        before = self.canvas.zoom_factor()
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.assertAlmostEqual(self.canvas.zoom_factor(), before)
+        self.assertEqual(self.canvas._zoom_target_factor, 1.0)
+        self.canvas._zoom_animation.setCurrentTime(80)
+        before = self.canvas.zoom_factor()
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.assertAlmostEqual(self.canvas.zoom_factor(), before)
+        self.assertEqual(self.canvas._zoom_target_factor, 2.0)
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 2.0, places=8)
+
+    def test_touch_double_tap_uses_same_smooth_twice_fit_toggle(self):
+        for target in (2.0, 1.0):
+            for _ in range(2):
+                self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+                self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+            self.assertTrue(self.canvas.is_zoom_animating())
+            self.canvas._zoom_animation.setCurrentTime(100)
+            self.assertGreater(self.canvas.zoom_factor(), 1.0)
+            self.assertLess(self.canvas.zoom_factor(), 2.0)
+            self.finish_zoom_animation()
+            self.assertAlmostEqual(self.canvas.zoom_factor(), target, places=8)
+        self.assertEqual(self.player.play_calls, 0)
+
+    def test_upgrade_waits_for_zoom_and_preserves_twice_fit_subject(self):
+        position = QPoint(500, 340)
+        subject = self.canvas.mapToScene(position)
+        self.canvas._toggle_double_zoom(QPointF(position))
+        self.canvas._zoom_animation.setCurrentTime(100)
+        full = QImage(4800, 3600, QImage.Format.Format_RGB32)
+        full.fill("#334455")
+        self.canvas.replace_photo(full)
+        self.assertEqual(self.canvas._photo.pixmap().width(), 2400)
+        self.assertTrue(self.canvas.is_zoom_animating())
+        self.finish_zoom_animation()
+        self.assertEqual(self.canvas._photo.pixmap().width(), 4800)
+        self.assertIsNone(self.canvas._deferred_photo)
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 2.0, places=8)
+        self.assertLess((self.canvas.mapFromScene(subject * 2) - position).manhattanLength(), 5)
+
+    def test_new_photo_discards_old_animation_and_deferred_upgrade(self):
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.canvas._zoom_animation.setCurrentTime(100)
+        full = QImage(4800, 3600, QImage.Format.Format_RGB32)
+        full.fill("red")
+        self.canvas.replace_photo(full)
+        new_image = QImage(800, 600, QImage.Format.Format_RGB32)
+        new_image.fill("blue")
+        self.canvas.set_photo(new_image)
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.assertIsNone(self.canvas._deferred_photo)
+        QTest.qWait(250)
+        self.assertEqual(self.canvas._photo.pixmap().size(), new_image.size())
+        self.assertEqual(self.canvas._photo.pixmap().toImage().pixelColor(400, 300).name(), "#0000ff")
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0, places=8)
+
+    def test_wheel_interrupts_animation_without_late_snap(self):
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.canvas._zoom_animation.setCurrentTime(100)
+        before = self.canvas.zoom_factor()
+        wheel = QWheelEvent(
+            QPointF(self.center), QPointF(self.canvas.viewport().mapToGlobal(self.center)),
+            QPoint(), QPoint(0, 120), Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+        )
+        QApplication.sendEvent(self.canvas.viewport(), wheel)
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.assertGreater(self.canvas.zoom_factor(), before)
+        after = self.canvas.transform()
+        QTest.qWait(250)
+        self.assertEqual(self.canvas.transform(), after)
+
+    def test_pan_pinch_resize_hide_and_play_cancel_zoom_animation(self):
+        def begin():
+            self.canvas.fit_image()
+            self.canvas._toggle_double_zoom(QPointF(self.center))
+            self.canvas._zoom_animation.setCurrentTime(100)
+            self.assertTrue(self.canvas.is_zoom_animating())
+
+        begin()
+        self.canvas._pan_by(QPointF(10, 0))
+        self.assertFalse(self.canvas.is_zoom_animating())
+        begin()
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 300, 300))
+        self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Stationary, 300, 300),
+                   (1, QEventPoint.State.Pressed, 500, 300))
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Updated, 250, 300),
+                   (1, QEventPoint.State.Updated, 550, 300))
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.touch(QEvent.Type.TouchCancel)
+        begin()
+        self.canvas.resize(700, 500)
+        self.app.processEvents()
+        self.assertFalse(self.canvas.is_zoom_animating())
+        begin()
+        self.canvas.hide()
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.canvas.show()
+        begin()
+        before = self.canvas.transform()
+        self.canvas.start_live()
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.canvas._video_frame(self.frame(), self.canvas._generation)
+        self.assertEqual(self.canvas.transform(), before)
+        QTest.qWait(250)
+        self.assertEqual(self.canvas.transform(), before)
+
+    def test_initial_mouse_or_touch_drag_cancels_even_first_fit_animation_frame(self):
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0)
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.mouseMove(self.canvas.viewport(), QPoint(450, 300))
+        self.assertFalse(self.canvas.is_zoom_animating())
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(450, 300))
+        self.canvas.fit_image()
+        self.canvas._toggle_double_zoom(QPointF(self.center))
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        self.touch(QEvent.Type.TouchUpdate, (0, QEventPoint.State.Updated, 450, 300))
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.touch(QEvent.Type.TouchCancel)
 
     def test_touch_swipe_navigates_at_fit_but_pans_when_zoomed(self):
         navigation = []

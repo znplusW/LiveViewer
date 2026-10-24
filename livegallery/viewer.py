@@ -12,7 +12,7 @@ import math
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QContextMenuEvent,
     QEventPoint,
@@ -48,6 +48,7 @@ class ViewerCanvas(QGraphicsView):
 
     navigate_requested = Signal(int)
     zoom_changed = Signal(float)
+    zoom_animation_changed = Signal(bool)
     playback_changed = Signal(bool)
     message = Signal(str)
     controls_toggled = Signal()
@@ -105,6 +106,19 @@ class ViewerCanvas(QGraphicsView):
         self._image_rect = QRectF()
         self._fit_scale = 1.0
         self._fit_mode = True
+        self._zoom_animation = QVariantAnimation(self)
+        self._zoom_animation.setDuration(220)
+        self._zoom_animation.setStartValue(0.0)
+        self._zoom_animation.setEndValue(1.0)
+        self._zoom_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._zoom_animation.valueChanged.connect(self._animate_zoom_value)
+        self._zoom_animation.finished.connect(self._zoom_animation_finished)
+        self._zoom_target_factor: float | None = None
+        self._zoom_start_factor = 1.0
+        self._zoom_start_center = QPointF()
+        self._zoom_anchor_scene = QPointF()
+        self._zoom_anchor_viewport = QPointF()
+        self._deferred_photo: QImage | None = None
         self._loop = False
         self._preserve_zoom = True
         self._hold_ms = 300
@@ -147,6 +161,7 @@ class ViewerCanvas(QGraphicsView):
 
     def set_photo(self, image: QImage, video_path: Path | None = None) -> None:
         """Replace the current image, cancelling every pending playback request."""
+        self._cancel_zoom_animation(apply_deferred=False)
         self.stop_live()
         self._click_timer.stop()
         self._player.setSource(QUrl())
@@ -170,15 +185,21 @@ class ViewerCanvas(QGraphicsView):
         Progressive image loading can initially show a smaller decode. Keep the
         scene center as fractions of the old dimensions and keep zoom relative
         to fit, so substituting the full-resolution image does not move the
-        subject. Callers should defer upgrades while a live clip is playing;
-        this method cancels playback if called during one.
+        subject. Upgrades arriving during a double-click zoom are retained until
+        the animation ends, so its target and subject do not jump. Callers should
+        defer upgrades while a live clip is playing; this method cancels playback
+        if called during one.
         """
         if image.isNull():
+            return
+        if self.is_zoom_animating():
+            self._deferred_photo = QImage(image)
             return
         if self._image_rect.isEmpty():
             self.set_photo(image, self._video_path)
             return
-        self.stop_live()
+        if self._play_requested:
+            self.stop_live()
         relative_zoom = self.zoom_factor()
         center = self._scene_center()
         normalized = QPointF(
@@ -215,6 +236,9 @@ class ViewerCanvas(QGraphicsView):
     def zoom_factor(self) -> float:
         return self.transform().m11() / self._fit_scale if self._fit_scale else 1.0
 
+    def is_zoom_animating(self) -> bool:
+        return self._zoom_target_factor is not None
+
     def set_options(
         self,
         loop: bool = False,
@@ -249,6 +273,7 @@ class ViewerCanvas(QGraphicsView):
             self.stop_live()
 
     def _start_playback(self, *, play_once: bool) -> None:
+        self._cancel_zoom_animation()
         if self._play_requested or self._image_rect.isEmpty() or self._video_path is None:
             return
         if not self._video_path.is_file():
@@ -424,6 +449,7 @@ class ViewerCanvas(QGraphicsView):
         )
 
     def _fit_view(self) -> None:
+        self._cancel_zoom_animation()
         self._fit_scale = self._calculate_fit_scale()
         self.setTransform(QTransform.fromScale(self._fit_scale, self._fit_scale))
         self.centerOn(self._image_rect.center())
@@ -431,6 +457,7 @@ class ViewerCanvas(QGraphicsView):
         self.zoom_changed.emit(1.0)
 
     def _zoom_at(self, multiplier: float, position: QPointF) -> None:
+        self._cancel_zoom_animation()
         if self._image_rect.isEmpty() or multiplier <= 0:
             return
         before = self.mapToScene(position.toPoint())
@@ -447,20 +474,80 @@ class ViewerCanvas(QGraphicsView):
         self.zoom_changed.emit(self.zoom_factor())
 
     def _pan_by(self, delta: QPointF) -> None:
+        self._cancel_zoom_animation()
         if self._image_rect.isEmpty():
             return
         self.centerOn(self._scene_center() - delta / self.transform().m11())
 
-    def _toggle_native_zoom(self, position: QPointF) -> None:
+    def _toggle_double_zoom(self, position: QPointF) -> None:
         self.stop_live()
-        if self._fit_mode and abs(self.transform().m11() - 1.0) > 0.01:
-            self._zoom_at(1.0 / self.transform().m11(), position)
-        elif self._fit_mode:
-            self._zoom_at(2.0, position)
+        if self._image_rect.isEmpty():
+            return
+        # A second double-click can reverse an in-flight transition. Always use
+        # the fit-relative target, independently of the image's pixel dimensions.
+        previous_target = self._zoom_target_factor
+        target = (2.0 if previous_target == 1.0 else 1.0) if previous_target is not None else (
+            2.0 if self._fit_mode else 1.0
+        )
+        self._cancel_zoom_animation()
+        self._zoom_start_factor = self.zoom_factor()
+        self._zoom_start_center = self._scene_center()
+        self._zoom_anchor_scene = self.mapToScene(position.toPoint())
+        self._zoom_anchor_viewport = QPointF(position)
+        self._zoom_target_factor = target
+        self.zoom_animation_changed.emit(True)
+        self._zoom_animation.start()
+
+    def _animate_zoom_value(self, progress) -> None:
+        target = self._zoom_target_factor
+        if target is None or self._image_rect.isEmpty():
+            return
+        progress = float(progress)
+        factor = self._zoom_start_factor + (target - self._zoom_start_factor) * progress
+        scale = self._fit_scale * factor
+        self.setTransform(QTransform.fromScale(scale, scale))
+        if target == 2.0:
+            # Keep the selected subject under the pointer throughout zoom-in.
+            center = self._zoom_anchor_scene + (
+                self._viewport_center() - self._zoom_anchor_viewport
+            ) / scale
         else:
-            self._fit_view()
+            center = self._zoom_start_center + (
+                self._image_rect.center() - self._zoom_start_center
+            ) * progress
+        self.centerOn(center)
+        self._fit_mode = abs(factor - 1.0) < 0.001
+        self.zoom_changed.emit(factor)
+
+    def _zoom_animation_finished(self) -> None:
+        if self._zoom_target_factor is None:
+            return
+        # Ensure exact 1x/2x endpoints even if the final animation tick is late.
+        self._animate_zoom_value(1.0)
+        self._zoom_target_factor = None
+        self._apply_deferred_photo()
+        self.zoom_animation_changed.emit(False)
+
+    def _apply_deferred_photo(self) -> None:
+        image, self._deferred_photo = self._deferred_photo, None
+        if image is not None:
+            self.replace_photo(image)
+
+    def _cancel_zoom_animation(self, *, apply_deferred: bool = True) -> None:
+        if not hasattr(self, "_zoom_animation"):
+            return
+        active = self.is_zoom_animating()
+        self._zoom_animation.stop()
+        self._zoom_target_factor = None
+        if apply_deferred:
+            self._apply_deferred_photo()
+        else:
+            self._deferred_photo = None
+        if active:
+            self.zoom_animation_changed.emit(False)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
+        self._cancel_zoom_animation()
         old_center = self._scene_center()
         was_fit = self._fit_mode
         super().resizeEvent(event)
@@ -528,6 +615,7 @@ class ViewerCanvas(QGraphicsView):
             position = event.position()
             if (position - self._pointer_start).manhattanLength() >= QApplication.startDragDistance():
                 if not self._mouse_moved:
+                    self._cancel_zoom_animation()
                     self._hold_timer.stop()
                     self._hold_consumed = True
                     self._stop_playback()
@@ -568,7 +656,7 @@ class ViewerCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self._click_timer.stop()
-            self._toggle_native_zoom(event.position())
+            self._toggle_double_zoom(event.position())
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
@@ -662,6 +750,7 @@ class ViewerCanvas(QGraphicsView):
         previous_count = self._touch_count
         self._touch_count = len(active)
         if len(active) >= 2:
+            self._cancel_zoom_animation()
             self._hold_timer.stop()
             self._hold_consumed = True
             self._stop_playback()
@@ -682,6 +771,7 @@ class ViewerCanvas(QGraphicsView):
             # new long press or turn the same sequence into a swipe/tap.
             self._pointer_last = position
         elif (position - self._pointer_start).manhattanLength() >= QApplication.startDragDistance():
+            self._cancel_zoom_animation()
             self._hold_timer.stop()
             self._hold_consumed = True
             if not self._mouse_moved:
@@ -723,7 +813,7 @@ class ViewerCanvas(QGraphicsView):
             if is_double:
                 self._click_timer.stop()
                 self._last_tap_time = 0.0
-                self._toggle_native_zoom(position)
+                self._toggle_double_zoom(position)
             else:
                 self._last_tap_time = now
                 self._last_tap_position = position
@@ -749,6 +839,7 @@ class ViewerCanvas(QGraphicsView):
             super().contextMenuEvent(event)
 
     def focusOutEvent(self, event) -> None:
+        self._cancel_zoom_animation()
         self.stop_live()
         super().focusOutEvent(event)
 
@@ -760,6 +851,7 @@ class ViewerCanvas(QGraphicsView):
         super().leaveEvent(event)
 
     def hideEvent(self, event) -> None:
+        self._cancel_zoom_animation()
         self.stop_live()
         super().hideEvent(event)
 

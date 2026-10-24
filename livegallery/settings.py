@@ -30,6 +30,8 @@ class Preferences:
     hold_ms: int = 300
     live_key: str = 'Space'
     live_once_key: str = 'P'
+    filmstrip_key: str = 'F'
+    filmstrip_visible: bool = True
     cache_mb: int = 2048
     recursive: bool = True
     last_folder: str = ''
@@ -56,6 +58,11 @@ class Preferences:
             once = next(QKeySequence(key) for key in ('P', 'F9', 'Return') if QKeySequence(key) != hold)
         self.live_key = hold.toString(QKeySequence.SequenceFormat.PortableText)
         self.live_once_key = once.toString(QKeySequence.SequenceFormat.PortableText)
+        filmstrip = sequence(self.filmstrip_key)
+        if filmstrip.isEmpty() or filmstrip in (hold, once):
+            filmstrip = next(QKeySequence(key) for key in ('F', 'F10', 'F8', 'Ctrl+F')
+                             if QKeySequence(key) not in (hold, once))
+        self.filmstrip_key = filmstrip.toString(QKeySequence.SequenceFormat.PortableText)
 
     @classmethod
     def load(cls):
@@ -66,6 +73,8 @@ class Preferences:
             result.hold_ms = max(150, min(1000, int(result.hold_ms)))
             result.cache_mb = max(256, min(16384, int(result.cache_mb)))
             result.normalize_shortcuts()
+            if not isinstance(result.filmstrip_visible, bool):
+                result.filmstrip_visible = True
             return result
         except (OSError, ValueError, TypeError):
             return cls()
