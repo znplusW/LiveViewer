@@ -34,6 +34,7 @@ IMDT_MOUSE, IMDT_TOUCH, IMDT_TOUCHPAD = 2, 4, 16
 RIDI_PREPARSEDDATA, RIDI_DEVICEINFO, RID_INPUT = 0x20000005, 0x2000000B, 0x10000003
 RIDEV_REMOVE, RIDEV_PAGEONLY, RIDEV_DEVNOTIFY = 1, 0x20, 0x2000
 UINT_ERROR, HIDP_SUCCESS = 0xFFFFFFFF, 0x00110000
+ERROR_INSUFFICIENT_BUFFER = 122
 MAX_RAW_BYTES, MAX_DEVICES, MAX_BUTTON_CAPS = 1024 * 1024, 512, 128
 MAX_REPORT_BYTES, EVIDENCE_TTL, BUTTON_TTL = 4096, 0.25, 0.15
 
@@ -241,9 +242,12 @@ class EvidenceLedger:
 
 class WindowsInputBackend:
     """Small ctypes boundary, independently fakeable in unit tests."""
-    def __init__(self, user32=None, hid=None):
+    def __init__(self, user32=None, hid=None, *, get_last_error=None):
         self.user32 = user32 or C.WinDLL('user32', use_last_error=True)
         self.hid = hid or C.WinDLL('hid', use_last_error=True)
+        # ctypes exposes get_last_error only on Windows. Injection keeps the
+        # documented Win32 error contract testable on other development hosts.
+        self._get_last_error = get_last_error or getattr(C, 'get_last_error', lambda: 0)
         u, h = self.user32, self.hid
         specs = (
             (u.GetRegisteredRawInputDevices, [C.c_void_p, C.POINTER(C.c_uint32), C.c_uint32], C.c_uint32),
@@ -266,7 +270,10 @@ class WindowsInputBackend:
     def registrations(self):
         count = C.c_uint32()
         size = C.sizeof(_RawRegistration)
-        if self.user32.GetRegisteredRawInputDevices(None, C.byref(count), size) == UINT_ERROR:
+        result = self.user32.GetRegisteredRawInputDevices(None, C.byref(count), size)
+        # Unlike GetRawInputDeviceList, this API documents a NULL size query
+        # as -1 / ERROR_INSUFFICIENT_BUFFER, with the required count filled in.
+        if result == UINT_ERROR and self._get_last_error() != ERROR_INSUFFICIENT_BUFFER:
             raise OSError('raw-registration-query-failed')
         if count.value > MAX_DEVICES:
             raise OSError('raw-registration-limit')

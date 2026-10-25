@@ -181,6 +181,7 @@ class FakeApi:
     def __init__(self):
         self.registrations = []
         self.registration_calls = []
+        self.last_error = 0
         self.caps = n._HidCaps()
         self.caps.page, self.caps.usage, self.caps.input_bytes, self.caps.input_buttons = 13, 5, 2, 1
         self.button_caps = [cap()]
@@ -203,7 +204,8 @@ class FakeApi:
             for i, row in enumerate(self.registrations):
                 rows[i] = row
             return len(self.registrations)
-        return 0
+        self.last_error = n.ERROR_INSUFFICIENT_BUFFER
+        return n.UINT_ERROR
 
     def register(self, row, count, size):
         actual = C.cast(row, C.POINTER(n._RawRegistration))[0]
@@ -246,7 +248,35 @@ class FakeApi:
 class BackendTests(unittest.TestCase):
     def setUp(self):
         self.api = FakeApi()
-        self.backend = n.WindowsInputBackend(self.api, self.api)
+        self.backend = n.WindowsInputBackend(self.api, self.api,
+                                             get_last_error=lambda: self.api.last_error)
+
+    def test_null_registration_query_accepts_only_documented_size_error(self):
+        self.api.registrations = [n._RawRegistration(13, 5, n.RIDEV_DEVNOTIFY, 999)]
+        rows = self.backend.registrations()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].target, 999)
+        self.assertEqual(self.api.last_error, n.ERROR_INSUFFICIENT_BUFFER)
+
+    def test_registration_query_real_failure_never_overwrites_other_owner(self):
+        def failed_query(rows, count, size):
+            C.cast(count, C.POINTER(C.c_uint32))[0] = 1
+            self.api.last_error = 5  # ERROR_ACCESS_DENIED is not a size query.
+            return n.UINT_ERROR
+        self.api.GetRegisteredRawInputDevices.callback = failed_query
+        with self.assertRaisesRegex(OSError, 'raw-registration-query-failed'):
+            self.backend.register(100)
+        self.assertEqual(self.api.registration_calls, [])
+
+    def test_registration_buffer_growth_between_queries_fails_closed(self):
+        def growing_query(rows, count, size):
+            C.cast(count, C.POINTER(C.c_uint32))[0] = 1 if rows is None else 2
+            self.api.last_error = n.ERROR_INSUFFICIENT_BUFFER
+            return n.UINT_ERROR
+        self.api.GetRegisteredRawInputDevices.callback = growing_query
+        with self.assertRaisesRegex(OSError, 'raw-registration-query-failed'):
+            self.backend.register(100)
+        self.assertEqual(self.api.registration_calls, [])
 
     def test_registration_is_front_only_nonexclusive_and_owner_checked(self):
         self.assertTrue(self.backend.register(100))
