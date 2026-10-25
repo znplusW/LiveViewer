@@ -20,6 +20,7 @@ from PySide6.QtGui import QImage, QKeySequence, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QScrollArea
 
+from . import __version__
 from .cache import CacheStore
 from .catalog_model import CatalogModel
 from .imaging import load_image
@@ -2401,6 +2402,208 @@ def _check_application_theme(window, report_dir: Path):
         window._toggle_grid(original_grid_mode)
 
 
+def _check_pointer_contact_lifecycle(fixtures: Path):
+    """Inject complete contacts, including Qt Windows' between-contact Leave.
+
+    This exercises the real canvas and QWindow routing; the native mouse
+    evidence fixtures below are simulated and do not establish hardware support.
+    """
+    from unittest.mock import patch
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent, QPointingDevice
+    from .native_pointer_input import PointerEvidence
+
+    viewer = ViewerCanvas()
+    viewer.resize(800, 600)
+    viewer.show()
+    viewer.activateWindow()
+    viewer.setFocus()
+    _wait(lambda: viewer.windowHandle() is not None and viewer.windowHandle().isExposed())
+    target = viewer.windowHandle()
+    device = QTest.createTouchDevice()
+    sequence = QTest.touchEvent(target, device, False)
+    image = QImage(2400, 1800, QImage.Format.Format_RGB32)
+    image.fill('#5794b6')
+    hold, pause = 100, 180
+    center = viewer.viewport().rect().center()
+    original_monitor = viewer._pointer_input_monitor
+    leaves = 0
+
+    class EvidenceFixture:
+        def __init__(self, evidence):
+            self.evidence = evidence
+
+        def mouse_evidence(self, _event):
+            return self.evidence
+
+    def reset(zoom=1.0):
+        viewer.set_photo(image, fixtures / 'Live_H264.MOV')
+        viewer.set_options(hold_ms=hold)
+        viewer._pointer_input_monitor = EvidenceFixture(PointerEvidence())
+        if zoom != 1:
+            viewer._zoom_at(zoom, QPointF(center))
+        # Keep the native cursor inside the actual exposed input window so an
+        # injected event cannot be cancelled by an unrelated cursor enter/leave.
+        QTest.mouseMove(viewer.viewport(), center)
+        QCoreApplication.processEvents()
+
+    def point(local):
+        return target.mapFromGlobal(viewer.viewport().mapToGlobal(local))
+
+    def leave_between_contacts():
+        nonlocal leaves
+        assert not viewer._touch_active and not viewer._mouse_down
+        # QWidget Leave belongs to the outer view. Sending it only to the
+        # viewport does not call QGraphicsView.leaveEvent and misses this bug.
+        QApplication.sendEvent(viewer, QEvent(QEvent.Type.Leave))
+        leaves += 1
+
+    def mouse(kind, local, timestamp, source=Qt.MouseEventSource.MouseEventNotSynthesized):
+        moving, released = kind == QEvent.Type.MouseMove, kind == QEvent.Type.MouseButtonRelease
+        event = QMouseEvent(kind, QPointF(local), QPointF(local),
+                            QPointF(viewer.viewport().mapToGlobal(local)),
+                            Qt.MouseButton.NoButton if moving else Qt.MouseButton.LeftButton,
+                            Qt.MouseButton.NoButton if released else Qt.MouseButton.LeftButton,
+                            Qt.KeyboardModifier.NoModifier, source,
+                            QPointingDevice.primaryPointingDevice())
+        event.setTimestamp(timestamp)
+        QApplication.sendEvent(viewer.viewport(), event)
+        QCoreApplication.processEvents()
+
+    try:
+        with patch.object(viewer._player, 'play', wraps=viewer._player.play) as playback:
+            reset()
+            for factor in (2.0, 1.0):
+                first, second = point(center), point(center + QPoint(12, 4))
+                sequence.press(0, first, target).commit()
+                sequence.release(0, first, target).commit()
+                leave_between_contacts()
+                sequence.press(0, second, target).commit()
+                QTest.qWait(pause)
+                assert playback.call_count == 0 and not viewer._play_requested, 'Second touchscreen contact requested video before release'
+                sequence.release(0, second, target).commit()
+                _wait(lambda: not viewer.is_zoom_animating(), 3)
+                assert abs(viewer.zoom_factor() - factor) < .005, 'Between-contact Leave broke touchscreen double-tap zoom'
+
+            reset(2.0)
+            scale, origin = viewer.transform().m11(), viewer._scene_center()
+            first, second = point(center), point(center + QPoint(12, 4))
+            sequence.press(0, first, target).commit()
+            sequence.release(0, first, target).commit()
+            leave_between_contacts()
+            sequence.press(0, second, target).commit()
+            QTest.qWait(pause)
+            assert playback.call_count == 0 and not viewer._play_requested
+            # Qt-promoted events from the same touchscreen contact must not
+            # create a second hold, zoom or ownership change.
+            mouse(QEvent.Type.MouseButtonDblClick, center + QPoint(12, 4), 1100,
+                  Qt.MouseEventSource.MouseEventSynthesizedByQt)
+            mouse(QEvent.Type.MouseButtonRelease, center + QPoint(12, 4), 1120,
+                  Qt.MouseEventSource.MouseEventSynthesizedByQt)
+            assert viewer._touch_active, 'Promoted mouse release cancelled the owning touch contact'
+            sequence.move(0, second + QPoint(80, 35), target).commit()
+            sequence.release(0, second + QPoint(80, 35), target).commit()
+            assert playback.call_count == 0 and not viewer._play_requested
+            assert abs(viewer.transform().m11() - scale) < 1e-6
+            assert (viewer._scene_center() - origin).manhattanLength() > .5
+            assert not viewer.is_zoom_animating(), 'Promoted mouse duplicate toggled zoom after touch drag'
+
+            reset(2.0)
+            scale, origin = viewer.transform().m11(), viewer._scene_center()
+            hints = QApplication.styleHints()
+            with patch.object(hints, 'mouseDoubleClickDistance', return_value=4), \
+                    patch.object(hints, 'touchDoubleTapDistance', return_value=40):
+                mouse(QEvent.Type.MouseButtonPress, center, 2000)
+                mouse(QEvent.Type.MouseButtonRelease, center, 2020)
+                leave_between_contacts()
+                second = center + QPoint(12, 4)
+                mouse(QEvent.Type.MouseButtonPress, second, 2100)
+                QTest.qWait(pause)
+                assert playback.call_count == 0 and not viewer._play_requested, 'Legacy unknown mouse route briefly played video during second-tap pause'
+                mouse(QEvent.Type.MouseMove, second + QPoint(80, 35), 2300)
+                mouse(QEvent.Type.MouseButtonRelease, second + QPoint(80, 35), 2320)
+            assert abs(viewer.transform().m11() - scale) < 1e-6
+            assert (viewer._scene_center() - origin).manhattanLength() > .5
+            assert not viewer.is_zoom_animating()
+
+            reset()
+            # Immediately following touch input, a separate physical mouse
+            # fixture still owns an ordinary long press at the configured delay.
+            first = point(center)
+            sequence.press(0, first, target).commit()
+            sequence.release(0, first, target).commit()
+            viewer._pointer_input_monitor = EvidenceFixture(PointerEvidence('mouse', True))
+            mouse(QEvent.Type.MouseButtonPress, center, 3000)
+            _wait(lambda: playback.call_count == 1, 3)
+            assert viewer._hold_timer.interval() == hold and viewer._play_requested
+            mouse(QEvent.Type.MouseButtonRelease, center, 3200)
+            assert not viewer._play_requested
+
+            reset()
+            first = point(center)
+            sequence.press(0, first, target).commit()
+            _wait(lambda: playback.call_count == 2, 3)
+            sequence.release(0, first, target).commit()
+            assert not viewer._play_requested
+        return {'touch_target': 'QWindow', 'touch_double_tap_fit_twice_fit_after_leave': True,
+                'touch_second_pause_then_drag_after_leave': True,
+                'unknown_mouse_legacy_second_pause_then_drag_after_leave': True,
+                'leave_events_between_contacts': leaves, 'leave_receiver': 'ViewerCanvas',
+                'second_contact_pause_ms': pause, 'hold_delay_ms': hold,
+                'no_transient_video_request': True, 'drag_preserves_zoom_and_pans': True,
+                'promoted_mouse_deduplicated_without_cancelling_touch': True,
+                'independent_mouse_after_touch_and_touch_hold_play': True,
+                'hold_requests': 2, 'mouse_evidence': 'simulated unknown and positive physical mouse',
+                'physical_touch_hardware': False, 'physical_touchpad_hardware': False}
+    finally:
+        viewer._pointer_input_monitor = original_monitor
+        viewer.stop_live()
+        viewer.close()
+        viewer.deleteLater()
+        QCoreApplication.processEvents()
+
+
+def _check_pointer_input_capability(viewer: ViewerCanvas):
+    """Observe available native APIs/devices without asserting PTP hardware."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent, QPointingDevice
+    from .native_pointer_input import PointerEvidence, install_pointer_input_monitor
+
+    monitor = viewer._pointer_input_monitor or install_pointer_input_monitor(viewer)
+    if monitor is None:
+        diagnostics = {'platform': sys.platform, 'raw_input': 'unavailable',
+                       'physical_button_gating_requires_explicit_touchpad_source': True,
+                       'preview_touchpad_registration_enabled': False}
+    else:
+        diagnostics = monitor.diagnostics()
+        assert diagnostics['raw_input'] in ('registered', 'existing-registration', 'unavailable')
+        for key in ('ptp_devices', 'button_capable_devices', 'raw_reports_observed',
+                    'explicit_touchpad_messages', 'matched_native_messages', 'observation_errors'):
+            assert isinstance(diagnostics[key], int) and diagnostics[key] >= 0, key
+        assert diagnostics['button_capable_devices'] <= diagnostics['ptp_devices']
+        local = viewer.viewport().rect().center()
+        event = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(local), QPointF(local),
+                            QPointF(viewer.viewport().mapToGlobal(local)),
+                            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.MouseEventSource.MouseEventNotSynthesized,
+                            QPointingDevice.primaryPointingDevice())
+        # No corresponding native message exists for this unique timestamp.
+        event.setTimestamp(0x76543210)
+        assert monitor.mouse_evidence(event) == PointerEvidence(), 'Uncorrelated Qt event received physical button evidence'
+    if sys.platform == 'win32' and QApplication.platformName() == 'windows':
+        assert monitor is not None, 'Windows native pointer observer failed to initialize'
+        assert diagnostics['raw_input'] in ('registered', 'existing-registration'), diagnostics
+        assert diagnostics['observation_errors'] == 0, diagnostics
+    assert diagnostics['physical_button_gating_requires_explicit_touchpad_source'] is True
+    assert diagnostics['preview_touchpad_registration_enabled'] is False
+    json.dumps(diagnostics)
+    return {'native_observer_installed': monitor is not None, 'diagnostics': diagnostics,
+            'uncorrelated_input_remains_unknown': True,
+            'physical_button_state_verified': False, 'physical_touchpad_hardware': False,
+            'physical_touch_hardware': False,
+            'scope': 'native API capability observation; gesture events are separately injected'}
+
+
 def _check_touch_scroll_and_double_tap(report_dir: Path):
     """Exercise native QWindow delivery through settings children and canvas."""
     from unittest.mock import patch
@@ -2475,7 +2678,7 @@ def _check_touch_scroll_and_double_tap(report_dir: Path):
         viewer.set_options(hold_ms=100)
         device, target = QTest.createTouchDevice(), viewer.windowHandle()
         sequence = QTest.touchEvent(target, device, False)
-        with patch.object(viewer, 'start_live') as playback:
+        with patch.object(viewer, '_start_playback') as playback:
             for factor in (2.0, 1.0):
                 for index, origin in enumerate((QPoint(400, 300), QPoint(432, 322))):
                     point = target.mapFromGlobal(viewer.viewport().mapToGlobal(origin))
@@ -3117,6 +3320,7 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
             'pointer_bits': struct.calcsize('P') * 8,
             'frozen': bool(getattr(sys, 'frozen', False)),
             'python': platform.python_version(),
+            'application_version': __version__,
         },
         'checks': [],
     }
@@ -3154,6 +3358,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         thumbnail_badges = _check_thumbnail_live_badges(report_dir)
         report['checks'].append({'check': 'thumbnail_live_badges_adapt_to_frame_size',
                                  **thumbnail_badges, 'status': 'passed'})
+        pointer_lifecycle = _check_pointer_contact_lifecycle(fixtures)
+        report['checks'].append({'check': 'pointer_contact_leave_double_tap_and_mixed_input',
+                                 **pointer_lifecycle, 'status': 'passed'})
         touch_controls = _check_touch_scroll_and_double_tap(report_dir)
         report['checks'].append({'check': 'settings_scroll_and_double_tap_native_touch',
                                  **touch_controls, 'status': 'passed'})
@@ -3275,6 +3482,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         navigator = _check_zoom_navigation_overview(viewer, fixtures, report_dir)
         report['checks'].append({'check': 'zoom_navigation_thumbnail_and_viewport_rectangle',
                                  **navigator, 'status': 'passed'})
+        pointer_capability = _check_pointer_input_capability(viewer)
+        report['checks'].append({'check': 'native_pointer_observer_capabilities',
+                                 **pointer_capability, 'status': 'passed'})
         double_drag = _check_zoomed_double_tap_drag(
             viewer, fixtures, diagnostics_path=report_dir / 'zoomed-double-tap-drag-diagnostics.json')
         report['checks'].append({'check': 'zoomed_double_tap_drag_does_not_play_live',

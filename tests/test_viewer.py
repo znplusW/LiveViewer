@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,6 +19,7 @@ from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from livegallery.viewer import ViewerCanvas
+from livegallery.native_pointer_input import PointerEvidence
 from livegallery.native_touch import (
     GC_ALLGESTURES, ImageTouchGestureFilter, TABLET_DISABLE_PRESSANDHOLD,
     WM_GESTURENOTIFY, WM_TABLET_QUERYSYSTEMGESTURESTATUS,
@@ -343,7 +345,9 @@ class CanvasTests(unittest.TestCase):
                                  QPointingDevice.PointerType.Generic, QInputDevice.Capability.Position, 1, 3)
         hints = QApplication.styleHints()
         with patch.object(hints, 'mouseDoubleClickDistance', return_value=4), \
-                patch.object(hints, 'touchDoubleTapDistance', return_value=40):
+                patch.object(hints, 'touchDoubleTapDistance', return_value=40), \
+                patch.object(self.canvas, '_mouse_pointer_evidence',
+                             return_value=PointerEvidence(device_kind='mouse', physical_press=True)):
             self.mouse_event(QEvent.Type.MouseButtonPress, timestamp=1000, device=device)
             self.mouse_event(QEvent.Type.MouseButtonRelease, timestamp=1020, device=device)
             self.mouse_event(QEvent.Type.MouseButtonPress, self.center + QPoint(12, 0), timestamp=1100, device=device)
@@ -446,6 +450,243 @@ class CanvasTests(unittest.TestCase):
         self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
         self.wait_for_play_calls(1)
         self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+
+    def test_completed_touch_tap_survives_leave_and_second_contact_waits_for_release(self):
+        for target in (2.0, 1.0):
+            self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+            self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+            first_tap = self.canvas._last_tap_time
+            QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.Leave))
+            self.assertEqual(self.canvas._last_tap_time, first_tap)
+            self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 405, 300))
+            QTest.qWait(180)
+            self.assertEqual(self.player.play_calls, 0)
+            self.assertFalse(self.canvas.is_zoom_animating())
+            self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 405, 300))
+            self.assertTrue(self.canvas.is_zoom_animating())
+            self.finish_zoom_animation()
+            self.assertAlmostEqual(self.canvas.zoom_factor(), target)
+
+    def test_unknown_primary_mouse_second_contact_accepts_legacy_touchpad_drift(self):
+        hints = QApplication.styleHints()
+        for zoomed in (False, True):
+            with self.subTest(zoomed=zoomed):
+                self.canvas.set_photo(self.image, self.video_path)
+                if zoomed:
+                    self.canvas._zoom_at(2.0, QPointF(self.center))
+                with patch.object(hints, 'mouseDoubleClickDistance', return_value=4), \
+                        patch.object(hints, 'touchDoubleTapDistance', return_value=40):
+                    self.mouse_event(QEvent.Type.MouseButtonPress, timestamp=1000)
+                    self.mouse_event(QEvent.Type.MouseButtonRelease, timestamp=1020)
+                    QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.Leave))
+                    self.mouse_event(QEvent.Type.MouseButtonPress, self.center + QPoint(12, 0), timestamp=1100)
+                    QTest.qWait(180)
+                    self.assertEqual(self.player.play_calls, 0)
+                    self.assertFalse(self.canvas.is_zoom_animating())
+                    if zoomed:
+                        self.assert_double_drag_can_pan(self.center + QPoint(12, 0))
+                    else:
+                        self.mouse_event(QEvent.Type.MouseButtonRelease, self.center + QPoint(12, 0))
+                        self.assertTrue(self.canvas.is_zoom_animating())
+                        self.finish_zoom_animation()
+
+    def test_native_double_click_without_history_defers_fit_zoom_and_hold_until_release(self):
+        self.mouse_event(QEvent.Type.MouseButtonPress)
+        self.mouse_event(QEvent.Type.MouseButtonRelease)
+        self.canvas.cancel_interaction()  # The OS still identifies its second press.
+        QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.Leave))
+        self.mouse_event(QEvent.Type.MouseButtonDblClick,
+                         source=Qt.MouseEventSource.MouseEventSynthesizedBySystem)
+        QTest.qWait(180)
+        self.assertEqual(self.player.play_calls, 0)
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.mouse_event(QEvent.Type.MouseButtonRelease,
+                         source=Qt.MouseEventSource.MouseEventSynthesizedBySystem)
+        self.assertTrue(self.canvas.is_zoom_animating())
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 2.0)
+
+    def test_synthesized_tail_after_raw_double_tap_cannot_toggle_zoom_again(self):
+        for _ in range(2):
+            self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+            self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+            QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.Leave))
+        self.assertEqual(self.canvas._zoom_target_factor, 2.0)
+        for source in (Qt.MouseEventSource.MouseEventSynthesizedByQt,
+                       Qt.MouseEventSource.MouseEventSynthesizedBySystem):
+            for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
+                         QEvent.Type.MouseButtonRelease):
+                self.mouse_event(kind, source=source)
+            self.assertEqual(self.canvas._zoom_target_factor, 2.0)
+            self.assertFalse(self.canvas._mouse_down)
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 2.0)
+        self.assertEqual(self.player.play_calls, 0)
+
+    def test_independent_mouse_and_explicit_touchpad_are_immediate_after_touch(self):
+        pad = QPointingDevice('independent pad', 71006, QInputDevice.DeviceType.TouchPad,
+                              QPointingDevice.PointerType.Generic, QInputDevice.Capability.Position, 1, 3)
+        for device, source in ((None, Qt.MouseEventSource.MouseEventNotSynthesized),
+                               (pad, Qt.MouseEventSource.MouseEventSynthesizedBySystem)):
+            with self.subTest(source=source):
+                self.canvas.set_photo(self.image, self.video_path)
+                self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+                self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+                before = self.player.play_calls
+                self.mouse_event(QEvent.Type.MouseButtonPress, device=device, source=source)
+                self.wait_for_play_calls(before + 1)
+                self.mouse_event(QEvent.Type.MouseButtonRelease, device=device, source=source)
+                self.assertFalse(self.canvas._play_requested)
+
+    def test_delayed_touch_end_or_cancel_cannot_release_mouse_takeover(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                self.canvas.set_photo(self.image, self.video_path)
+                self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+                before = self.player.play_calls
+                self.mouse_event(QEvent.Type.MouseButtonPress)
+                if cancelled:
+                    self.touch(QEvent.Type.TouchCancel)
+                else:
+                    self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+                self.assertIs(self.canvas._input_owner, self.canvas._DIRECT_INPUT)
+                self.assertTrue(self.canvas._mouse_down)
+                self.wait_for_play_calls(before + 1)
+                self.assertEqual(self.canvas._playback_owner, 'mouse')
+                self.mouse_event(QEvent.Type.MouseButtonRelease)
+
+    def test_pointer_evidence_false_blocks_touchpad_play_but_unknown_keeps_hold(self):
+        for physical_press in (False, None, True):
+            with self.subTest(physical_press=physical_press):
+                self.canvas.set_photo(self.image, self.video_path)
+                evidence = PointerEvidence(device_kind='touchpad', physical_press=physical_press)
+                before = self.player.play_calls
+                with patch.object(self.canvas, '_mouse_pointer_evidence', return_value=evidence):
+                    self.mouse_event(QEvent.Type.MouseButtonPress)
+                    if physical_press is False:
+                        QTest.qWait(180)
+                        self.assertEqual(self.player.play_calls, before)
+                    else:
+                        self.wait_for_play_calls(before + 1)
+                    self.mouse_event(QEvent.Type.MouseButtonRelease)
+
+    def test_native_probe_failure_keeps_unknown_legacy_hold(self):
+        class FailedMonitor:
+            def mouse_evidence(self, event):
+                raise OSError('probe unavailable')
+        self.canvas._pointer_input_monitor = FailedMonitor()
+        self.mouse_event(QEvent.Type.MouseButtonPress)
+        self.wait_for_play_calls(1)
+        self.mouse_event(QEvent.Type.MouseButtonRelease)
+
+    def test_remote_mouse_does_not_borrow_unrelated_native_pointer_evidence(self):
+        class UnrelatedMonitor:
+            calls = 0
+            def mouse_evidence(self, event):
+                self.calls += 1
+                return PointerEvidence(device_kind='touchpad', physical_press=False)
+        self.canvas._pointer_input_monitor = monitor = UnrelatedMonitor()
+        owner = object()
+        self.assertTrue(self.canvas.begin_remote_input(owner))
+        with self.canvas._remote_dispatch(owner):
+            event = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(self.center),
+                                Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                                Qt.KeyboardModifier.NoModifier)
+            self.assertEqual(self.canvas._mouse_pointer_evidence(event), PointerEvidence())
+            self.canvas.mousePressEvent(event)
+        self.wait_for_play_calls(1)
+        self.assertEqual(monitor.calls, 0)
+        self.canvas.stop_live()
+
+    def test_native_touchscreen_identity_filters_wrongly_unsynthesized_duplicate(self):
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        evidence = PointerEvidence(device_kind='touchscreen')
+        with patch.object(self.canvas, '_mouse_pointer_evidence', return_value=evidence):
+            self.mouse_event(QEvent.Type.MouseButtonPress)
+            self.mouse_event(QEvent.Type.MouseButtonDblClick)
+            self.mouse_event(QEvent.Type.MouseButtonRelease)
+        self.assertTrue(self.canvas._touch_active)
+        self.assertFalse(self.canvas._mouse_down)
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+        self.assertEqual(self.player.play_calls, 0)
+
+    def test_remote_delayed_touch_tail_cannot_release_mapped_mouse_takeover(self):
+        owner = object()
+        def touch_event(kind):
+            point = SimpleNamespace(id=lambda: 0, position=lambda: QPointF(self.center),
+                                    state=lambda: QEventPoint.State.Pressed)
+            return SimpleNamespace(type=lambda: kind, points=lambda: [point], timestamp=lambda: 0,
+                                   pointingDevice=lambda: self.touch_device)
+        def mouse_event(kind):
+            return QMouseEvent(kind, QPointF(self.center), Qt.MouseButton.LeftButton,
+                               Qt.MouseButton.NoButton if kind == QEvent.Type.MouseButtonRelease
+                               else Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        for kind in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            with self.subTest(kind=kind):
+                self.canvas.set_photo(self.image, self.video_path)
+                self.assertTrue(self.canvas.begin_remote_input(owner))
+                self.canvas.remote_touch(owner, touch_event(QEvent.Type.TouchBegin))
+                self.canvas.remote_mouse(owner, mouse_event(QEvent.Type.MouseButtonPress))
+                self.canvas.remote_touch(owner, touch_event(kind))
+                self.assertIs(self.canvas._input_owner, owner)
+                self.assertTrue(self.canvas._mouse_down)
+                self.wait_for_play_calls(self.player.play_calls + 1)
+                self.canvas.remote_mouse(owner, mouse_event(QEvent.Type.MouseButtonRelease))
+                self.assertFalse(self.canvas._play_requested)
+
+    def test_touchpad_identity_can_degrade_to_unknown_without_losing_second_contact(self):
+        for first, second in (('touchpad', 'unknown'), ('unknown', 'touchpad')):
+            with self.subTest(first=first, second=second):
+                self.canvas.set_photo(self.image, self.video_path)
+                self.canvas._zoom_at(2.0, QPointF(self.center))
+                evidence = [PointerEvidence(device_kind=first)]
+                with patch.object(self.canvas, '_mouse_pointer_evidence', side_effect=lambda event: evidence[0]):
+                    self.mouse_event(QEvent.Type.MouseButtonPress)
+                    self.mouse_event(QEvent.Type.MouseButtonRelease)
+                    evidence[0] = PointerEvidence(device_kind=second)
+                    self.mouse_event(QEvent.Type.MouseButtonPress, self.center + QPoint(12, 0))
+                    QTest.qWait(180)
+                    self.assertEqual(self.player.play_calls, 0)
+                    self.assert_double_drag_can_pan(self.center + QPoint(12, 0))
+
+    def test_source_switch_and_capture_loss_do_not_borrow_a_completed_tap(self):
+        for reset in ('source', 'capture'):
+            with self.subTest(reset=reset):
+                self.canvas.set_photo(self.image, self.video_path)
+                self.canvas._zoom_at(2.0, QPointF(self.center))
+                self.mouse_event(QEvent.Type.MouseButtonPress)
+                self.mouse_event(QEvent.Type.MouseButtonRelease)
+                if reset == 'source':
+                    self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+                    self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+                else:
+                    self.mouse_event(QEvent.Type.MouseButtonPress)
+                    QApplication.sendEvent(self.canvas.viewport(), QEvent(QEvent.Type.UngrabMouse))
+                before = self.player.play_calls
+                self.mouse_event(QEvent.Type.MouseButtonPress)
+                self.wait_for_play_calls(before + 1)
+                self.mouse_event(QEvent.Type.MouseButtonRelease)
+
+    def test_keyboard_hold_owns_playback_across_old_pointer_release_and_leave(self):
+        for touch in (False, True):
+            with self.subTest(touch=touch):
+                self.canvas.set_photo(self.image, self.video_path)
+                if touch:
+                    self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+                else:
+                    self.mouse_event(QEvent.Type.MouseButtonPress)
+                self.canvas.start_live()
+                generation = self.canvas._generation
+                if touch:
+                    self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+                    self.touch(QEvent.Type.TouchCancel)
+                else:
+                    self.mouse_event(QEvent.Type.MouseButtonRelease)
+                QApplication.sendEvent(self.canvas, QEvent(QEvent.Type.Leave))
+                self.assertTrue(self.canvas._play_requested)
+                self.assertEqual(self.canvas._generation, generation)
+                self.canvas.release_live()
+                self.assertFalse(self.canvas._play_requested)
 
     def test_missed_system_double_click_promotes_owned_second_contact(self):
         self.canvas._zoom_at(2.0, QPointF(self.center))
