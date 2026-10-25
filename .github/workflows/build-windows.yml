@@ -79,6 +79,18 @@ jobs:
           Get-Content 'reports/preflight-cover-editor.stdout.log', 'reports/preflight-cover-editor.stderr.log' | Tee-Object -FilePath 'reports/preflight-cover-editor.log'
           if (-not $finished) { throw 'Cover editor interaction preflight timed out' }
           if ($testExitCode -ne 0) { throw "Cover editor interaction preflight failed with exit code $testExitCode" }
+      - name: Preflight non-overlapping cache requests and writer handoff
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'unittest', 'tests.test_app.WindowTests.test_slow_stale_cache_open_is_off_gui_and_closed_after_new_folder_wins', 'tests.test_app.WindowTests.test_overlapping_library_cache_rebind_releases_own_writer_locks_and_keeps_choices', '-v' -PassThru -RedirectStandardOutput 'reports/preflight-cache-ownership.stdout.log' -RedirectStandardError 'reports/preflight-cache-ownership.stderr.log'
+          $finished = $process.WaitForExit(150000)
+          if (-not $finished) { Stop-Process -Id $process.Id -Force }
+          $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
+          Get-Content 'reports/preflight-cache-ownership.stdout.log', 'reports/preflight-cache-ownership.stderr.log' | Tee-Object -FilePath 'reports/preflight-cache-ownership.log'
+          if (-not $finished) { throw 'Cache request ownership preflight timed out' }
+          if ($testExitCode -ne 0) { throw "Cache request ownership preflight failed with exit code $testExitCode" }
       - name: Preflight native Windows settings touch routing
         shell: pwsh
         timeout-minutes: 3

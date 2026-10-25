@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -443,6 +444,7 @@ class MainWindow(QMainWindow):
         self._cache_location = bootstrap
         self._cache_lock = threading.RLock()
         self._cache_prepare_lock = threading.Lock()
+        self._cache_root_locks = {}
         self._cache_stores = {id(self.cache): self.cache}
         self._cache_close_locks = {}
         self._cache_reapers = []
@@ -878,6 +880,27 @@ class MainWindow(QMainWindow):
                     verifier.join()
             self._close_cache(cache)
 
+    @contextmanager
+    def _reserve_cache_roots(self, roots, cancel):
+        # Reserve only overlapping physical galleries, in a consistent order.
+        # Slow I/O on one disk must not delay a newer, unrelated folder.
+        keys = sorted({os.path.normcase(str(root)) for root in roots})
+        with self._cache_prepare_lock:
+            guards = [self._cache_root_locks.setdefault(key, threading.Lock()) for key in keys]
+        acquired = []
+        try:
+            for guard in guards:
+                while True:
+                    if cancel.is_set() or self._closed:
+                        raise InterruptedError('已取消缓存准备。')
+                    if guard.acquire(timeout=.05):
+                        acquired.append(guard)
+                        break
+            yield
+        finally:
+            for guard in reversed(acquired):
+                guard.release()
+
     def _retire_cache(self, cache):
         """Release inactive database/file locks after their actual users finish."""
         def retire():
@@ -918,7 +941,7 @@ class MainWindow(QMainWindow):
                 missing = tuple(root for root in folders if root not in available)
                 if scan and not available:
                     raise NotADirectoryError('没有可访问的已导入文件夹。请检查硬盘连接。')
-                with self._cache_prepare_lock:
+                with self._reserve_cache_roots(available, cancel):
                     if cancel.is_set() or self._closed:
                         return
                     cache = self.cache

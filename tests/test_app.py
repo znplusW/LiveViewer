@@ -1,10 +1,13 @@
 """Window integration and asynchronous-result ownership regressions."""
 
 import ctypes
+import json
 import os
+import sys
 import tempfile
 import time
 import threading
+import traceback
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,14 +80,65 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(self.image.save(str(target)))
         return target
 
-    def wait_until(self, predicate):
-        deadline = time.monotonic() + 5
+    def pipeline_diagnostics(self, stage):
+        window = self.window
+        state = {'test': self.id(), 'stage': stage, 'generation': window._scan_generation,
+                 'epoch': window._epoch, 'scan_pending': window._scan_pending,
+                 'roots': list(map(str, window.folders)), 'cache_key': window._cache_key,
+                 'bound_roots': list(map(str, window._cache_bound_roots)),
+                 'current_id': window._current_id, 'model_items': len(window.model.items),
+                 'request_context': {key: value[0] for key, value in window._request_context.items()},
+                 'empty_title': window.empty_title.text(), 'status': window.statusBar().currentMessage(),
+                 'prepare_map_locked': window._cache_prepare_lock.locked(),
+                 'root_prepare_locks': {str(root): guard.locked() for root, guard in
+                                        getattr(window, '_cache_root_locks', {}).copy().items()},
+                 'close_locks': {str(identity): guard.locked() for identity, guard in
+                                 window._cache_close_locks.copy().items()}}
+        if window._cache_lock.acquire(blocking=False):
+            try:
+                state['caches'] = [{'id': id(cache), 'type': type(cache).__name__,
+                                    'current': cache is window.cache, 'base': str(cache.base),
+                                    'closed': cache._closed, 'closing': getattr(cache, '_closing', False),
+                                    'writer_roots': list(map(str, window._writer_roots(cache)))}
+                                   for cache in window._cache_stores.values()]
+                state['verifiers'] = [{'thread': thread.ident, 'owner': id(owner)}
+                                      for thread, owner in window._verify_threads.items()]
+            finally:
+                window._cache_lock.release()
+        else:
+            state['caches'] = 'registry lock busy; snapshot deliberately did not wait'
+        jobs = window.jobs
+        if jobs._condition.acquire(blocking=False):
+            try:
+                state['jobs'] = {kind: [{'key': job.key, 'owner': id(job.owner),
+                                         'cancelled': job.cancelled, 'priority': job.priority}
+                                        for job in source.values()]
+                                 for kind, source in (('pending', jobs._pending), ('running', jobs._running))}
+            finally:
+                jobs._condition.release()
+        else:
+            state['jobs'] = 'job lock busy; snapshot deliberately did not wait'
+        frames = sys._current_frames()
+        stacks = []
+        for thread in threading.enumerate():
+            frame = frames.get(thread.ident)
+            stacks.append(f'Thread {thread.name} ident={thread.ident} alive={thread.is_alive()}\n'
+                          + (''.join(traceback.format_stack(frame)) if frame is not None else '<no Python frame>'))
+        return json.dumps(state, ensure_ascii=False, indent=2, default=str) + '\n' + '\n'.join(stacks)
+
+    def wait_until(self, predicate, *, timeout=5, stage='asynchronous image load'):
+        started = time.monotonic()
+        deadline = started + timeout
+        diagnosed = False
         while time.monotonic() < deadline:
             self.application.processEvents()
             if predicate():
                 return
+            if timeout > 5 and not diagnosed and time.monotonic() - started >= 5:
+                print('Slow real-I/O wait diagnostics:\n' + self.pipeline_diagnostics(stage), flush=True)
+                diagnosed = True
             QTest.qWait(10)
-        self.fail("Timed out waiting for asynchronous image load")
+        self.fail(f'Timed out after {timeout}s waiting for {stage}\n' + self.pipeline_diagnostics(stage))
 
     def test_real_recursive_scan_navigation_search_and_grid(self):
         for name in ("1.png", "2.jpeg", "3.PNG", "sub/4.bmp"):
@@ -255,7 +309,8 @@ class WindowTests(unittest.TestCase):
         self.window.cache.set_override(self.window._displayed_item, second)
         old = self.window.cache
         self.window.load_folders([second.parent, third.parent])
-        self.wait_until(lambda: not self.window._scan_pending and len(self.window.model.items) == 2)
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window.model.items) == 2,
+                        timeout=25, stage='overlapping B,C cache writer handoff and real disk index')
         self.assertTrue(old._closed)
         self.assertEqual(set(self.window.cache.writer_roots), {second.parent, third.parent})
         self.assertEqual(self.window.cache.get_override(self.window._displayed_item), second)
@@ -1891,7 +1946,7 @@ class WindowTests(unittest.TestCase):
             threads.append(threading.current_thread())
             if folder == first.parent:
                 entered.set()
-                release.wait(4)
+                release.wait(15)
             binding = open_cache(location, folder, **kwargs)
             if folder == first.parent:
                 stale.append(binding.cache)
@@ -1902,15 +1957,62 @@ class WindowTests(unittest.TestCase):
                 self.window.load_folder(first.parent)
                 self.assertLess(time.monotonic() - before, 0.3)
                 self.assertTrue(entered.wait(1))
+                newer_started = time.monotonic()
                 self.window.load_folder(second.parent)
                 self.wait_until(lambda: self.window._displayed_item is not None and
-                                self.window._displayed_item.image_path == second)
+                                self.window._displayed_item.image_path == second,
+                                stage='new nonoverlapping B displayed while old A open is gated')
+                self.assertFalse(release.is_set(), 'B must win before A is released')
+                print(json.dumps({'nonoverlapping_new_folder_preempts_gated_open': True,
+                                  'new_folder_loaded_seconds': round(time.monotonic() - newer_started, 4),
+                                  'old_open_still_gated': not release.is_set()}), flush=True)
                 release.set()
                 self.wait_until(lambda: stale and id(stale[0]) not in self.window._cache_stores)
                 self.assertEqual(self.window._displayed_item.image_path, second)
         finally:
             release.set()
         self.assertTrue(all(worker is not threading.main_thread() for worker in threads))
+
+    def test_cancelled_root_reservation_waiter_exits_while_owner_remains_held(self):
+        first, second, unrelated = (self.base / name for name in ('A', 'B', 'C'))
+        owner_entered, release = threading.Event(), threading.Event()
+        waiter_done, unrelated_done = threading.Event(), threading.Event()
+        owner_cancel, waiter_cancel = threading.Event(), threading.Event()
+        results = []
+        def hold():
+            with self.window._reserve_cache_roots((second, first), owner_cancel):
+                owner_entered.set()
+                release.wait(3)
+        def wait_for_owner():
+            try:
+                with self.window._reserve_cache_roots((first, second), waiter_cancel):
+                    results.append('unexpectedly acquired occupied roots')
+            except InterruptedError:
+                results.append('cancelled')
+            finally:
+                waiter_done.set()
+        def open_unrelated():
+            with self.window._reserve_cache_roots((unrelated,), threading.Event()):
+                unrelated_done.set()
+        owner = threading.Thread(target=hold, name='test-reservation-owner')
+        waiter = threading.Thread(target=wait_for_owner, name='test-reservation-waiter')
+        other = threading.Thread(target=open_unrelated, name='test-unrelated-reservation')
+        owner.start()
+        try:
+            self.assertTrue(owner_entered.wait(1))
+            waiter.start()
+            other.start()
+            self.assertTrue(unrelated_done.wait(1), 'Unrelated root must not wait for the held owner')
+            waiter_cancel.set()
+            self.assertTrue(waiter_done.wait(1), 'Cancelled waiter must leave before the owner is released')
+            self.assertFalse(release.is_set())
+            self.assertEqual(results, ['cancelled'])
+        finally:
+            release.set()
+            for worker in (owner, waiter, other):
+                if worker.ident is not None:
+                    worker.join(2)
+            self.assertTrue(all(not worker.is_alive() for worker in (owner, waiter, other)))
 
     def test_deep_verification_cancels_on_folder_change_without_closing_its_cache(self):
         first, second = self.picture('A/first.jpg'), self.picture('B/second.jpg')
