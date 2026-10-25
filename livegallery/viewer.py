@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import math
 import time
+import weakref
+from contextlib import contextmanager
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QEvent, QPointF, QRectF, Qt, QTimer, QUrl, QVariantAnimation, Signal
@@ -35,6 +37,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QWidget,
 )
+from shiboken6 import isValid
 
 from .native_touch import TouchContextMenuGuard, install_image_touch_filter
 from .ui_theme import tokens_for
@@ -56,6 +59,10 @@ class ViewerCanvas(QGraphicsView):
     playback_changed = Signal(bool)
     message = Signal(str)
     controls_toggled = Signal()
+    view_changed = Signal()
+    interaction_cancelled = Signal()
+    remote_context_menu_requested = Signal(object, QPointF)
+    _DIRECT_INPUT = object()
 
     def apply_theme(self, colors):
         self.setBackgroundBrush(QColor(colors['canvas']))
@@ -189,12 +196,117 @@ class ViewerCanvas(QGraphicsView):
         self._touch_context_cancelled = False
         self._blank_context_seen = False
         self._last_physical_right_press = 0.0
+        self._input_owner = None
+        self._last_input_source = None
+        self._dispatch_owner = None
+        self._preserve_input_reset = 0
+        self._input_epoch = 0
+        self._window_group = weakref.WeakSet()
+        self._group_check_pending = False
         self._native_touch_filter = install_image_touch_filter(self)
         self.zoom_navigator = ZoomNavigator(self.viewport())
         self.zoom_navigator.apply_theme(tokens_for(self))
         self.zoom_navigator.interactionStarted.connect(self._begin_navigator_interaction)
         self.zoom_navigator.centerRequested.connect(self._navigate_from_thumbnail)
+        self.zoom_navigator.installEventFilter(self)
         self.zoom_changed.connect(self._update_zoom_navigator)
+
+    def set_window_group(self, windows) -> None:
+        """Declare application-owned control windows, without activating one."""
+        for window in self._window_group:
+            if isValid(window) and window is not self._window_filter_target:
+                window.removeEventFilter(self)
+        QApplication.instance().removeEventFilter(self)
+        self._window_group = weakref.WeakSet(window for window in windows if window is not None and isValid(window))
+        for window in self._window_group:
+            window.installEventFilter(self)
+        if self._window_group:
+            QApplication.instance().installEventFilter(self)
+
+    def is_window_group_active(self) -> bool:
+        return (bool(self._window_group) and QApplication.applicationState() == Qt.ApplicationState.ApplicationActive
+                and QApplication.activeModalWidget() is None
+                and QApplication.activeWindow() in self._window_group)
+
+    def defer_group_focus_check(self) -> None:
+        if not self._window_group:
+            self.cancel_interaction()
+        elif not self._group_check_pending:
+            self._group_check_pending = True
+            QTimer.singleShot(0, self._check_group_focus)
+
+    def _check_group_focus(self):
+        if not isValid(self):
+            return
+        self._group_check_pending = False
+        if not self.is_window_group_active():
+            self._cancel_zoom_animation()
+            self.zoom_navigator.cancel_interaction()
+            self.cancel_interaction()
+
+    def cancel_interaction(self) -> None:
+        self.stop_live()
+        self.zoom_navigator.cancel_interaction()
+
+    def _claim_input(self, owner) -> bool:
+        if self._input_owner is not None and self._input_owner is not owner:
+            return False
+        if owner is not self._DIRECT_INPUT and self.zoom_navigator._dragging:
+            return False
+        if self._last_input_source is not owner:
+            self._last_mouse_click_time = self._last_tap_time = 0.0
+            self._last_mouse_click_timestamp = self._last_tap_timestamp = 0
+            self._last_mouse_click_device = self._last_tap_device = None
+        self._input_owner = self._last_input_source = owner
+        return True
+
+    def _release_input(self, owner) -> None:
+        if self._input_owner is owner:
+            self._input_owner = None
+
+    @contextmanager
+    def _remote_dispatch(self, owner):
+        previous = self._dispatch_owner
+        self._dispatch_owner = owner
+        try:
+            yield
+        finally:
+            self._dispatch_owner = previous
+
+    def begin_remote_input(self, owner) -> bool:
+        return self._claim_input(owner)
+
+    def end_remote_input(self, owner) -> None:
+        self._release_input(owner)
+
+    def remote_touch(self, owner, event) -> bool:
+        """Consume explicit mapped logical points; never send an OS event."""
+        if self._input_owner is not owner:
+            return False
+        with self._remote_dispatch(owner):
+            result = self._touch_event(event)
+        if event.type() in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            self._release_input(owner)
+        return result
+
+    def remote_mouse(self, owner, event) -> bool:
+        if self._input_owner is not owner:
+            return False
+        handlers = {QEvent.Type.MouseButtonPress: self.mousePressEvent,
+                    QEvent.Type.MouseButtonDblClick: self.mouseDoubleClickEvent,
+                    QEvent.Type.MouseMove: self.mouseMoveEvent,
+                    QEvent.Type.MouseButtonRelease: self.mouseReleaseEvent}
+        with self._remote_dispatch(owner):
+            handlers[event.type()](event)
+        return True
+
+    def remote_wheel(self, owner, event) -> bool:
+        if not self._claim_input(owner):
+            return False
+        with self._remote_dispatch(owner):
+            self.wheelEvent(event)
+        self._release_input(owner)
+        return True
 
     def set_photo(self, image: QImage, video_path: Path | None = None) -> None:
         """Replace the current image, cancelling every pending playback request."""
@@ -237,6 +349,8 @@ class ViewerCanvas(QGraphicsView):
         if self.is_zoom_animating():
             self._deferred_photo = QImage(image)
             return
+        if self._input_owner is not None:
+            self.cancel_interaction()
         if self._image_rect.isEmpty():
             self.set_photo(image, self._video_path)
             return
@@ -355,6 +469,12 @@ class ViewerCanvas(QGraphicsView):
 
     def stop_live(self) -> None:
         """Synchronously return to the photo and invalidate late media events."""
+        preserve_owner = self._preserve_input_reset
+        self._preserve_input_reset = 0  # Only this contact reset; nested app actions cancel normally.
+        if not preserve_owner:
+            self._input_owner = self._last_input_source = None
+            self._input_epoch += 1
+            self.interaction_cancelled.emit()
         self._hold_timer.stop()
         self._blank_hold_timer.stop()
         self._click_timer.stop()
@@ -561,6 +681,7 @@ class ViewerCanvas(QGraphicsView):
         navigator.setVisible(not self._image_rect.isEmpty() and self.zoom_factor() > 1.001
                              and self.viewport().width() >= 48 and self.viewport().height() >= 48)
         navigator.raise_()
+        self.view_changed.emit()
 
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
@@ -634,6 +755,8 @@ class ViewerCanvas(QGraphicsView):
             self.zoom_animation_changed.emit(False)
 
     def resizeEvent(self, event: QResizeEvent) -> None:
+        if getattr(self, '_input_owner', None) is not None:
+            self.cancel_interaction()
         self._cancel_zoom_animation()
         old_size = event.oldSize()
         if old_size.isValid():
@@ -654,7 +777,15 @@ class ViewerCanvas(QGraphicsView):
             self.centerOn(old_center)
             self.zoom_changed.emit(self.zoom_factor())
 
+    def event(self, event):
+        if event.type() == QEvent.Type.DevicePixelRatioChange and getattr(self, '_input_owner', None) is not None:
+            self.cancel_interaction()
+        return super().event(event)
+
     def wheelEvent(self, event: QWheelEvent) -> None:
+        if self._input_owner is not None and self._input_owner is not (self._dispatch_owner or self._DIRECT_INPUT):
+            event.accept()
+            return
         phase = event.phase()
         if phase == Qt.ScrollPhase.ScrollBegin:
             self._reset_horizontal_wheel()
@@ -682,13 +813,12 @@ class ViewerCanvas(QGraphicsView):
         if self._image_rect.isEmpty():
             self._reset_horizontal_wheel()
             return
-        if self._horizontal_scroll_mode == "pan":
+        if self._horizontal_scroll_mode == "pan" and self.zoom_factor() > 1.001:
             self._reset_horizontal_wheel()
-            if not self._fit_mode:
-                # Qt's positive X moves content right (scrolls toward the
-                # left). Windows has already negated WM_MOUSEHWHEEL here.
-                pixels = amount if unit == "pixel" else amount / 120 * 60
-                self._pan_by(QPointF(pixels, 0))
+            # Qt's positive X moves content right (scrolls toward the left).
+            # At fit there is no horizontal pan: every setting navigates.
+            pixels = amount if unit == "pixel" else amount / 120 * 60
+            self._pan_by(QPointF(pixels, 0))
             return
         now = time.monotonic()
         if (unit != self._horizontal_wheel_unit
@@ -757,7 +887,8 @@ class ViewerCanvas(QGraphicsView):
         position = event.position()
         self._stop_playback()
         self._hold_timer.stop()
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        if self._dispatch_owner is None:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
         self._mouse_down = True
         self._mouse_moved = False
         self._mouse_double_drag = double_drag
@@ -776,10 +907,13 @@ class ViewerCanvas(QGraphicsView):
             self._last_mouse_click_device = None
         elif self._video_path is not None and self.image_contains_viewport_point(position):
             self._hold_timer.start(self._hold_ms)
-        if self.isVisible():
+        if self.isVisible() and self._dispatch_owner is None:
             self.viewport().grabMouse()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self._input_owner is not None and self._input_owner is not (self._dispatch_owner or self._DIRECT_INPUT):
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.RightButton and not self._is_synthesized_mouse(event):
             # Real mouse right-click remains available even immediately after
             # touching an image. Windows touch-generated mouse events are
@@ -793,10 +927,16 @@ class ViewerCanvas(QGraphicsView):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
+        if not self._claim_input(self._dispatch_owner or self._DIRECT_INPUT):
+            event.accept()
+            return
         self._begin_mouse_press(event, double_drag=self._is_double_drag_press(event))
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._input_owner is not None and self._input_owner is not (self._dispatch_owner or self._DIRECT_INPUT):
+            event.accept()
+            return
         if self._ignore_mouse(event):
             event.accept()
             return
@@ -810,7 +950,8 @@ class ViewerCanvas(QGraphicsView):
                     self._stop_playback()
                 self._mouse_moved = True
             if self._mouse_moved and not self._fit_mode:
-                self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                if self._dispatch_owner is None:
+                    self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
                 self._pan_by(position - self._pointer_last)
             self._pointer_last = QPointF(position)
             event.accept()
@@ -818,6 +959,10 @@ class ViewerCanvas(QGraphicsView):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        owner = self._dispatch_owner or self._DIRECT_INPUT
+        if self._input_owner is not None and self._input_owner is not owner:
+            event.accept()
+            return
         if self._ignore_mouse(event):
             event.accept()
             return
@@ -835,6 +980,7 @@ class ViewerCanvas(QGraphicsView):
                 self._stop_playback()
             self._release_capture()
             self.viewport().unsetCursor()
+            self._release_input(owner)
             if double_drag and not self._mouse_moved:
                 # A completed second click zooms; moving while held pans at
                 # the original scale instead. Decide only on button-up.
@@ -861,6 +1007,9 @@ class ViewerCanvas(QGraphicsView):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
+            if not self._claim_input(self._dispatch_owner or self._DIRECT_INPUT):
+                event.accept()
+                return
             self._click_timer.stop()
             if not self._fit_mode or self._mouse_double_drag:
                 # The native DoubleClick itself identifies the second contact;
@@ -895,6 +1044,10 @@ class ViewerCanvas(QGraphicsView):
         self._hold_consumed = True
         self._last_tap_time = 0.0
         position = self._pointer_start.toPoint()
+        if self._input_owner is not None and self._input_owner is not self._DIRECT_INPUT:
+            self._blank_context_seen = True
+            self.remote_context_menu_requested.emit(self._input_owner, QPointF(position))
+            return
         # Accepting TouchBegin is necessary to receive blank-area swipes. On
         # systems that then omit the promoted mouse context event, retain the
         # normal right-click action using the platform's press-and-hold timing.
@@ -914,17 +1067,30 @@ class ViewerCanvas(QGraphicsView):
     def viewportEvent(self, event: QEvent) -> bool:
         event_type = event.type()
         context_guard = None
+        if (event_type == QEvent.Type.ContextMenu and self._input_owner is not None
+                and self._input_owner is not self._DIRECT_INPUT):
+            event.accept()
+            return True
         if event_type in (
             QEvent.Type.TouchBegin,
             QEvent.Type.TouchUpdate,
             QEvent.Type.TouchEnd,
             QEvent.Type.TouchCancel,
         ):
+            if event_type == QEvent.Type.TouchBegin and not self._claim_input(self._DIRECT_INPUT):
+                event.accept()
+                return True
+            if self._input_owner is not None and self._input_owner is not self._DIRECT_INPUT:
+                event.accept()
+                return True
             if self._touch_event(event):
+                if event_type in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+                    self._release_input(self._DIRECT_INPUT)
                 event.accept()
                 return True
             # Empty canvas leaves all normal system gestures available.
             event.ignore()
+            self._release_input(self._DIRECT_INPUT)
             return super().viewportEvent(event)
         if event_type == QEvent.Type.ContextMenu and self._suppress_touch_context(event):
             # This precedes QWidget's CustomContextMenu handling, which would
@@ -990,12 +1156,20 @@ class ViewerCanvas(QGraphicsView):
                 second_drag = (self._recent_contact(event, self._last_tap_time,
                                                     self._last_tap_timestamp, self._last_tap_device)
                                and max(abs(delta.x()), abs(delta.y())) <= distance)
-            self.stop_live()
+            epoch = self._input_epoch
+            self._preserve_input_reset = 1
+            try:
+                self.stop_live()
+            finally:
+                self._preserve_input_reset = 0
+            if self._input_epoch != epoch:
+                return True  # A synchronous playback callback replaced/cancelled the source.
             if not second_drag:
                 # Starting the next contact is the sole cancellation path that
                 # may retain the preceding tap for a fit-mode double-click.
                 self._last_tap_time, self._last_tap_timestamp, self._last_tap_device = previous_tap
-            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            if self._dispatch_owner is None:
+                self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._touch_active = True
             self._touch_had_multi = False
             self._touch_double_drag = second_drag
@@ -1148,37 +1322,61 @@ class ViewerCanvas(QGraphicsView):
             super().contextMenuEvent(event)
 
     def focusOutEvent(self, event) -> None:
-        self._cancel_zoom_animation()
-        self.zoom_navigator.cancel_interaction()
-        self.stop_live()
+        if self._window_group:
+            self.defer_group_focus_check()
+        else:
+            self._cancel_zoom_animation()
+            self.zoom_navigator.cancel_interaction()
+            self.stop_live()
         super().focusOutEvent(event)
 
     def leaveEvent(self, event) -> None:
         # A held pointer leaving the canvas must not leave media running when a
         # release is consumed by a system gesture or a different application.
-        if not self._play_once:
+        remote = self._input_owner is not None and self._input_owner is not self._DIRECT_INPUT
+        grouped_idle = self._window_group and not self._mouse_down and not self._touch_active
+        if not self._play_once and not remote and not grouped_idle:
             self.stop_live()
         super().leaveEvent(event)
 
     def hideEvent(self, event) -> None:
         self._cancel_zoom_animation()
         self.stop_live()
+        self.view_changed.emit()
         super().hideEvent(event)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         target = self.window()
         if self._window_filter_target is not target:
-            if self._window_filter_target is not None:
-                self._window_filter_target.removeEventFilter(self)
+            if self._window_filter_target is not None and isValid(self._window_filter_target):
+                if self._window_filter_target not in self._window_group:
+                    self._window_filter_target.removeEventFilter(self)
             self._window_filter_target = target
             target.installEventFilter(self)
+        self.view_changed.emit()
 
     def eventFilter(self, watched, event: QEvent) -> bool:
+        if self._window_group:
+            if event.type() == QEvent.Type.ApplicationDeactivate:
+                self.cancel_interaction()
+            elif event.type() == QEvent.Type.WindowDeactivate and watched in self._window_group:
+                self.defer_group_focus_check()
+            elif event.type() == QEvent.Type.Show and QApplication.activeModalWidget() is not None:
+                self.defer_group_focus_check()
+        if watched is self.zoom_navigator and self._input_owner is not None and self._input_owner is not self._DIRECT_INPUT:
+            if event.type() in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate, QEvent.Type.TouchEnd,
+                                QEvent.Type.TouchCancel, QEvent.Type.MouseButtonPress, QEvent.Type.MouseMove,
+                                QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick):
+                event.accept()
+                return True
         if watched is self._window_filter_target and event.type() in (
             QEvent.Type.WindowDeactivate,
             QEvent.Type.Hide,
             QEvent.Type.Close,
         ):
-            self.stop_live()
+            if event.type() == QEvent.Type.WindowDeactivate and self._window_group:
+                self.defer_group_focus_check()
+            else:
+                self.cancel_interaction()
         return super().eventFilter(watched, event)

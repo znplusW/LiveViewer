@@ -32,10 +32,11 @@ class FilmstripPanel(QFrame):
         body.setContentsMargins(8, 3, 8, 5)
         body.setSpacing(3)
         buttons = QHBoxLayout()
+        self._button_layout = buttons
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(5)
         buttons.addStretch()
-        self.hide_button = self._button('隐藏胶片条', font_size=21)
+        self.hide_button = self._button('关闭胶片条', font_size=21)
         self.hide_button.setObjectName('filmCollapse')
         self.hide_button.clicked.connect(self.hideRequested)
         buttons.addWidget(self.hide_button)
@@ -84,19 +85,21 @@ class FilmstripPanel(QFrame):
         # QSS dimensions are the content box. Keep its 1px border explicit:
         # a smaller min-height overrides setFixedSize again on style polish.
         button.setStyleSheet(
-            'padding:0;min-width:36px;max-width:36px;min-height:32px;max-height:32px;'
+            'QPushButton { padding:0;min-width:36px;max-width:36px;min-height:32px;max-height:32px;'
             'border-width:1px;border-style:solid;border-radius:5px;'
-            f'font-size:{font_size}px;')
+            f'font-size:{font_size}px; }}')
         button.setAccessibleName(name)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return button
 
     def _request_orientation(self):
-        self.layoutRequested.emit('vertical' if self.orientation == 'horizontal' else 'horizontal', self.side)
+        if self.orientation == 'horizontal':
+            self.layoutRequested.emit('vertical', 'right')
+        else:
+            self.layoutRequested.emit('horizontal', self.side)
 
     def _request_side(self):
-        if self.orientation == 'vertical':
-            self.layoutRequested.emit('vertical', 'left' if self.side == 'right' else 'right')
+        self.layoutRequested.emit('vertical', 'left' if self.orientation == 'horizontal' or self.side == 'right' else 'right')
 
     def set_info_visible(self, visible):
         self._info.setVisible(bool(visible))
@@ -125,17 +128,29 @@ class FilmstripPanel(QFrame):
 
     def _configure(self):
         horizontal = self.orientation == 'horizontal'
+        self.strip.setLayoutDirection(Qt.LayoutDirection.RightToLeft
+                                      if not horizontal and self.side == 'left'
+                                      else Qt.LayoutDirection.LeftToRight)
+        while self._button_layout.count():
+            self._button_layout.takeAt(0)
+        self._button_layout.addStretch()
+        order = ((self.side_button, self.hide_button, self.orientation_button) if horizontal else
+                 (self.side_button, self.orientation_button, self.hide_button) if self.side == 'right' else
+                 (self.hide_button, self.orientation_button, self.side_button))
+        for button in order:
+            self._button_layout.addWidget(button)
+        self._button_layout.addStretch()
         self.strip.set_scroll_axis(self.orientation)
         self.strip.setFlow(QListView.Flow.LeftToRight if horizontal else QListView.Flow.TopToBottom)
         self.strip.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded if horizontal else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.strip.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff if horizontal else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.hide_button.setText('↓' if horizontal else '←' if self.side == 'left' else '→')
-        self.hide_button.setToolTip('隐藏胶片条')
-        self.orientation_button.setText('竖排' if horizontal else '横排')
-        self.orientation_button.setToolTip('改为竖向胶片条' if horizontal else '改为底部横向胶片条')
-        self.side_button.setText('左侧' if self.side == 'right' else '右侧')
-        self.side_button.setToolTip('移到照片左侧' if self.side == 'right' else '移到照片右侧')
-        self.side_button.setVisible(not horizontal)
+        self.hide_button.setText('X')
+        self.hide_button.setToolTip('关闭胶片条')
+        self.orientation_button.setText('右侧' if horizontal else '底部')
+        self.orientation_button.setToolTip('移到照片右侧' if horizontal else '移到照片底部')
+        self.side_button.setText('左侧' if horizontal or self.side == 'right' else '右侧')
+        self.side_button.setToolTip('移到照片左侧' if horizontal or self.side == 'right' else '移到照片右侧')
+        self.side_button.setVisible(True)
         self._outer.removeWidget(self.resize_handle)
         self._outer.removeWidget(self._body)
         for number in (0, 1):

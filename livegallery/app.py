@@ -16,7 +16,7 @@ from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Sig
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPalette, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListView, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QScrollArea, QSizePolicy,
     QSpinBox, QSplitter, QStackedWidget, QStyle, QTextEdit, QTreeWidget, QTreeWidgetItem,
@@ -31,6 +31,8 @@ from .jobs import JobQueue
 from .folder_picker import select_photo_folders
 from .folder_tree import FolderTree
 from .filmstrip_panel import FilmstripPanel
+from .fullscreen_edge_gesture import FullscreenEdgeGesture
+from .detached_windows import FloatingMapWindow, PreviewWindow, TouchMapPanel
 from .library import _identifier, natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
@@ -114,6 +116,36 @@ class _FullscreenLiveBadge(QLabel):
                             QEvent.Type.Show):
             self.fit_contents()
         return handled
+
+
+class _PathLabel(QLabel):
+    """Keep the sidebar action next to a short label and elide long paths."""
+    def __init__(self, text):
+        self._full_text = text
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text):
+        self._full_text = str(text)
+        self.setAccessibleName(self._full_text)
+        self._elide()
+        self.updateGeometry()
+
+    def text(self):
+        return self._full_text
+
+    def _elide(self):
+        super().setText(self.fontMetrics().elidedText(self._full_text, Qt.TextElideMode.ElideMiddle, max(0, self.width())))
+
+    def sizeHint(self):
+        return QSize(min(430, self.fontMetrics().horizontalAdvance(self._full_text)), super().sizeHint().height())
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
 
 
 class FilenameField(QLineEdit):
@@ -274,6 +306,9 @@ class SettingsDialog(QDialog):
             self.theme_mode.addItem(label, mode)
         self.theme_mode.setCurrentIndex(max(0, self.theme_mode.findData(preferences.theme_mode)))
         appearance_form.addRow('界面主题', self.theme_mode)
+        from .fullscreen_gesture_selector import FullscreenGestureSelector
+        self.fullscreen_exit_gestures = FullscreenGestureSelector(preferences.fullscreen_exit_gestures)
+        appearance_form.addRow('退出全屏手势', self.fullscreen_exit_gestures)
         theme_help = QLabel('跟随系统时，自动响应 Windows 的应用外观变化。')
         theme_help.setObjectName('muted')
         theme_help.setWordWrap(True)
@@ -303,8 +338,8 @@ class SettingsDialog(QDialog):
         self.horizontal_scroll_mode = QComboBox()
         self.horizontal_scroll_mode.addItems(["切换上一张／下一张", "放大后左右移动画面"])
         self.horizontal_scroll_mode.setCurrentIndex(1 if preferences.horizontal_scroll_mode == "pan" else 0)
-        form.addRow("拇指／水平滚轮", self.horizontal_scroll_mode)
-        horizontal_help = QLabel("设置水平滚轮的用途：切换照片，或在放大后左右移动画面。部分鼠标需要在自带软件中将拇指滚轮设为“水平滚动”。垂直滚轮仍用于缩放图片。")
+        form.addRow("放大时水平滚轮", self.horizontal_scroll_mode)
+        horizontal_help = self.horizontal_scroll_help = QLabel("未放大时，水平滚轮始终切换上一张／下一张；放大后按此设置切换照片或左右移动画面。部分鼠标需要在自带软件中将拇指滚轮设为“水平滚动”。垂直滚轮仍用于缩放图片。")
         horizontal_help.setWordWrap(True)
         horizontal_help.setObjectName("muted")
         form.addRow(horizontal_help)
@@ -384,7 +419,7 @@ class SettingsDialog(QDialog):
         outer.addWidget(buttons)
         self._wheel_guard = SettingsWheelGuard(scroll)
         self._wheel_guard.protect(self.theme_mode, self.mode, self.zoom_mode, self.horizontal_scroll_mode,
-                                  self.cache_location, self.hold, self.cache)
+                                  self.cache_location, self.fullscreen_exit_gestures, self.hold, self.cache)
         screen = self.screen()
         available_height = screen.availableGeometry().height() if screen else 900
         self.resize(620, min(850, max(420, available_height - 70)))
@@ -510,6 +545,12 @@ class MainWindow(QMainWindow):
         self._keyboard_live_key = None
         self._chrome_visible = True
         self._fullscreen_active = False
+        self._detached = False
+        self.preview_window = None
+        self.touch_map_panel = None
+        self.touch_map_window = None
+        self._map_visible = False
+        self._detached_generation = 0
         self._pre_fullscreen_geometry = None
         self._pre_fullscreen_maximized = False
         self._disk_missing = False
@@ -548,6 +589,11 @@ class MainWindow(QMainWindow):
         self._grid_size_save_timer.timeout.connect(self._save_preferences)
         self.grid.thumbnail_size_changed.connect(self._overview_size_changed)
         QApplication.instance().installEventFilter(self)
+        self.fullscreen_edge_gesture = FullscreenEdgeGesture(self._window_group,
+            cancel_active=self._cancel_viewer_input, parent=self,
+            enabled_edges=self.preferences.fullscreen_exit_gestures)
+        self.fullscreen_edge_gesture.escapeRequested.connect(self._fullscreen_edge_escape)
+        QApplication.instance().screenRemoved.connect(self._recover_auxiliary_windows)
         self._update_hint()
         self.statusBar().showMessage("本地浏览 · JPG / JPEG / HEIC + MOV · 支持触屏与普通图片")
         bind_theme(self, self._apply_theme)
@@ -563,6 +609,9 @@ class MainWindow(QMainWindow):
         self.grid.viewport().update()
         self.strip.viewport().update()
         self.film_resize_handle.update()
+        if self.touch_map_panel is not None:
+            self.touch_map_panel.surface.apply_theme(colors)
+            self.touch_map_panel.resize_handle.update()
 
     @staticmethod
     def _button(text, callback=None, *, checkable=False, name=None):
@@ -597,9 +646,8 @@ class MainWindow(QMainWindow):
         header.addStretch()
         self.open_button = self._button("＋  打开文件夹", self.choose_folder, name="primary")
         header.addWidget(self.open_button)
-        self.sidebar_button = self._button("文件夹", self._toggle_sidebar, checkable=True)
+        self.sidebar_button = self._button("隐藏列表", self._toggle_sidebar, checkable=True)
         self.sidebar_button.setChecked(True)
-        header.addWidget(self.sidebar_button)
         self.grid_button = self._button("▦  总览", self._toggle_grid, checkable=True)
         header.addWidget(self.grid_button)
         self.strip_button = self._button("胶片条", self._toggle_strip, checkable=True)
@@ -616,11 +664,18 @@ class MainWindow(QMainWindow):
         filters = QHBoxLayout(self.filterbar)
         filters.setContentsMargins(20, 10, 20, 10)
         filters.setSpacing(12)
-        self.path_label = QLabel("尚未选择文件夹")
+        self.path_label = _PathLabel("尚未选择文件夹")
         self.path_label.setObjectName("muted")
-        self.path_label.setMinimumWidth(120)
         self.path_label.setMaximumWidth(430)
-        filters.addWidget(self.path_label, 1)
+        self.path_group = QWidget()
+        self.path_group.setMaximumWidth(430)
+        path_layout = QHBoxLayout(self.path_group)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(6)
+        path_layout.addWidget(self.path_label)
+        path_layout.addWidget(self.sidebar_button)
+        path_layout.addStretch()
+        filters.addWidget(self.path_group, 1)
         self.search = QLineEdit()
         self.search.setPlaceholderText("搜索文件名或路径…")
         self.search.setClearButtonEnabled(True)
@@ -695,6 +750,11 @@ class MainWindow(QMainWindow):
         self.live_badge.setObjectName("liveBadge")
         self.live_badge.hide()
         info.addWidget(self.live_badge)
+        self.detach_button = self._button('独立预览窗', self._toggle_detached_preview)
+        info.addWidget(self.detach_button)
+        self.map_button = self._button('虚拟触控板', self._toggle_touch_map, checkable=True)
+        self.map_button.setVisible(False)
+        info.addWidget(self.map_button)
         self.counter_label = QLabel("0 / 0")
         self.counter_label.setObjectName("muted")
         info.addWidget(self.counter_label)
@@ -756,7 +816,12 @@ class MainWindow(QMainWindow):
         self._photo_layout = QHBoxLayout(self.photo_area)
         self._photo_layout.setContentsMargins(0, 0, 0, 0)
         self._photo_layout.setSpacing(0)
-        self._photo_layout.addWidget(self.content, 1)
+        self._content_host = QWidget()
+        self._content_layout = QGridLayout(self._content_host)
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(0)
+        self._content_layout.addWidget(self.content, 0, 0)
+        self._photo_layout.addWidget(self._content_host, 1)
         right_layout.addWidget(self.photo_area, 1)
 
         self.viewer_tools = QFrame()
@@ -808,6 +873,281 @@ class MainWindow(QMainWindow):
         self.content.currentChanged.connect(self._update_live_overlay)
         self.film.setVisible(self._remembered_strip)
         self._update_navigation()
+
+    def _current_image_available(self):
+        item = self._displayed_item
+        return bool(item is not None and item.id == self._current_id
+                    and self._shown_image_path == item.image_path and not self.viewer._photo.pixmap().isNull())
+
+    def _photo_visible(self):
+        if self._detached:
+            return (self.preview_window is not None and self.preview_window.isVisible()
+                    and not self.preview_window.isMinimized()
+                    and self.preview_window.content.currentWidget() is self.viewer)
+        return not self._grid_mode and not self.isMinimized() and self.content.currentWidget() is self.viewer
+
+    def _window_group(self):
+        return tuple(window for window in (self, self.preview_window, self.touch_map_window)
+                     if window is not None)
+
+    def _update_window_group(self):
+        if hasattr(self.viewer, 'set_window_group'):
+            self.viewer.set_window_group(self._window_group() if self._detached else ())
+
+    def _cancel_viewer_input(self):
+        self.viewer._cancel_zoom_animation()
+        self._keyboard_live_pressed = False
+        self._keyboard_live_key = None
+        self._autoplay_armed = False
+        if hasattr(self.viewer, 'cancel_interaction'):
+            self.viewer.cancel_interaction()
+        else:
+            self.viewer.stop_live()
+        if self.touch_map_panel is not None:
+            self.touch_map_panel.surface.cancel_interaction()
+
+    def _check_group_focus(self):
+        if self._closed:
+            return
+        active = QApplication.activeWindow()
+        if QApplication.activeModalWidget() is not None or (active is not None and active not in self._window_group()):
+            self._cancel_viewer_input()
+        elif hasattr(self.viewer, 'defer_group_focus_check'):
+            self.viewer.defer_group_focus_check()
+
+    def _remember_auxiliary_geometry(self, which, geometry, screen):
+        setattr(self.preferences, which + '_geometry', geometry)
+        setattr(self.preferences, which + '_screen', screen)
+        self._save_preferences()
+
+    def _view_identity(self):
+        return (self._selection_generation, self._current_id, self._shown_image_path,
+                self.viewer._photo.pixmap().cacheKey())
+
+    def _restore_view_after_move(self, transform, center, was_fit, generation, identity):
+        if self._closed or generation != self._detached_generation or identity != self._view_identity():
+            return
+        if not self.viewer._image_rect.isEmpty():
+            if was_fit:
+                self.viewer._fit_view()
+            else:
+                self.viewer.setTransform(transform)
+                self.viewer.centerOn(center)
+                self.viewer._fit_mode = False
+                self.viewer.zoom_changed.emit(self.viewer.zoom_factor())
+
+    def _toggle_detached_preview(self):
+        if self._detached:
+            self._redock_preview()
+        elif self._displayed_item is not None:
+            self._detach_preview()
+
+    def _detach_preview(self):
+        if self._detached or self._displayed_item is None:
+            return
+        if self._fullscreen_active:
+            self._exit_fullscreen()
+        self._cancel_viewer_input()
+        transform, center, fitted = QTransform(self.viewer.transform()), self.viewer._scene_center(), self.viewer._fit_mode
+        identity = self._view_identity()
+        self._detached_generation += 1
+        generation = self._detached_generation
+        preview = self.preview_window = PreviewWindow()
+        preview.returnRequested.connect(self._redock_preview)
+        preview.geometryRemembered.connect(lambda geometry, screen: self._remember_auxiliary_geometry('preview', geometry, screen))
+        preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        preview.customContextMenuRequested.connect(lambda position: self._item_menu(preview.mapToGlobal(position)))
+        self._detached = True
+        self.content.removeWidget(self.viewer)
+        preview.attach_viewer(self.viewer)
+        preview.restore_saved_geometry(self.preferences.preview_geometry, QSize(1000, 740))
+        self.grid_button.setChecked(True)
+        self._toggle_grid(True)
+        self.grid_button.setEnabled(False)
+        self.detach_button.setText('收回预览窗')
+        self.map_button.setVisible(True)
+        self.map_button.setChecked(False)
+        self._update_window_group()
+        preview.show()
+        self._sync_preview_state()
+        QTimer.singleShot(0, lambda: self._restore_view_after_move(transform, center, fitted, generation, identity))
+
+    def _redock_preview(self, *, activate=True):
+        if not self._detached or self.preview_window is None:
+            return
+        self._cancel_viewer_input()
+        preview = self.preview_window
+        preview._remember_geometry()
+        transform, center, fitted = QTransform(self.viewer.transform()), self.viewer._scene_center(), self.viewer._fit_mode
+        identity = self._view_identity()
+        self._detached_generation += 1
+        generation = self._detached_generation
+        self._hide_touch_map()
+        if self.touch_map_window is not None:
+            panel = self.touch_map_window.take_panel()
+            if panel is not None:
+                panel.setParent(self._content_host)
+                panel.hide()
+            self.touch_map_window.shutdown()
+            self.touch_map_window.deleteLater()
+            self.touch_map_window = None
+        preview.take_viewer()
+        self._detached = False
+        self.preview_window = None
+        self.content.addWidget(self.viewer)
+        self.grid_button.setEnabled(True)
+        self.grid_button.setChecked(False)
+        self._toggle_grid(False)
+        self.detach_button.setText('独立预览窗')
+        self.map_button.hide()
+        preview.shutdown()
+        preview.deleteLater()
+        self._update_window_group()
+        self._update_live_overlay()
+        if activate:
+            self.activateWindow()
+            self.viewer.setFocus(Qt.FocusReason.OtherFocusReason)
+        QTimer.singleShot(0, lambda: self._restore_view_after_move(transform, center, fitted, generation, identity))
+
+    def _sync_preview_state(self):
+        if not self._detached or self.preview_window is None:
+            return
+        item = self._displayed_item
+        available = self._current_image_available()
+        message = self.empty_title.text() + '\n' + self.empty_body.text()
+        self.preview_window.show_photo_state(available, message, live=bool(item and item.is_live),
+                                             filename=item.image_path.name if item else '')
+
+    def _ensure_touch_map(self):
+        if self.touch_map_panel is not None:
+            return
+        from .reference_touch_map import ReferenceTouchMap
+        surface = ReferenceTouchMap(self.viewer)
+        surface.contextMenuRequested.connect(self._item_menu)
+        panel = self.touch_map_panel = TouchMapPanel(surface)
+        panel.dockRequested.connect(self._dock_touch_map)
+        panel.floatRequested.connect(self._float_touch_map)
+        panel.redockRequested.connect(lambda: self._dock_touch_map(self.preferences.map_dock_edge))
+        panel.returnPreviewRequested.connect(self._redock_preview)
+        panel.hideRequested.connect(self._hide_touch_map)
+        panel.thicknessRequested.connect(self._set_map_thickness)
+        surface.apply_theme(tokens_for(self))
+
+    def _toggle_touch_map(self, checked):
+        if not self._detached:
+            return
+        if not checked:
+            self._hide_touch_map()
+            return
+        self._ensure_touch_map()
+        self._map_visible = True
+        if self.preferences.map_floating:
+            self._float_touch_map()
+        else:
+            self._dock_touch_map(self.preferences.map_dock_edge)
+
+    def _hide_touch_map(self):
+        self._map_visible = False
+        self._content_host.setMinimumSize(0, 0)
+        self.map_button.setChecked(False)
+        if self.touch_map_panel is not None:
+            self.touch_map_panel.surface.cancel_interaction()
+            self.touch_map_panel.hide()
+        if self.touch_map_window is not None:
+            self.touch_map_window._remember_geometry()
+            self.touch_map_window.hide()
+
+    def _dock_touch_map(self, edge):
+        if not self._detached or edge not in ('left', 'right', 'bottom'):
+            return
+        self._ensure_touch_map()
+        panel = self.touch_map_panel
+        self._cancel_viewer_input()
+        if self.touch_map_window is not None:
+            self.touch_map_window._remember_geometry()
+            self.touch_map_window.take_panel()
+            self.touch_map_window.hide()
+        self._content_layout.removeWidget(panel)
+        self._content_layout.removeWidget(self.content)
+        for index in (0, 1):
+            self._content_layout.setRowStretch(index, 0)
+            self._content_layout.setColumnStretch(index, 0)
+        panel.set_mode(edge)
+        if edge == 'bottom':
+            self._content_layout.addWidget(self.content, 0, 0)
+            self._content_layout.addWidget(panel, 1, 0)
+            self._content_layout.setRowStretch(0, 1)
+            self._content_layout.setColumnStretch(0, 1)
+        else:
+            column = 0 if edge == 'left' else 1
+            self._content_layout.addWidget(panel, 0, column)
+            self._content_layout.addWidget(self.content, 0, 1 - column)
+            self._content_layout.setColumnStretch(1 - column, 1)
+            self._content_layout.setRowStretch(0, 1)
+        self.preferences.map_dock_edge = edge
+        self.preferences.map_floating = False
+        self._map_visible = True
+        self.map_button.setChecked(True)
+        panel.show()
+        self._clamp_touch_map()
+        self._save_preferences()
+        self._update_window_group()
+
+    def _float_touch_map(self):
+        if not self._detached:
+            return
+        self._ensure_touch_map()
+        panel = self.touch_map_panel
+        self._cancel_viewer_input()
+        self._content_layout.removeWidget(panel)
+        self._content_host.setMinimumSize(0, 0)
+        panel.set_mode(self.preferences.map_dock_edge, floating=True)
+        if self.touch_map_window is None:
+            self.touch_map_window = FloatingMapWindow()
+            self.touch_map_window.hideRequested.connect(self._hide_touch_map)
+            self.touch_map_window.geometryRemembered.connect(
+                lambda geometry, screen: self._remember_auxiliary_geometry('map_float', geometry, screen))
+            self.touch_map_window.restore_saved_geometry(self.preferences.map_float_geometry, QSize(420, 420))
+        self.touch_map_window.attach_panel(panel)
+        self._map_visible = True
+        self.map_button.setChecked(True)
+        self.preferences.map_floating = True
+        self._update_window_group()
+        self.touch_map_window.show()
+        self._save_preferences()
+
+    def _set_map_thickness(self, requested):
+        if self.touch_map_panel is None or self.preferences.map_floating:
+            return
+        if self.preferences.map_dock_edge == 'bottom':
+            minimum = max(220, self.touch_map_panel.minimumSizeHint().height())
+            self.preferences.map_bottom_height = max(minimum, min(640, int(requested)))
+        else:
+            self.preferences.map_dock_width = max(240, min(720, int(requested)))
+        self.touch_map_panel.surface.cancel_interaction()
+        self._clamp_touch_map()
+        self._grid_size_save_timer.start()
+
+    def _clamp_touch_map(self):
+        if self.touch_map_panel is None or not self._map_visible or self.preferences.map_floating:
+            return
+        panel = self.touch_map_panel
+        if self.preferences.map_dock_edge == 'bottom':
+            minimum = max(220, panel.minimumSizeHint().height())
+            self._content_host.setMinimumSize(0, minimum + 160)
+            panel.setFixedHeight(max(minimum, min(self.preferences.map_bottom_height, self._content_host.height() - 160)))
+        else:
+            minimum = max(240, panel.minimumSizeHint().width())
+            self._content_host.setMinimumSize(minimum + 240, 0)
+            panel.setFixedWidth(max(minimum, min(self.preferences.map_dock_width, self._content_host.width() - 240)))
+
+    def _recover_auxiliary_windows(self, _screen=None):
+        if self._closed:
+            return
+        self._cancel_viewer_input()
+        for window in (self.preview_window, self.touch_map_window):
+            if window is not None:
+                window.recover_to_screens()
 
     def choose_folder(self):
         self._navigation_timer.stop()
@@ -1143,8 +1483,8 @@ class MainWindow(QMainWindow):
         self.model.thumbnails.clear()
         self.tree.clear()
         if not preserved:
-            self._grid_mode = False
-            self.grid_button.setChecked(False)
+            self.grid_button.setChecked(self._detached)
+            self._toggle_grid(self._detached)
             self._set_empty("正在扫描文件夹" if folders else "从一个文件夹开始",
                             "先建立文件索引，再按需载入照片与视频。\n可以随时选择其他文件夹取消本次扫描。" if folders
                             else "选择照片文件夹开始浏览。磁盘中的文件不会被移除。", "◌" if folders else "◉")
@@ -1414,7 +1754,8 @@ class MainWindow(QMainWindow):
         if self._shown_image_path is None and thumbnail is not None and not thumbnail.isNull():
             self.viewer.set_photo(thumbnail.toImage(), item.video_path)
             self._shown_image_path = item.image_path
-            self.content.setCurrentWidget(self.grid if self._grid_mode else self.viewer)
+            self.content.setCurrentWidget(self.grid if self._grid_mode or self._detached else self.viewer)
+            self._sync_preview_state()
         elif self._shown_image_path is None:
             self._set_empty("正在载入照片", item.image_path.name + "\n优先载入当前照片，其他照片不会阻塞浏览。", "◌")
         self._submit("image", str(item.image_path), lambda: _decode(item.image_path, 2000), 0,
@@ -1434,7 +1775,7 @@ class MainWindow(QMainWindow):
         else:
             self.viewer.set_photo(image, item.video_path)
         self._shown_image_path = item.image_path
-        self.content.setCurrentWidget(self.grid if self._grid_mode else self.viewer)
+        self.content.setCurrentWidget(self.grid if self._grid_mode or self._detached else self.viewer)
         self.filename_label.setText(item.image_path.name)
         self.live_badge.setVisible(item.is_live)
         self.live_badge.setText("! LIVE" if item.uncertain else "◉ LIVE")
@@ -1558,8 +1899,7 @@ class MainWindow(QMainWindow):
             if (self._closed or generation != self._selection_generation or item is None
                     or item.id != item_id or not item.is_live or not self._autoplay_armed
                     or not self.preferences.autoplay or self.viewer._play_requested
-                    or self._grid_mode or not self.isVisible() or self.isMinimized() or not self.viewer.isVisible()
-                    or self.content.currentWidget() is not self.viewer
+                    or not self.isVisible() or not self._photo_visible() or not self.viewer.isVisible()
                     or QApplication.activeModalWidget() is not None
                     or QApplication.activePopupWidget() is not None):
                 return
@@ -1740,7 +2080,7 @@ class MainWindow(QMainWindow):
         self.empty_title.setText(title)
         self.empty_body.setText(body)
         self.empty_icon.setText(icon)
-        if not self._grid_mode:
+        if not self._grid_mode and not self._detached:
             self.content.setCurrentWidget(self.empty_page)
         self._update_live_overlay()
 
@@ -1753,6 +2093,7 @@ class MainWindow(QMainWindow):
         self._toast_timer.start(6500)
 
     def _toggle_sidebar(self, checked):
+        self.sidebar_button.setText('隐藏列表' if checked else '显示列表')
         self.sidebar.setVisible(checked and not self._fullscreen_active)
 
     def _toggle_strip(self, checked):
@@ -1771,6 +2112,9 @@ class MainWindow(QMainWindow):
         self._toggle_strip(False)
 
     def _toggle_grid(self, checked):
+        if self._detached:
+            checked = True
+            self.grid_button.setChecked(True)
         self.viewer.stop_live()
         self._grid_mode = checked
         self.grid_button.setText("◧  单张" if checked else "▦  总览")
@@ -1779,7 +2123,7 @@ class MainWindow(QMainWindow):
             row = next((row for row, item in enumerate(self.model.items) if item.id == self._current_id), 0)
             if self.model.items:
                 self.grid.scrollTo(self.model.index(row), QAbstractItemView.ScrollHint.EnsureVisible)
-        elif self._displayed_item:
+        elif self._current_image_available() and not self._detached:
             self.content.setCurrentWidget(self.viewer)
         else:
             self.content.setCurrentWidget(self.empty_page)
@@ -1869,6 +2213,8 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, 'film'):
             QTimer.singleShot(0, self._clamp_film_height)
+        if hasattr(self, '_content_host'):
+            QTimer.singleShot(0, self._clamp_touch_map)
 
     def _clamp_film_height(self):
         if not self._closed and hasattr(self, 'film'):
@@ -1878,6 +2224,9 @@ class MainWindow(QMainWindow):
                 self._set_film_height(self.preferences.filmstrip_height, remember=False)
 
     def _grid_selected(self, index):
+        if self._detached:
+            self._select_row(index.row())
+            return
         self._grid_mode = False
         self.grid_button.setChecked(False)
         self._toggle_grid(False)
@@ -1885,6 +2234,10 @@ class MainWindow(QMainWindow):
 
     def _toggle_fullscreen(self):
         """Toggle immediately without ever revealing controls on hover."""
+        if self._detached and self.preview_window is not None:
+            self._cancel_viewer_input()
+            self.preview_window.toggle_fullscreen()
+            return
         if self._fullscreen_active:
             self._exit_fullscreen()
             return
@@ -1897,6 +2250,12 @@ class MainWindow(QMainWindow):
         self._set_chrome(False)
         self.showFullScreen()
         (self.grid if self._grid_mode else self.viewer).setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _fullscreen_edge_escape(self, window):
+        if window is self and self._fullscreen_active:
+            self._exit_fullscreen()
+        elif window is self.preview_window and window.isFullScreen():
+            window.toggle_fullscreen()
 
     def _exit_fullscreen(self):
         if not self._fullscreen_active:
@@ -1932,6 +2291,8 @@ class MainWindow(QMainWindow):
     def _update_live_overlay(self, *_args):
         if not hasattr(self, "fullscreen_live_badge"):
             return
+        self.detach_button.setEnabled(self._detached or self._displayed_item is not None)
+        self._sync_preview_state()
         self.fullscreen_live_badge.fit_contents()
         inset = (self.fullscreen_live_badge.geometry().bottom() + 8
                  if self._fullscreen_active and self.film.orientation == 'vertical' and self.film.side == 'left' else 0)
@@ -1948,6 +2309,8 @@ class MainWindow(QMainWindow):
             self.fullscreen_live_badge.raise_()
 
     def _toggle_controls(self):
+        if self._detached:
+            return
         if not self._fullscreen_active:
             self.strip_button.setChecked(not self.strip_button.isChecked())
             self._toggle_strip(self.strip_button.isChecked())
@@ -1976,6 +2339,8 @@ class MainWindow(QMainWindow):
         self.preferences.loop = dialog.mode.currentIndex() == 1
         self.preferences.theme_mode = dialog.theme_mode.currentData()
         self.theme_controller.set_mode(self.preferences.theme_mode)
+        self.preferences.fullscreen_exit_gestures = dialog.fullscreen_exit_gestures.selected_gestures()
+        self.fullscreen_edge_gesture.set_enabled_edges(self.preferences.fullscreen_exit_gestures)
         self.preferences.autoplay = dialog.autoplay.isChecked()
         self.preferences.muted = dialog.muted.isChecked()
         self.preferences.preserve_zoom = dialog.zoom_mode.currentIndex() == 0
@@ -2040,11 +2405,19 @@ class MainWindow(QMainWindow):
     def _item_menu(self, position):
         item = self._item_by_id(self._current_id)
         if item is None:
+            if self._detached:
+                menu = QMenu(self)
+                menu.addAction('收回预览窗', self._redock_preview)
+                menu.exec(position)
+                menu.deleteLater()
             return
         self._navigation_timer.stop()
         self._navigation_target_id = None
         self.viewer.stop_live()
         menu = QMenu(self)
+        if self._detached:
+            menu.addAction('收回预览窗', self._redock_preview)
+            menu.addSeparator()
         if item.is_live:
             menu.addAction("更改封面图…", lambda item=item: self._open_cover_editor(item))
         if item.is_live and len(item.candidates) > 1:
@@ -2386,25 +2759,36 @@ class MainWindow(QMainWindow):
         if self._closed:
             return False
         kind = event.type()
-        if kind in (QEvent.Type.WindowDeactivate, QEvent.Type.ApplicationDeactivate) and watched is self:
-            self._keyboard_live_pressed = False
-            self._autoplay_armed = False
-            self.viewer.stop_live()
+        if kind == QEvent.Type.ApplicationDeactivate:
+            self._cancel_viewer_input()
+        elif kind == QEvent.Type.WindowDeactivate and watched in self._window_group():
+            if self._detached:
+                QTimer.singleShot(0, self._check_group_focus)
+            else:
+                self._cancel_viewer_input()
+        elif self._detached and kind == QEvent.Type.Show and isinstance(watched, QDialog):
+            QTimer.singleShot(0, self._check_group_focus)
         if kind not in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
             return super().eventFilter(watched, event)
-        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
-            return False
-        active = QApplication.activeWindow()
-        if active is not None and active is not self:
-            return False
-        focus = QApplication.focusWidget()
-        editing = isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
-                                     QKeySequenceEdit, QComboBox))
         if kind == QEvent.Type.KeyRelease and self._keyboard_live_pressed:
             if event.key() == self._keyboard_live_key and not event.isAutoRepeat():
                 self._keyboard_live_pressed = False
                 self.viewer.release_live()
                 return True
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            return False
+        active = QApplication.activeWindow()
+        if active is not None and active not in self._window_group():
+            return False
+        focus = QApplication.focusWidget()
+        editing = isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox,
+                                     QKeySequenceEdit, QComboBox))
+        if (self._detached and self.preview_window is not None and self.preview_window.isFullScreen()
+                and kind == QEvent.Type.KeyPress
+                and (event.key() == Qt.Key.Key_Escape or _matches_shortcut(event, 'fullscreen'))):
+            if not event.isAutoRepeat():
+                self._toggle_fullscreen()
+            return True
         if kind == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape and self._fullscreen_active:
             if not event.isAutoRepeat():
                 self._exit_fullscreen()
@@ -2436,17 +2820,15 @@ class MainWindow(QMainWindow):
         matches_once = not self._once_sequence.isEmpty() and event.keyCombination() == self._once_sequence[0]
         if matches_once:
             if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
-                if (not self._grid_mode and self._displayed_item is not None
-                        and self.content.currentWidget() is self.viewer):
+                if self._displayed_item is not None and self._photo_visible():
                     self.viewer.play_live_once()
             return True
         matches_live = not self._live_sequence.isEmpty() and event.keyCombination() == self._live_sequence[0]
         if matches_live:
             if not event.isAutoRepeat():
                 if kind == QEvent.Type.KeyPress:
-                    if (not self._keyboard_live_pressed and not self._grid_mode
-                            and self._displayed_item is not None
-                            and self.content.currentWidget() is self.viewer):
+                    if (not self._keyboard_live_pressed and self._displayed_item is not None
+                            and self._photo_visible()):
                         self._keyboard_live_pressed = True
                         self._keyboard_live_key = event.key()
                         self.viewer.start_live()
@@ -2456,9 +2838,14 @@ class MainWindow(QMainWindow):
             return True
         if kind == QEvent.Type.KeyPress:
             zoom = _overview_zoom_direction(event.key(), event.modifiers())
-            if zoom and self._grid_mode and self.content.currentWidget() is self.grid:
-                self.grid.zoom_step(zoom)
-                return True
+            if zoom:
+                grid_focus = focus is self.grid or (focus is not None and self.grid.isAncestorOf(focus))
+                if self._grid_mode and self.content.currentWidget() is self.grid and (not self._detached or grid_focus):
+                    self.grid.zoom_step(zoom)
+                    return True
+                if self._detached and self._photo_visible():
+                    (self.viewer.zoom_in if zoom > 0 else self.viewer.zoom_out)()
+                    return True
             if _matches_shortcut(event, "previous"):
                 if event.isAutoRepeat():
                     self._queue_navigation(-1)
@@ -2475,6 +2862,10 @@ class MainWindow(QMainWindow):
                 self._toggle_fullscreen()
                 return True
             if event.key() == Qt.Key.Key_Escape:
+                if self._detached and active in (self.preview_window, self.touch_map_window):
+                    if not event.isAutoRepeat():
+                        self._redock_preview()
+                    return True
                 if not event.isAutoRepeat() and not self._grid_mode:
                     self.grid_button.setChecked(True)
                     self._toggle_grid(True)
@@ -2488,6 +2879,13 @@ class MainWindow(QMainWindow):
         if self._closed:
             super().closeEvent(event)
             return
+        self.fullscreen_edge_gesture.close()
+        if self._detached:
+            self._redock_preview(activate=False)
+        if self.touch_map_panel is not None:
+            self.touch_map_panel.surface.cancel_interaction()
+            self.touch_map_panel.deleteLater()
+            self.touch_map_panel = None
         self._save_preferences()
         self._closed = True
         self._scan_cancel.set()

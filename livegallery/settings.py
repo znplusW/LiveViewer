@@ -70,6 +70,15 @@ class Preferences:
     filmstrip_width: int = 220
     filmstrip_orientation: str = 'horizontal'
     filmstrip_side: str = 'right'
+    preview_geometry: str = ''
+    preview_screen: str = ''
+    map_float_geometry: str = ''
+    map_float_screen: str = ''
+    map_dock_edge: str = 'right'
+    map_dock_width: int = 320
+    map_bottom_height: int = 260
+    map_floating: bool = False
+    fullscreen_exit_gestures: list[str] = field(default_factory=lambda: ['left'])
     theme_mode: str = 'dark'
 
     def normalize_shortcuts(self):
@@ -158,6 +167,32 @@ class Preferences:
                 result.filmstrip_orientation = 'horizontal'
             if result.filmstrip_side not in ('left', 'right'):
                 result.filmstrip_side = 'right'
+            for name in ('preview_geometry', 'map_float_geometry'):
+                value = getattr(result, name)
+                if (not isinstance(value, str) or len(value) > 65536
+                        or any(character not in '0123456789abcdefABCDEF' for character in value)):
+                    setattr(result, name, '')
+            for name in ('preview_screen', 'map_float_screen'):
+                value = getattr(result, name)
+                if not isinstance(value, str) or '\0' in value:
+                    setattr(result, name, '')
+            if result.map_dock_edge not in ('left', 'right', 'bottom'):
+                result.map_dock_edge = 'right'
+            for name, default, minimum, maximum in (('map_dock_width', 320, 240, 720),
+                                                     ('map_bottom_height', 260, 220, 640)):
+                try:
+                    value = getattr(result, name)
+                    if isinstance(value, bool):
+                        raise ValueError('not a dimension')
+                    setattr(result, name, max(minimum, min(maximum, int(value))))
+                except (TypeError, ValueError):
+                    setattr(result, name, default)
+            if not isinstance(result.map_floating, bool):
+                result.map_floating = False
+            if not isinstance(result.fullscreen_exit_gestures, list):
+                result.fullscreen_exit_gestures = ['left']
+            result.fullscreen_exit_gestures = list(dict.fromkeys(
+                value for value in result.fullscreen_exit_gestures if value in ('top', 'left', 'right')))
             result.normalize_shortcuts()
             if not isinstance(result.filmstrip_visible, bool):
                 result.filmstrip_visible = True

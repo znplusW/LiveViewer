@@ -10,12 +10,12 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, Qt, QTimer, QUrl
+from PySide6.QtCore import QByteArray, QCoreApplication, QEvent, QPoint, QPointF, Qt, QTimer, QUrl
 from PySide6.QtGui import (QContextMenuEvent, QEventPoint, QImage, QInputDevice, QMouseEvent,
                            QPointingDevice, QTouchEvent, QWheelEvent)
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QtVideo
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QMenu
+from PySide6.QtWidgets import QApplication, QMenu, QWidget
 
 from livegallery.viewer import ViewerCanvas
 from livegallery.native_touch import (
@@ -688,14 +688,14 @@ class CanvasTests(unittest.TestCase):
         self.wheel(pixels=(1, 20))
         self.assertGreater(self.canvas.zoom_factor(), before)
 
-    def test_horizontal_pan_mode_moves_zoomed_image_and_consumes_at_fit(self):
+    def test_horizontal_pan_mode_moves_zoomed_image_and_navigates_at_fit(self):
         navigation = []
         self.canvas.navigate_requested.connect(navigation.append)
         self.canvas.set_options(horizontal_scroll_mode="pan")
         before = self.canvas._scene_center()
         self.assertTrue(self.wheel(angle=(-120, 0)).isAccepted())
         self.assertEqual(self.canvas._scene_center(), before)
-        self.assertEqual(navigation, [])
+        self.assertEqual(navigation, [1])
         self.canvas.zoom_in()
         self.canvas.zoom_in()
         before = self.canvas._scene_center()
@@ -707,10 +707,10 @@ class CanvasTests(unittest.TestCase):
         before = self.canvas._scene_center()
         self.wheel(pixels=(30, 0), inverted=True)
         self.assertLess(self.canvas._scene_center().x(), before.x())
-        self.assertEqual(navigation, [])
+        self.assertEqual(navigation, [1])
         self.canvas.set_options(horizontal_scroll_mode="invalid")
         self.wheel(angle=(-120, 0))
-        self.assertEqual(navigation, [1])
+        self.assertEqual(navigation, [1, 1])
 
     def test_empty_canvas_does_not_navigate_from_horizontal_wheel(self):
         navigation = []
@@ -719,6 +719,18 @@ class CanvasTests(unittest.TestCase):
         self.wheel(angle=(-120, 0))
         self.wheel(pixels=(100, 0))
         self.assertEqual(navigation, [])
+
+    def test_horizontal_pan_setting_still_navigates_when_small_photo_is_below_fit(self):
+        image = QImage(100, 100, QImage.Format.Format_RGB32)
+        image.fill('blue')
+        self.canvas.set_photo(image)
+        self.canvas.set_options(horizontal_scroll_mode='pan')
+        self.canvas._zoom_at(.5, self.canvas._viewport_center())
+        self.assertLess(self.canvas.zoom_factor(), 1)
+        navigation = []
+        self.canvas.navigate_requested.connect(navigation.append)
+        self.wheel(angle=(-120, 0))
+        self.assertEqual(navigation, [1])
 
     def test_pan_pinch_resize_hide_and_play_cancel_zoom_animation(self):
         def begin():
@@ -1172,6 +1184,36 @@ class CanvasTests(unittest.TestCase):
         QApplication.sendEvent(self.canvas.viewport(), image_menu)
         self.assertEqual(menus.count(), 2)
         QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.RightButton, pos=self.center)
+
+
+    def test_hidden_canvas_can_redock_after_old_preview_window_was_deleted(self):
+        old_window = QWidget()
+        self.canvas.setParent(old_window)
+        old_window.show()
+        self.canvas.show()
+        self.app.processEvents()
+        self.assertIs(self.canvas._window_filter_target, old_window)
+        self.canvas.hide()
+        self.canvas.setParent(None)
+        old_window.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        errors = []
+        with patch('sys.excepthook', side_effect=lambda *error: errors.append(error)):
+            self.canvas.show()
+            self.app.processEvents()
+        self.assertEqual(errors, [])
+        self.assertIs(self.canvas._window_filter_target, self.canvas)
+
+    def test_queued_group_focus_check_after_viewer_delete_has_no_qt_callback_error(self):
+        viewer = ViewerCanvas()
+        viewer.set_window_group([viewer])
+        viewer.defer_group_focus_check()
+        errors = []
+        with patch('sys.excepthook', side_effect=lambda *error: errors.append(error)):
+            viewer.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.app.processEvents()
+        self.assertEqual(errors, [])
 
 
 class NativeTouchTests(unittest.TestCase):

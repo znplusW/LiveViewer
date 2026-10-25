@@ -10,6 +10,30 @@ OVERVIEW_MIN_WIDTH = 120
 OVERVIEW_MAX_WIDTH = 480
 
 
+def _fitted_image_rect(image_area, pixmap):
+    """Return the logical bounds occupied by the photo, including letterboxing."""
+    if not isinstance(pixmap, QPixmap) or pixmap.isNull():
+        return QRect(image_area)
+    size = pixmap.size().scaled(image_area.size(), Qt.AspectRatioMode.KeepAspectRatio)
+    return QRect(image_area.x() + (image_area.width() - size.width()) // 2,
+                 image_area.y() + (image_area.height() - size.height()) // 2,
+                 size.width(), size.height())
+
+
+def _live_badge_layout(image_rect):
+    """Keep the full label from obscuring a small or narrow photo."""
+    if image_rect.isEmpty():
+        return 'dot', QRect()
+    # Include the four-pixel inset in the space needed by the 47 x 20 label.
+    compact = (55 > image_rect.width() * .45 or
+               28 > image_rect.height() * .45)
+    if not compact:
+        return 'full', QRect(image_rect.x() + 4, image_rect.y() + 4, 47, 20)
+    diameter = min(10, image_rect.width(), image_rect.height())
+    inset = min(4, max(0, (min(image_rect.width(), image_rect.height()) - diameter) // 2))
+    return 'dot', QRect(image_rect.x() + inset, image_rect.y() + inset, diameter, diameter)
+
+
 def overview_tile_size(width):
     return QSize(width, round((width - 20) * 2 / 3) + 43)
 
@@ -98,24 +122,28 @@ class ThumbnailDelegate(QStyledItemDelegate):
         painter.drawRoundedRect(rect, 8, 8)
         image_rect = rect.adjusted(5, 5, -5, -29)
         pixmap = index.data(Qt.ItemDataRole.DecorationRole)
+        displayed_rect = _fitted_image_rect(image_rect, pixmap)
         if isinstance(pixmap, QPixmap) and not pixmap.isNull():
-            scaled = pixmap.scaled(image_rect.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            x = image_rect.x() + (image_rect.width() - scaled.width()) // 2
-            y = image_rect.y() + (image_rect.height() - scaled.height()) // 2
-            painter.drawPixmap(x, y, scaled)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawPixmap(displayed_rect, pixmap, pixmap.rect())
         else:
             painter.setPen(QColor(colors['muted']))
             painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, '· · ·')
         item = index.data(Qt.ItemDataRole.UserRole)
         if item.is_live:
-            badge = QRect(image_rect.x()+4, image_rect.y()+4, 47, 20)
-            painter.fillRect(badge, QColor(colors['badge_background']))
-            painter.setPen(QColor(colors['badge_text']))
-            font = QFont(option.font)
-            font.setPointSize(8)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, '◉ LIVE')
+            mode, badge = _live_badge_layout(displayed_rect)
+            if mode == 'dot' and not badge.isEmpty():
+                painter.setPen(QPen(QColor(colors['badge_background']), 2))
+                painter.setBrush(QColor(colors['badge_text']))
+                painter.drawEllipse(badge.adjusted(1, 1, -1, -1))
+            elif mode == 'full':
+                painter.fillRect(badge, QColor(colors['badge_background']))
+                painter.setPen(QColor(colors['badge_text']))
+                font = QFont(option.font)
+                font.setPointSize(8)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, '◉ LIVE')
         if item.pending or item.uncertain:
             painter.setPen(QColor(colors['thumbnail_selected_border']))
             painter.drawText(image_rect.adjusted(0, 0, -4, -2), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, '…' if item.pending else '!')

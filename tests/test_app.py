@@ -19,7 +19,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QContextMenuEvent, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPalette
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMenu, QStyleFactory
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QStyleFactory
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
@@ -764,7 +764,7 @@ class WindowTests(unittest.TestCase):
         if not self.window.strip_button.isChecked():
             self.window.strip_button.click()
         self.assertTrue(self.window.film.isVisible())
-        self.assertEqual(self.window.collapse_strip_button.accessibleName(), "隐藏胶片条")
+        self.assertEqual(self.window.collapse_strip_button.accessibleName(), "关闭胶片条")
         self.window.collapse_strip_button.click()
         self.assertFalse(self.window.film.isVisible())
         self.assertFalse(self.window.strip_button.isChecked())
@@ -885,6 +885,7 @@ class WindowTests(unittest.TestCase):
         self.window._rebuild_items()
         self.window.model.set_items([item])
         self.window.viewer.set_photo(self.image, item.video_path)
+        self.window._shown_image_path = path
         self.window.content.setCurrentWidget(self.window.viewer)
         self.window.viewer.setFocus()
         self.application.processEvents()
@@ -1640,6 +1641,8 @@ class WindowTests(unittest.TestCase):
     def test_horizontal_scroll_setting_roundtrip_rebind_and_mute_preserve_mode(self):
         self.show_live_item()
         dialog = SettingsDialog(self.window.preferences, self.window)
+        self.assertIn('放大时水平滚轮', [label.text() for label in dialog.findChildren(QLabel)])
+        self.assertIn('未放大时，水平滚轮始终切换上一张／下一张', dialog.horizontal_scroll_help.text())
         dialog.horizontal_scroll_mode.setCurrentIndex(1)
         with patch("livegallery.app.SettingsDialog", return_value=dialog), \
                 patch.object(dialog, "exec", return_value=QDialog.DialogCode.Accepted), \

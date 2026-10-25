@@ -16,6 +16,7 @@ from .cover_save import CoverSource, SaveResult, save_cover
 from .frame_reader import FrameCancelled, FrameReader
 from .models import MediaItem
 from .frame_export import export_destination, export_frame
+from .reveal_file import reveal_in_folder
 from .ui_theme import bind_theme, tokens_for
 from .viewer import ViewerCanvas
 
@@ -30,6 +31,10 @@ class _Signals(QObject):
 
 
 class _ExportSignals(QObject):
+    completed = Signal(object, object)
+
+
+class _RevealSignals(QObject):
     completed = Signal(object, object)
 
 
@@ -461,6 +466,15 @@ class EditorDialog(QDialog):
         self._item = item
         self.last_export_path = None
         self.last_export_error = None
+        self.latest_successful_export_path = None
+        self.last_reveal_path = None
+        self.last_reveal_error = None
+        self.last_reveal_accepted = False
+        self._reveal_busy = False
+        self._reveal_thread = None
+        self._reveal_cancel = threading.Event()
+        self._reveal_signals = _RevealSignals(self)
+        self._reveal_signals.completed.connect(self._reveal_finished)
         self._export_directory = (Path(initial_export_directory) if initial_export_directory
                                   else self._item.image_path.parent)
         self._export_busy = False
@@ -554,6 +568,13 @@ class EditorDialog(QDialog):
             Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
         self.export_status_label.hide()
         layout.addWidget(self.export_status_label)
+        self.open_export_folder_button = QPushButton('打开导出文件夹')
+        self.open_export_folder_button.setAutoDefault(False)
+        self.open_export_folder_button.setObjectName('openExportFolder')
+        self.open_export_folder_button.setToolTip('打开文件夹并选中最近一次成功导出的图片。')
+        self.open_export_folder_button.clicked.connect(self._open_export_folder)
+        self.open_export_folder_button.hide()
+        layout.addWidget(self.open_export_folder_button, alignment=Qt.AlignmentFlag.AlignRight)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.save_button = self.buttons.button(QDialogButtonBox.StandardButton.Save)
         self.save_button.setText("保存封面图")
@@ -715,6 +736,7 @@ class EditorDialog(QDialog):
         index = self.displayed_frame_index
         source = self._worker.source.video
         self._export_choosing = True
+        self._update_reveal_button()
         try:
             destination = self._choose_export_path(index)
         except Exception as error:
@@ -726,9 +748,11 @@ class EditorDialog(QDialog):
             return
         finally:
             self._export_choosing = False
+            self._update_reveal_button()
         if destination is None or self._export_closed:
             return
         self._export_busy = True
+        self._update_reveal_button()
         self.last_export_path = None
         self.last_export_error = None
         self.save_button.setEnabled(False)
@@ -756,6 +780,7 @@ class EditorDialog(QDialog):
         self._export_busy = False
         if result is not None and error is None:
             self.last_export_path = Path(result)
+            self.latest_successful_export_path = self.last_export_path
             self.last_export_error = None
             self._export_directory = self.last_export_path.parent
             self.export_status_label.setText('已导出静帧画面：' + str(self.last_export_path))
@@ -764,6 +789,7 @@ class EditorDialog(QDialog):
             self.last_export_error = str(error or '未生成导出文件，请重新尝试。')
             self.export_status_label.setText('导出静帧画面未完成：' + self.last_export_error)
         self.export_status_label.show()
+        self._update_reveal_button()
         if self._export_cancel_pending:
             self._export_cancel_pending = False
             super().reject()
@@ -782,6 +808,76 @@ class EditorDialog(QDialog):
     def _close_exports(self, _result):
         self._export_closed = True
         self._export_cancel.set()
+        self._reveal_cancel.set()
+        self._update_reveal_button()
+
+    def _update_reveal_button(self):
+        self.open_export_folder_button.setVisible(self.latest_successful_export_path is not None)
+        self.open_export_folder_button.setEnabled(
+            self.latest_successful_export_path is not None and not self._export_closed
+            and not self._export_busy and not self._export_choosing and not self._export_cancel_pending
+            and not self._saving and not self._choosing_save and not self._reveal_busy)
+
+    def _open_export_folder(self):
+        if not self.open_export_folder_button.isEnabled() or self.latest_successful_export_path is None:
+            return
+        target = self.latest_successful_export_path
+        self._reveal_busy = True
+        self.last_reveal_path = None
+        self.last_reveal_error = None
+        self.last_reveal_accepted = False
+        self._update_reveal_button()
+        signals, cancelled = self._reveal_signals, self._reveal_cancel
+        def reveal():
+            error = None
+            if cancelled.is_set():
+                return
+            try:
+                if not reveal_in_folder(target):
+                    raise OSError('系统未接受文件定位请求，请重试。')
+            except FileNotFoundError:
+                error = '导出的图片已移动、已删除或暂不可访问，请检查目标文件与硬盘连接。'
+            except Exception as failure:
+                error = str(failure)
+            if cancelled.is_set():
+                return
+            try:
+                signals.completed.emit(target, error)
+            except RuntimeError:
+                pass  # The editor was destroyed while the native Shell returned.
+        self._reveal_thread = threading.Thread(target=reveal, name='cover-export-reveal', daemon=True)
+        self._reveal_thread.start()
+
+    def _reveal_finished(self, target, error):
+        if self._export_closed:
+            return
+        self._reveal_busy = False
+        self.last_reveal_path = Path(target)
+        self.last_reveal_error = error
+        self.last_reveal_accepted = error is None
+        if error:
+            self.export_status_label.setText('无法打开导出文件夹：' + error)
+            self.export_status_label.show()
+        self._update_reveal_button()
+
+    def wait_for_background(self, timeout=None):
+        """Wait off the GUI thread after closing; never join native work in UI slots."""
+        deadline = None if timeout is None else time.monotonic() + max(0, timeout)
+        threads = (self._worker.thread, self._export_thread, self._reveal_thread)
+        for thread in threads:
+            if thread is None:
+                continue
+            if thread is threading.current_thread():
+                return False
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            thread.join(remaining)
+        preview = self._worker._preview
+        wait = getattr(preview, 'wait', None)
+        if wait is not None:
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            if not wait(remaining):
+                return False
+        return all(thread is None or not thread.is_alive() for thread in threads)
 
     def _update_controls(self):
         count = len(self.metadata.frames) if self.metadata is not None else 0
@@ -789,6 +885,7 @@ class EditorDialog(QDialog):
         self.previous_button.setEnabled(enabled and self.selected_frame_index > 0)
         self.next_button.setEnabled(enabled and self.selected_frame_index + 1 < count)
         self.timeline.setEnabled(enabled and count > 0)
+        self._update_reveal_button()
 
     def _save(self):
         if (self._saving or self._choosing_save or self._export_busy or self._export_choosing

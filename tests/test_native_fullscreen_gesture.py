@@ -1,0 +1,286 @@
+"""Window-store ABI, safe ownership, cleanup, and actual qwindows readback."""
+import ctypes
+import os
+import sys
+import json
+import subprocess
+import textwrap
+import unittest
+from contextlib import contextmanager
+from unittest.mock import patch, Mock
+from types import SimpleNamespace
+
+os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+
+from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtWidgets import QApplication, QWidget
+from livegallery.fullscreen_edge_gesture import FullscreenEdgeGesture
+from livegallery.native_fullscreen_gesture import (COOKIE_NAME, EDGE_PROPERTY, PROPERTY_GUID,
+    IID_IPROPERTYSTORE, NativeWindowGestureStore, PROPVARIANT, PROPERTYKEY,
+    VT_BOOL, VT_EMPTY, VARIANT_TRUE, WindowEdgeGesturePolicy)
+
+
+class FakeBackend:
+    def __init__(self):
+        self.cookies, self.values, self.writes = {}, {}, []
+        self.fail_set = self.fail_clear = False
+
+    def claim(self, hwnd, cookie):
+        self.cookies[hwnd] = cookie
+
+    def matches(self, hwnd, cookie):
+        return self.cookies.get(hwnd) == cookie
+
+    def release(self, hwnd, cookie):
+        if self.matches(hwnd, cookie):
+            del self.cookies[hwnd]
+
+    def write(self, hwnd, value):
+        if self.fail_set and value is True or self.fail_clear and value is None:
+            raise OSError('injected API failure')
+        self.writes.append((hwnd, value))
+        actual = {'vt': VT_EMPTY, 'value': None} if value is None else {'vt': VT_BOOL, 'value': True}
+        self.values[hwnd] = actual
+        return actual
+
+
+class PropertyStoreAbiTests(unittest.TestCase):
+    def test_exact_key_iid_and_x64_variant_layout(self):
+        import uuid
+        self.assertEqual(bytes(EDGE_PROPERTY.fmtid), uuid.UUID(PROPERTY_GUID).bytes_le)
+        self.assertEqual(EDGE_PROPERTY.pid, 2)
+        self.assertEqual(bytes(IID_IPROPERTYSTORE), uuid.UUID('886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99').bytes_le)
+        self.assertEqual(ctypes.sizeof(PROPERTYKEY), 20)
+        if ctypes.sizeof(ctypes.c_void_p) == 8:
+            self.assertEqual(ctypes.sizeof(PROPVARIANT), 24)
+            self.assertEqual(ctypes.alignment(PROPVARIANT), 8)
+        self.assertEqual(PROPVARIANT.value.offset, 8)
+
+    def test_get_set_slots_bool_empty_and_clear_every_read_no_commit(self):
+        calls, cleared = [], []
+
+        class Store:
+            current = (VT_EMPTY, 0)
+            def call(self, slot, argument_types, key, value):
+                self_outer.assertEqual(ctypes.cast(key, ctypes.POINTER(PROPERTYKEY)).contents.pid, 2)
+                variant = ctypes.cast(value, ctypes.POINTER(PROPVARIANT)).contents
+                calls.append(slot)
+                if slot == 6:
+                    self.current = variant.vt, variant.boolVal
+                    if variant.vt == VT_BOOL:
+                        self_outer.assertEqual(variant.boolVal, VARIANT_TRUE)
+                elif slot == 5:
+                    variant.vt, variant.boolVal = self.current
+                else:
+                    self_outer.fail('Unexpected COM slot, including an unnecessary Commit')
+                return 0
+        self_outer = self
+        store = Store()
+        class Ole:
+            def PropVariantClear(self, value):
+                cleared.append(ctypes.cast(value, ctypes.POINTER(PROPVARIANT)).contents.vt)
+                return 0
+        @contextmanager
+        def opened(hwnd):
+            self.assertEqual(hwnd, 123)
+            yield store, Ole()
+        native = object.__new__(NativeWindowGestureStore)
+        with patch.object(native, 'is_own_window', return_value=True), \
+                patch('livegallery.native_fullscreen_gesture._property_store', opened):
+            self.assertEqual(native.write(123, True), {'vt': VT_BOOL, 'value': True})
+            self.assertEqual(native.read(123), {'vt': VT_BOOL, 'value': True})
+            self.assertEqual(native.write(123, None), {'vt': VT_EMPTY, 'value': None})
+        self.assertEqual(calls, [6, 5, 5, 6, 5])
+        self.assertEqual(cleared, [VT_BOOL, VT_BOOL, VT_EMPTY])
+
+    def test_failed_get_still_clears_propvariant_and_foreign_hwnd_is_rejected(self):
+        calls = []
+        class Store:
+            def call(self, *args):
+                return 0x80004005
+        class Ole:
+            def PropVariantClear(self, value):
+                calls.append(True)
+        with self.assertRaises(OSError):
+            NativeWindowGestureStore._read(Store(), Ole())
+        self.assertEqual(calls, [True])
+        native = object.__new__(NativeWindowGestureStore)
+        with patch.object(native, 'is_own_window', return_value=False), \
+                patch('livegallery.native_fullscreen_gesture._property_store') as opened:
+            with self.assertRaises(OSError): native.read(123)
+            with self.assertRaises(OSError): native.write(123, None)
+            opened.assert_not_called()
+
+    def test_cookie_remove_readback_failure_is_not_reported_as_success(self):
+        native = object.__new__(NativeWindowGestureStore)
+        native.user = SimpleNamespace(RemovePropW=Mock(return_value=0))
+        with patch.object(native, 'matches', return_value=True):
+            with self.assertRaises(OSError): native.release(123, 999)
+        native.user.RemovePropW.assert_called_once_with(123, COOKIE_NAME)
+
+
+class WindowPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.window = QWidget()
+        self.windows = [self.window]
+        self.edge = FullscreenEdgeGesture(lambda: self.windows)
+        self.edge.native_policy.close()
+        self.backend = FakeBackend()
+        self.policy = self.edge.native_policy = WindowEdgeGesturePolicy(
+            lambda: self.windows, backend=self.backend, supported=True, parent=self.edge)
+        self.policy.set_enabled(True)
+
+    def tearDown(self):
+        self.edge.close()
+        from shiboken6 import isValid
+        if isValid(self.window):
+            self.window.close()
+            self.window.deleteLater()
+        self.app.processEvents()
+
+    def fullscreen(self):
+        self.window.showFullScreen()
+        self.app.processEvents()
+        self.policy.sync_now()
+        return int(self.window.winId())
+
+    def test_only_real_fullscreen_enabled_windows_set_and_exit_or_empty_removes(self):
+        self.window.show()
+        self.app.processEvents()
+        self.assertEqual(self.backend.writes, [])
+        hwnd = self.fullscreen()
+        self.assertEqual(self.backend.values[hwnd], {'vt': VT_BOOL, 'value': True})
+        self.policy.sync_now()
+        self.assertEqual(self.backend.writes.count((hwnd, True)), 1)
+        self.window.showNormal()
+        self.app.processEvents()
+        self.assertEqual(self.backend.values[hwnd]['vt'], VT_EMPTY)
+        self.assertNotIn(hwnd, self.backend.cookies)
+        self.fullscreen()
+        self.edge.set_enabled_edges([])
+        self.assertEqual(self.backend.values[hwnd]['vt'], VT_EMPTY)
+        self.assertNotIn(hwnd, self.backend.cookies)
+        self.assertFalse(self.policy.report()['native_api_used'])  # Mock never claims native success.
+
+    def test_provider_forgot_preview_but_close_still_clears_tracked_native_property(self):
+        hwnd = self.fullscreen()
+        self.windows.clear()
+        self.window.close()
+        self.assertEqual(self.backend.values[hwnd]['vt'], VT_EMPTY)
+        self.assertNotIn(hwnd, self.backend.cookies)
+        self.assertEqual(self.policy._tracked, {})
+
+    def test_cookie_prevents_clearing_recycled_hwnd_even_in_same_process(self):
+        hwnd = self.fullscreen()
+        self.backend.cookies[hwnd] += 123
+        writes = list(self.backend.writes)
+        self.policy.set_enabled(False)
+        self.assertEqual(self.backend.writes, writes)
+        self.assertEqual(self.backend.values[hwnd]['vt'], VT_BOOL)
+        self.assertIn(hwnd, self.backend.cookies)
+        self.assertTrue(any(item['action'] == 'stale_handle_skipped' for item in self.policy.report()['diagnostics']))
+
+    def test_winid_change_clears_old_valid_identity_then_sets_new(self):
+        old = self.fullscreen()
+        with patch.object(self.window, 'winId', return_value=old + 100):
+            self.policy.observe(self.window, QEvent(QEvent.Type.WinIdChange))
+            self.policy.sync_now()
+            self.assertEqual(self.backend.values[old]['vt'], VT_EMPTY)
+            self.assertEqual(self.backend.values[old + 100]['vt'], VT_BOOL)
+        self.policy.close()
+        self.assertEqual(self.backend.values[old + 100]['vt'], VT_EMPTY)
+
+    def test_failures_are_diagnostic_retryable_and_shutdown_cleans(self):
+        self.backend.fail_set = True
+        hwnd = self.fullscreen()
+        self.assertTrue(self.policy.report()['failures'])
+        self.backend.fail_set = False
+        self.policy.sync_now()
+        self.assertEqual(self.backend.values[hwnd]['vt'], VT_BOOL)
+        self.backend.fail_clear = True
+        self.policy.set_enabled(False)
+        self.assertTrue(self.policy._tracked)
+        self.backend.fail_clear = False
+        self.policy.close()
+
+    def test_cookie_cleanup_failure_keeps_ownership_for_retry(self):
+        hwnd = self.fullscreen()
+        with patch.object(self.backend, 'release', side_effect=OSError('RemoveProp failed')):
+            self.policy.set_enabled(False)
+        self.assertTrue(self.policy._tracked)
+        self.assertTrue(self.policy.report()['failures'])
+        self.policy.sync_now()
+        self.assertNotIn(hwnd, self.backend.cookies)
+        self.assertFalse(self.policy._tracked)
+        self.assertEqual(self.backend.values[hwnd]['vt'], VT_EMPTY)
+        self.assertNotIn(hwnd, self.backend.cookies)
+        self.policy.close()
+
+    def test_unsupported_platform_does_not_load_native_api_or_create_hwnd(self):
+        hidden = QWidget()
+        policy = WindowEdgeGesturePolicy(lambda: [hidden], supported=False)
+        try:
+            with patch('livegallery.native_fullscreen_gesture.NativeWindowGestureStore') as backend:
+                policy.set_enabled(True)
+                policy.sync_now()
+                backend.assert_not_called()
+            self.assertFalse(hidden.testAttribute(__import__('PySide6.QtCore', fromlist=['Qt']).Qt.WidgetAttribute.WA_WState_Created))
+            self.assertFalse(policy.report()['supported'])
+            self.assertFalse(policy.report()['native_api_used'])
+        finally:
+            policy.close()
+            hidden.deleteLater()
+
+
+@unittest.skipUnless(sys.platform == 'win32',
+                     'Actual HWND property store requires native qwindows')
+class NativeReadbackTests(unittest.TestCase):
+    def test_actual_hwnd_set_get_bool_true_and_vt_empty_cleanup(self):
+        script = textwrap.dedent('''
+            import json, os, sys
+            from PySide6.QtWidgets import QApplication, QWidget
+            from livegallery.fullscreen_edge_gesture import FullscreenEdgeGesture
+            from livegallery.native_fullscreen_gesture import NativeWindowGestureStore, VT_BOOL, VT_EMPTY
+            app=QApplication([])
+            assert app.platformName()=='windows'
+            errors=[]
+            sys.excepthook=lambda kind,value,tb:errors.append(f'{kind.__name__}: {value}')
+            window=QWidget(); windows=[window]
+            edge=FullscreenEdgeGesture(lambda:windows)
+            native=NativeWindowGestureStore()
+            try:
+                window.showFullScreen(); app.processEvents(); edge.native_policy.sync_now()
+                hwnd=int(window.winId())
+                assert native.read(hwnd)=={'vt':VT_BOOL,'value':True}
+                assert edge.native_policy.report()['native_api_used']
+                edge.set_enabled_edges([])
+                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None}
+                edge.set_enabled_edges(['left']); app.processEvents(); edge.native_policy.sync_now()
+                assert native.read(hwnd)=={'vt':VT_BOOL,'value':True}
+                record=edge.native_policy._tracked[id(window)];cookie=record['cookie']
+                windows.clear(); window.close(); app.processEvents()
+                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None}
+                assert not native.matches(hwnd,cookie)
+                windows.append(window); window.showFullScreen(); app.processEvents();edge.native_policy.sync_now()
+                assert native.read(int(window.winId()))=={'vt':VT_BOOL,'value':True}
+                edge.close()
+                assert native.read(int(window.winId()))=={'vt':VT_EMPTY,'value':None}
+                assert not edge.native_policy.report()['failures']
+                assert not errors, errors
+                print(json.dumps({'native':True,'set_get_empty_verified':True,'cookie_removed':True,'hardware':False}))
+            finally:
+                edge.close();window.close();window.deleteLater();app.processEvents()
+        ''')
+        env = dict(os.environ, QT_QPA_PLATFORM='windows', PYTHONFAULTHANDLER='1')
+        result = subprocess.run([sys.executable, '-c', script], env=env,
+                                capture_output=True, text=True, timeout=45)
+        self.assertEqual(result.returncode, 0, result.stdout + '\n' + result.stderr)
+        self.assertTrue(json.loads(result.stdout.splitlines()[-1])['set_get_empty_verified'])
+
+
+if __name__ == '__main__':
+    unittest.main()

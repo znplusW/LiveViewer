@@ -161,5 +161,36 @@ class CachePreferencesTests(unittest.TestCase):
                               result.muted), (expected, 'horizontal', 'right', False))
 
 
+    def test_auxiliary_geometry_and_map_preferences_validate_and_roundtrip(self):
+        Preferences(preview_geometry='a1b2', preview_screen='left screen', map_float_geometry='0102',
+                    map_float_screen='touch screen', map_dock_edge='bottom', map_dock_width=420,
+                    map_bottom_height=310, map_floating=True).save()
+        restored = Preferences.load()
+        self.assertEqual((restored.preview_geometry, restored.map_float_geometry, restored.map_dock_edge,
+                          restored.map_dock_width, restored.map_bottom_height, restored.map_floating),
+                         ('a1b2', '0102', 'bottom', 420, 310, True))
+        (self.data / 'settings.json').write_text(json.dumps({'preview_geometry': 'bad geometry',
+            'map_float_geometry': None, 'preview_screen': 'bad\0screen', 'map_dock_edge': 'wrong',
+            'map_dock_width': True, 'map_bottom_height': 9000, 'map_floating': 'yes', 'muted': False}), encoding='utf-8')
+        restored = Preferences.load()
+        self.assertEqual((restored.preview_geometry, restored.map_float_geometry, restored.preview_screen), ('', '', ''))
+        self.assertEqual((restored.map_dock_edge, restored.map_dock_width, restored.map_bottom_height,
+                          restored.map_floating, restored.muted), ('right', 320, 640, False, False))
+
+
+    def test_fullscreen_exit_edges_default_left_deduplicate_and_preserve_explicit_empty(self):
+        self.assertEqual(Preferences.load().fullscreen_exit_gestures, ['left'])
+        for raw, expected in (([], []), (['right', 'left', 'right', 'wrong', None], ['right', 'left']),
+                              (None, ['left']), (['top'], ['top'])):
+            (self.data / 'settings.json').write_text(json.dumps({'fullscreen_exit_gestures': raw}), encoding='utf-8')
+            result = Preferences.load()
+            self.assertEqual(result.fullscreen_exit_gestures, expected)
+            result.save()
+            self.assertEqual(Preferences.load().fullscreen_exit_gestures, expected)
+        a, b = Preferences(), Preferences()
+        a.fullscreen_exit_gestures.clear()
+        self.assertEqual(b.fullscreen_exit_gestures, ['left'])
+
+
 if __name__ == '__main__':
     unittest.main()

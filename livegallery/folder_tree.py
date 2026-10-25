@@ -1,36 +1,42 @@
 """Independent folder checkboxes with batched mouse and keyboard selection."""
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, QSignalBlocker, Qt, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QRubberBand, QStyle, QStyledItemDelegate,
+                               QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem)
 
 from .library import natural_key
 from .ui_theme import tokens_for
 
 
 class _FolderDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        return QSize(size.width() + 16, max(38, size.height()))
+
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
-        if index.data(Qt.ItemDataRole.CheckStateRole) is None:
-            return
         box = QStyleOptionViewItem(option)
         self.initStyleOption(box, index)
         widget = option.widget
-        rect = widget.style().subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator, box, widget)
+        rect = widget.checkbox_rect(index)
         colors = tokens_for(widget)
+        # Paint one indicator only. Native item focus/check rendering can
+        # otherwise leave blue corner fragments outside the custom checkbox.
+        native = QStyleOptionViewItem(box)
+        native.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
+        native.state &= ~QStyle.StateFlag.State_HasFocus
+        native.text = ''
+        widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem, native, painter, widget)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Cover the platform indicator before drawing a consistent hollow
-        # checkbox or a visible white tick in either application theme.
-        painter.fillRect(rect, QColor(colors['field']))
         selected = box.checkState != Qt.CheckState.Unchecked
         painter.setBrush(QColor(colors['switch_on'] if selected else colors['field']))
         painter.setPen(QPen(QColor(colors['switch_on'] if selected else colors['control_button_border']), 1.3))
         shape = QRectF(rect).adjusted(.7, .7, -.7, -.7)
         painter.drawRoundedRect(shape, 2, 2)
         if selected:
-            painter.setPen(QPen(QColor('#ffffff'), 2, Qt.PenStyle.SolidLine,
+            painter.setPen(QPen(QColor('#ffffff'), 2.5, Qt.PenStyle.SolidLine,
                                 Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             path = QPainterPath()
             if box.checkState == Qt.CheckState.PartiallyChecked:
@@ -41,6 +47,11 @@ class _FolderDelegate(QStyledItemDelegate):
                 path.lineTo(shape.left() + shape.width() * .42, shape.top() + shape.height() * .76)
                 path.lineTo(shape.left() + shape.width() * .82, shape.top() + shape.height() * .26)
             painter.drawPath(path)
+        text_rect = option.rect.adjusted(rect.right() - option.rect.left() + 9, 0, -6, 0)
+        painter.setFont(box.font)
+        painter.setPen(QColor(colors['selected_text'] if box.state & QStyle.StateFlag.State_Selected else colors['text']))
+        text = box.fontMetrics.elidedText(box.text, Qt.TextElideMode.ElideRight, max(0, text_rect.width()))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
         painter.restore()
 
 
@@ -51,21 +62,65 @@ class FolderTree(QTreeWidget):
         super().__init__(parent)
         self.setHeaderHidden(True)
         self.setIndentation(16)
+        self.setUniformRowHeights(True)
         self.setItemDelegate(_FolderDelegate(self))
         self.setAccessibleName('已选文件夹')
-        self.setToolTip('每个勾选框只控制本层图片。Shift 选择范围，Ctrl+A 选择全部文件夹。')
+        self.setToolTip('每个勾选框只控制本层图片。空白处拖框多选，Ctrl 增减，Shift 选范围，Ctrl+A 全选。')
         self._nodes = {}
         self._checked = set()
         self._anchor = None
         self.all_item = None
+        self._pointer = None
+        self._native_branch = False
+        self._suppress_release = False
+        self._generation = 0
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        self._apply_selection_palette()
         self.itemChanged.connect(self._item_changed)
+        self.itemExpanded.connect(self.cancel_gesture)
+        self.itemCollapsed.connect(self.cancel_gesture)
+        self.verticalScrollBar().valueChanged.connect(self.cancel_gesture)
+        self.horizontalScrollBar().valueChanged.connect(self.cancel_gesture)
+        for signal in (self.model().rowsAboutToBeInserted, self.model().rowsAboutToBeRemoved,
+                       self.model().modelAboutToBeReset, self.model().layoutAboutToBeChanged):
+            signal.connect(self.cancel_gesture)
 
     def clear(self):
+        self.cancel_gesture()
         with QSignalBlocker(self):
             super().clear()
         self._nodes = {}
         self._checked = set()
         self.all_item = None
+
+    def checkbox_rect(self, item_or_index):
+        index = self.indexFromItem(item_or_index) if isinstance(item_or_index, QTreeWidgetItem) else item_or_index
+        row = self.visualRect(index)
+        return QRect(row.left() + 6, row.center().y() - 11, 24, 24)
+
+    def cancel_gesture(self, *_args):
+        self._generation += 1
+        if self._pointer is not None:
+            self._suppress_release = True
+        self._pointer = None
+        self._rubber_band.hide()
+
+    def _apply_selection_palette(self):
+        if getattr(self, '_applying_selection_palette', False):
+            return
+        colors = tokens_for(self)
+        palette = self.palette()
+        if (palette.color(QPalette.ColorRole.Highlight).name() == colors['selected']
+                and palette.color(QPalette.ColorRole.HighlightedText).name() == colors['selected_text']):
+            return
+        self._applying_selection_palette = True
+        try:
+            for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive, QPalette.ColorGroup.Disabled):
+                palette.setColor(group, QPalette.ColorRole.Highlight, QColor(colors['selected']))
+                palette.setColor(group, QPalette.ColorRole.HighlightedText, QColor(colors['selected_text']))
+            self.setPalette(palette)
+        finally:
+            self._applying_selection_palette = False
 
     @property
     def checked_directories(self):
@@ -119,6 +174,26 @@ class FolderTree(QTreeWidget):
         current = self.currentItem()
         selected = current.data(0, Qt.ItemDataRole.UserRole) if current is not None else None
         anchor = self._anchor
+        desired = set(known) if checked is None else set(map(Path, checked)) & known
+        if self.all_item is not None and known == set(self._nodes):
+            # Background pairing often changes only the direct counts. Do not
+            # rebuild or scroll the rows underneath the user's pointer.
+            with QSignalBlocker(self):
+                self.all_item.setText(0, f'全部文件夹  ·  {sum(direct.values()):,}')
+                for path, item in self._nodes.items():
+                    item.setText(0, f'{path.name or str(path)}  ·  {direct.get(path, 0):,}')
+                if desired != self._checked:
+                    self.cancel_gesture()
+                self._checked = desired
+                self._sync_checks()
+            return
+        self.cancel_gesture()
+        expanded = {path for path, item in self._nodes.items() if item.isExpanded()}
+        previous_paths = set(self._nodes)
+        aggregate_expanded = self.all_item is None or self.all_item.isExpanded()
+        top = self.itemAt(QPoint(self.viewport().width() // 2, 0))
+        top_path = top.data(0, Qt.ItemDataRole.UserRole) if top is not None else None
+        old_scroll = self.verticalScrollBar().value()
         with QSignalBlocker(self):
             self.clear()
             self.all_item = QTreeWidgetItem([f'全部文件夹  ·  {sum(direct.values()):,}'])
@@ -134,14 +209,18 @@ class FolderTree(QTreeWidget):
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 parent.addChild(item)
                 self._nodes[path] = item
-            self._checked = set(known) if checked is None else set(map(Path, checked)) & known
+            self._checked = desired
             self._sync_checks()
-            self.all_item.setExpanded(True)
-            for root in roots:
-                node = self._nodes.get(root)
+            self.all_item.setExpanded(aggregate_expanded)
+            for path in expanded | (set(roots) - previous_paths):
+                node = self._nodes.get(path)
                 if node is not None:
                     node.setExpanded(True)
             self.setCurrentItem(self._nodes.get(Path(selected)) if selected else self.all_item)
+            self.doItemsLayout()
+            self.verticalScrollBar().setValue(old_scroll)
+            if top_path and Path(top_path) in self._nodes:
+                self.scrollToItem(self._nodes[Path(top_path)], QAbstractItemView.ScrollHint.PositionAtTop)
         self._anchor = anchor if anchor in known else None
 
     def _sync_checks(self):
@@ -157,6 +236,7 @@ class FolderTree(QTreeWidget):
         selected = set(self._nodes) if paths is None else set(map(Path, paths)) & set(self._nodes)
         if selected == self._checked:
             return
+        self.cancel_gesture()
         self._checked = selected
         self._sync_checks()
         self.checkedChanged.emit(self.selection_spec)
@@ -196,47 +276,129 @@ class FolderTree(QTreeWidget):
         return visible
 
     def mousePressEvent(self, event):
-        item = self.itemAt(event.position().toPoint())
-        if event.button() != Qt.MouseButton.LeftButton or item is None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            self.cancel_gesture()
             super().mousePressEvent(event)
             return
-        rect = self.visualItemRect(item)
-        if event.position().x() < rect.left():
-            # Keep the native expand/collapse branch control.
+        self.cancel_gesture()
+        self._suppress_release = False
+        self._native_branch = False
+        point = event.position().toPoint()
+        item = self.itemAt(point)
+        if item is not None and point.x() < self.visualItemRect(item).left():
+            self._native_branch = True
             super().mousePressEvent(event)
             return
         self.setFocus(Qt.FocusReason.MouseFocusReason)
-        self.setCurrentItem(item)
-        if item is self.all_item:
-            self.set_all_checked(self._checked != set(self._nodes))
-            event.accept()
+        path = Path(item.data(0, Qt.ItemDataRole.UserRole)) if item is not None and item is not self.all_item else None
+        kind = 'blank'
+        if item is not None:
+            if self.checkbox_rect(item).contains(point):
+                kind = 'checkbox'
+            else:
+                label_end = self.checkbox_rect(item).right() + 9 + self.fontMetrics().horizontalAdvance(item.text(0))
+                kind = 'text' if point.x() <= label_end else 'blank'
+        self._pointer = {'start': point, 'kind': kind, 'path': path, 'aggregate': item is self.all_item,
+                         'baseline': set(self._checked), 'modifiers': event.modifiers(),
+                         'generation': self._generation, 'dragged': False, 'cancel_click': False}
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        gesture = self._pointer
+        if gesture is None:
+            super().mouseMoveEvent(event)
             return
-        path = Path(item.data(0, Qt.ItemDataRole.UserRole))
-        modifiers = event.modifiers()
+        point = event.position().toPoint()
+        if (point - gesture['start']).manhattanLength() >= QApplication.startDragDistance():
+            if gesture['kind'] == 'blank':
+                gesture['dragged'] = True
+            else:
+                gesture['cancel_click'] = True
+        if gesture['dragged']:
+            self._rubber_band.setGeometry(QRect(gesture['start'], point).normalized().intersected(self.viewport().rect()))
+            self._rubber_band.show()
+        event.accept()
+
+    def _commit_click(self, gesture, point):
+        path = gesture['path']
+        if gesture['aggregate']:
+            if self.itemAt(point) is self.all_item:
+                self.set_all_checked(gesture['baseline'] != set(self._nodes))
+            return
+        if path is None or path not in self._nodes or self.itemAt(point) is not self._nodes[path]:
+            return
+        self.setCurrentItem(self._nodes[path])
+        modifiers, baseline = gesture['modifiers'], gesture['baseline']
         if modifiers & Qt.KeyboardModifier.ShiftModifier:
             visible = self._visible_paths()
             anchor = self._anchor if self._anchor in visible else path
             first, last = sorted((visible.index(anchor), visible.index(path)))
             selected = set(visible[first:last + 1])
             if modifiers & Qt.KeyboardModifier.ControlModifier:
-                selected |= self._checked
+                selected |= baseline
         else:
-            option = QStyleOptionViewItem()
-            self.itemDelegate().initStyleOption(option, self.indexFromItem(item))
-            option.rect = rect
-            checkbox = self.style().subElementRect(QStyle.SubElement.SE_ItemViewItemCheckIndicator,
-                                                   option, self.viewport())
-            toggle = checkbox.contains(event.position().toPoint()) or modifiers & Qt.KeyboardModifier.ControlModifier
-            selected = set(self._checked) if toggle else set()
+            toggle = gesture['kind'] == 'checkbox' or modifiers & Qt.KeyboardModifier.ControlModifier
+            selected = set(baseline) if toggle else set()
             if toggle and path in selected:
                 selected.remove(path)
             else:
                 selected.add(path)
             self._anchor = path
         self.set_checked_directories(selected)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        if self._native_branch:
+            self._native_branch = False
+            super().mouseReleaseEvent(event)
+            return
+        gesture, self._pointer = self._pointer, None
+        self._rubber_band.hide()
+        if self._suppress_release:
+            self._suppress_release = False
+            event.accept()
+            return
+        if gesture is not None and gesture['generation'] == self._generation:
+            point = event.position().toPoint()
+            if gesture['dragged']:
+                band = QRect(gesture['start'], point).normalized().intersected(self.viewport().rect())
+                covered = {path for path in self._visible_paths()
+                           if self.visualItemRect(self._nodes[path]).intersects(band)}
+                modifiers, baseline = gesture['modifiers'], gesture['baseline']
+                if modifiers & Qt.KeyboardModifier.ShiftModifier:
+                    covered |= baseline
+                elif modifiers & Qt.KeyboardModifier.ControlModifier:
+                    covered ^= baseline
+                self.set_checked_directories(covered)
+            elif not gesture['cancel_click']:
+                self._commit_click(gesture, point)
+        # Every custom left sequence is consumed in full. A late release must
+        # never fall through to Qt's independent checkbox editor.
         event.accept()
 
+    def event(self, event):
+        if hasattr(self, '_rubber_band') and event.type() in (
+                QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange, QEvent.Type.StyleChange):
+            self._apply_selection_palette()
+        if hasattr(self, '_rubber_band') and event.type() in (
+                QEvent.Type.WindowDeactivate, QEvent.Type.Hide, QEvent.Type.FontChange,
+                QEvent.Type.StyleChange, QEvent.Type.DevicePixelRatioChange, QEvent.Type.ScreenChangeInternal):
+            self.cancel_gesture()
+        return super().event(event)
+
+    def focusOutEvent(self, event):
+        self.cancel_gesture()
+        super().focusOutEvent(event)
+
+    def resizeEvent(self, event):
+        if hasattr(self, '_rubber_band'):
+            self.cancel_gesture()
+        super().resizeEvent(event)
+
     def keyPressEvent(self, event):
+        self.cancel_gesture()
         if event.matches(QKeySequence.StandardKey.SelectAll):
             self.set_all_checked(True)
             event.accept()

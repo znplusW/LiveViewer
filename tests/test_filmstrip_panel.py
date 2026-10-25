@@ -6,9 +6,9 @@ import unittest
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
-from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QGridLayout, QStyleFactory, QWidget
+from PySide6.QtWidgets import QApplication, QGridLayout, QStyle, QStyleFactory, QStyleOptionSlider, QToolTip, QWidget
 
 from livegallery.catalog_model import CatalogModel
 from livegallery.filmstrip_panel import FilmstripPanel
@@ -93,19 +93,20 @@ class FilmstripPanelTests(unittest.TestCase):
         QApplication.sendEvent(handle, event)
         self.settle()
 
-    def test_actual_buttons_cycle_bottom_right_left_and_retain_last_vertical_side(self):
-        self.assertEqual(self.panel.hide_button.text(), '↓')
-        self.assertFalse(self.panel.side_button.isVisible())
+    def test_actual_buttons_jump_to_explicit_sides_and_close_without_losing_controls(self):
+        self.assertEqual([button.text() for button in (self.panel.side_button, self.panel.hide_button,
+                                                      self.panel.orientation_button)], ['左侧', 'X', '右侧'])
+        self.assertTrue(self.panel.side_button.isVisible())
         QTest.mouseClick(self.panel.orientation_button, Qt.MouseButton.LeftButton)
         self.settle()
         self.assertEqual((self.panel.orientation, self.panel.side), ('vertical', 'right'))
-        self.assertEqual(self.panel.hide_button.text(), '→')
+        self.assertEqual(self.panel.hide_button.text(), 'X')
         self.assertEqual(self.panel.resize_handle.edge, 'left')
         self.assertGreater(self.panel.x(), self.photo.x())
         QTest.mouseClick(self.panel.side_button, Qt.MouseButton.LeftButton)
         self.settle()
         self.assertEqual((self.panel.orientation, self.panel.side), ('vertical', 'left'))
-        self.assertEqual(self.panel.hide_button.text(), '←')
+        self.assertEqual(self.panel.hide_button.text(), 'X')
         self.assertEqual(self.panel.resize_handle.edge, 'right')
         self.assertLess(self.panel.x(), self.photo.x())
         QTest.mouseClick(self.panel.orientation_button, Qt.MouseButton.LeftButton)
@@ -113,7 +114,12 @@ class FilmstripPanelTests(unittest.TestCase):
         self.assertEqual(self.panel.orientation, 'horizontal')
         QTest.mouseClick(self.panel.orientation_button, Qt.MouseButton.LeftButton)
         self.settle()
-        self.assertEqual(self.panel.side, 'left')
+        self.assertEqual(self.panel.side, 'right')
+        QTest.mouseClick(self.panel.orientation_button, Qt.MouseButton.LeftButton)
+        self.settle()
+        QTest.mouseClick(self.panel.side_button, Qt.MouseButton.LeftButton)
+        self.settle()
+        self.assertEqual((self.panel.orientation, self.panel.side), ('vertical', 'left'))
         hidden = QSignalSpy(self.panel.hideRequested)
         QTest.mouseClick(self.panel.hide_button, Qt.MouseButton.LeftButton)
         self.assertEqual(hidden.count(), 1)
@@ -306,6 +312,88 @@ class FilmstripPanelTests(unittest.TestCase):
                                                   button.minimumSize().toTuple(), button.sizeHint().toTuple()))
         finally:
             self.app.setStyle(original_style)
+
+    def test_right_dock_button_order_and_real_tooltip_are_complete_in_both_themes(self):
+        for theme in ('dark', 'light'):
+            self.window.setStyleSheet(stylesheet_for(theme))
+            for orientation, side in (('vertical', 'right'), ('vertical', 'left'), ('horizontal', 'left')):
+                self.dock(orientation, side)
+                self.settle()
+                order = ((self.panel.side_button, self.panel.hide_button, self.panel.orientation_button)
+                         if orientation == 'horizontal' else
+                         (self.panel.side_button, self.panel.orientation_button, self.panel.hide_button)
+                         if side == 'right' else
+                         (self.panel.hide_button, self.panel.orientation_button, self.panel.side_button))
+                positions = [button.mapTo(self.panel, QPoint()).x() for button in order if button.isVisible()]
+                self.assertEqual(positions, sorted(positions))
+            button = self.panel.orientation_button
+            QToolTip.showText(button.mapToGlobal(QPoint(0, button.height())), button.toolTip(), button)
+            QTest.qWait(30)
+            try:
+                tooltip = next(widget for widget in self.app.topLevelWidgets()
+                               if widget.metaObject().className() == 'QTipLabel' and widget.isVisible())
+                self.assertEqual(tooltip.text(), button.toolTip())
+                self.assertGreater(tooltip.width(), button.width())
+                self.assertGreaterEqual(tooltip.contentsRect().width(), tooltip.fontMetrics().horizontalAdvance(tooltip.text()))
+            finally:
+                QToolTip.hideText()
+
+    def test_left_vertical_scrollbar_is_outermost_without_mirroring_thumbnails_or_reversing_touch(self):
+        image = QImage(160, 90, QImage.Format.Format_RGB32)
+        image.fill('#ec3030')
+        painter = QPainter(image)
+        painter.fillRect(80, 0, 80, 90, '#3030ec')
+        painter.end()
+        self.model.put_thumbnail(self.model.items[0].image_path, image)
+        selected = self.panel.strip.currentIndex()
+        for side in ('left', 'right'):
+            self.dock('vertical', side)
+            self.settle()
+            strip = self.panel.strip
+            bar = strip.verticalScrollBar()
+            viewport = strip.viewport()
+            self.assertTrue(bar.isVisible())
+            bar_x = bar.mapTo(strip, QPoint()).x()
+            if side == 'left':
+                self.assertLess(bar_x, viewport.x())
+            else:
+                self.assertGreater(bar_x, viewport.x() + viewport.width() - 1)
+            bar.setValue(0)
+            self.settle()
+            tile = strip.visualRect(self.model.index(0))
+            rendered = viewport.grab().toImage()
+            y = tile.center().y() - 15
+            left = rendered.pixelColor(tile.center().x() - 35, y)
+            right = rendered.pixelColor(tile.center().x() + 35, y)
+            self.assertGreater(left.red(), left.blue() + 100)
+            self.assertGreater(right.blue(), right.red() + 100)
+            self.assertLess(tile.center().y(), strip.visualRect(self.model.index(1)).center().y())
+            option = QStyleOptionSlider()
+            option.initFrom(bar)
+            option.orientation = Qt.Orientation.Vertical
+            option.minimum, option.maximum, option.pageStep = bar.minimum(), bar.maximum(), bar.pageStep()
+            option.sliderPosition = option.sliderValue = bar.value()
+            knob = bar.style().subControlRect(QStyle.ComplexControl.CC_ScrollBar, option,
+                                              QStyle.SubControl.SC_ScrollBarSlider, bar)
+            QTest.mousePress(bar, Qt.MouseButton.LeftButton, pos=knob.center())
+            QTest.mouseMove(bar, knob.center() + QPoint(0, 60))
+            QTest.mouseRelease(bar, Qt.MouseButton.LeftButton, pos=knob.center() + QPoint(0, 60))
+            self.assertGreater(bar.value(), 0)
+            bar.setValue(0)
+            self.settle()
+            target = self.window.windowHandle()
+            point = viewport.mapTo(self.window, viewport.rect().center())
+            sequence = QTest.touchEvent(target, self.device, False)
+            sequence.press(0, point + QPoint(0, 60), target).commit()
+            sequence.move(0, point, target).commit()
+            sequence.release(0, point - QPoint(0, 60), target).commit()
+            self.settle()
+            self.assertGreater(bar.value(), 0)
+            self.assertEqual(self.clicked.count(), 0)
+            self.assertEqual(strip.currentIndex(), selected)
+        self.dock('horizontal', 'right')
+        self.settle()
+        self.assertEqual(self.panel.strip.layoutDirection(), Qt.LayoutDirection.LeftToRight)
 
 
 if __name__ == '__main__':

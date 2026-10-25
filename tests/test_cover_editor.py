@@ -137,6 +137,8 @@ class CoverEditorTests(unittest.TestCase):
         threads = [worker.thread, *getattr(preview, '_threads', ())]
         if dialog._export_thread is not None:
             threads.append(dialog._export_thread)
+        if dialog._reveal_thread is not None:
+            threads.append(dialog._reveal_thread)
         frames = sys._current_frames()
         for thread in threads:
             lines.append(f'thread={thread.name}; alive={thread.is_alive()}; ident={thread.ident}')
@@ -163,8 +165,10 @@ class CoverEditorTests(unittest.TestCase):
             wait_preview = getattr(preview, 'wait', None)
             preview_done = wait_preview(0) if callable(wait_preview) else True
             export = dialog._export_thread
+            reveal = dialog._reveal_thread
             if (not worker.thread.is_alive() and preview_done
-                    and (export is None or not export.is_alive())):
+                    and (export is None or not export.is_alive())
+                    and (reveal is None or not reveal.is_alive())):
                 return
             if time.monotonic() >= deadline:
                 self.fail('Editor media did not settle before fixture cleanup; '
@@ -397,6 +401,7 @@ class CoverEditorTests(unittest.TestCase):
             dialog._export_current_frame()
             export.assert_not_called()
             self.assertFalse(dialog._export_busy)
+            self.assertFalse(dialog.open_export_folder_button.isVisible())
         entered, cancelled, cleanup = threading.Event(), threading.Event(), threading.Event()
         destination = self.folder / 'cancelled.png'
         def wait_cancel(video, index, target, *, expected_video, cancel_event):
@@ -419,6 +424,7 @@ class CoverEditorTests(unittest.TestCase):
             self.assertFalse(dialog._export_thread.is_alive())
             self.wait(lambda: not dialog.isVisible() and not dialog._export_busy)
         self.assertFalse(destination.exists())
+        self.assertIsNone(dialog.latest_successful_export_path)
         self.assert_originals()
 
     def test_live_themes_update_editor_save_prompt_without_changing_frame_or_pixels(self):
@@ -527,6 +533,145 @@ class CoverEditorTests(unittest.TestCase):
         self.assertEqual(self.export_with_actual_save_button('cancel.png', cancel=True), self.folder)
         self.assertEqual(dialog._export_directory, self.folder / 'missing folder')
         self.assertIsNone(dialog.last_export_path)
+
+    def test_actual_export_button_reveals_latest_success_not_current_timeline_without_auto_open(self):
+        shutil.copyfile(Path(__file__).parent / 'fixtures' / 'VFR_PAIR.MOV', self.video)
+        self.original_video = self.video.read_bytes()
+        folder = self.folder / '导出目录, with spaces'
+        folder.mkdir()
+        self.dialog = EditorDialog(self.item, reader_factory=FrameReader, preview_factory=False,
+                                   initial_export_directory=folder)
+        dialog = self.dialog
+        dialog.show()
+        self.wait(lambda: dialog.save_button.isEnabled())
+        button = dialog.open_export_folder_button
+        self.assertEqual(button.text(), '打开导出文件夹')
+        self.assertFalse(button.isVisible())
+        self.assertIsNone(dialog.latest_successful_export_path)
+        requested = []
+        def reveal(path):
+            requested.append((path, threading.get_ident()))
+            return True
+        with patch('livegallery.cover_editor.reveal_in_folder', side_effect=reveal):
+            dialog.timeline.setValue(4)
+            self.wait(lambda: dialog.displayed_frame_index == 4 and dialog.save_button.isEnabled())
+            self.export_with_actual_save_button('第一帧, chosen.png')
+            first = folder / '第一帧, chosen.png'
+            self.wait(lambda: dialog.latest_successful_export_path == first, self.REAL_SAVE_TIMEOUT)
+            self.assertEqual(requested, [])
+            self.assertTrue(button.isVisible() and button.isEnabled())
+            self.assertLess(button.geometry().bottom(), dialog.save_button.mapTo(dialog, QPoint()).y())
+            dialog.timeline.setValue(2)
+            self.wait(lambda: dialog.displayed_frame_index == 2 and dialog.save_button.isEnabled())
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            self.wait(lambda: not dialog._reveal_busy)
+            self.assertEqual(requested[-1][0], first)
+            self.assertTrue(dialog.last_reveal_accepted)
+            self.assertNotEqual(requested[-1][1], threading.get_ident())
+            self.export_with_actual_save_button('第二帧, chosen.png')
+            second = folder / '第二帧, chosen.png'
+            self.wait(lambda: dialog.latest_successful_export_path == second, self.REAL_SAVE_TIMEOUT)
+            self.assertEqual(len(requested), 1)
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            self.wait(lambda: not dialog._reveal_busy)
+            self.assertEqual(requested[-1][0], second)
+        self.assertTrue(first.is_file() and second.is_file())
+        self.assert_originals()
+
+    def test_reveal_retains_success_after_save_dialog_cancel_export_error_and_cancellation(self):
+        dialog = self.open_dialog()
+        first = self.folder / '成功, first.png'
+        Image.new('RGB', (120, 90), 'blue').save(first)
+        dialog._export_finished(first, None)
+        button = dialog.open_export_folder_button
+        with patch.object(dialog, '_choose_export_path', return_value=None):
+            dialog._export_current_frame()
+        self.assertEqual(dialog.latest_successful_export_path, first)
+        for error in (PermissionError('ACL refused'), FrameCancelled('cancelled')):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(dialog, '_choose_export_path', return_value=self.folder / 'failed.png'), \
+                    patch('livegallery.cover_editor.export_frame', side_effect=error):
+                dialog._export_current_frame()
+                self.assertFalse(button.isEnabled())
+                self.wait(lambda: not dialog._export_busy)
+            self.assertIsNone(dialog.last_export_path)
+            self.assertEqual(dialog.latest_successful_export_path, first)
+            self.assertTrue(button.isVisible() and button.isEnabled())
+            with patch('livegallery.cover_editor.reveal_in_folder', return_value=True) as reveal:
+                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+                self.wait(lambda: not dialog._reveal_busy)
+                reveal.assert_called_once_with(first)
+        self.assert_originals()
+
+    def test_reveal_is_disabled_during_new_export_and_restores_previous_success_on_failure(self):
+        dialog = self.open_dialog()
+        first = self.folder / 'first.png'
+        Image.new('RGB', (120, 90), 'blue').save(first)
+        dialog._export_finished(first, None)
+        entered, release = threading.Event(), threading.Event()
+        def blocked(*_args, **_kwargs):
+            entered.set(); self.assertTrue(release.wait(3))
+            raise PermissionError('target is offline')
+        try:
+            with patch.object(dialog, '_choose_export_path', return_value=self.folder / 'second.png'), \
+                    patch('livegallery.cover_editor.export_frame', side_effect=blocked), \
+                    patch('livegallery.cover_editor.reveal_in_folder', return_value=True) as reveal:
+                dialog._export_current_frame()
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(dialog.open_export_folder_button.isVisible())
+                self.assertFalse(dialog.open_export_folder_button.isEnabled())
+                QTest.mouseClick(dialog.open_export_folder_button, Qt.MouseButton.LeftButton)
+                reveal.assert_not_called()
+                release.set()
+                self.wait(lambda: not dialog._export_busy)
+                self.assertTrue(dialog.open_export_folder_button.isEnabled())
+                self.assertEqual(dialog.latest_successful_export_path, first)
+        finally:
+            release.set()
+
+    def test_missing_export_has_friendly_error_and_preserves_latest_success(self):
+        dialog = self.open_dialog()
+        missing = self.folder / '已移动, missing.png'
+        dialog._export_finished(missing, None)
+        QTest.mouseClick(dialog.open_export_folder_button, Qt.MouseButton.LeftButton)
+        self.wait(lambda: not dialog._reveal_busy)
+        self.assertFalse(dialog.last_reveal_accepted)
+        self.assertIn('已移动、已删除或暂不可访问', dialog.export_status_label.text())
+        self.assertEqual(dialog.latest_successful_export_path, missing)
+        self.assertTrue(dialog.open_export_folder_button.isEnabled())
+        self.assert_originals()
+
+    def test_close_during_native_reveal_is_nonblocking_and_ignores_late_ui_result(self):
+        dialog = self.open_dialog()
+        path = self.folder / 'chosen.png'
+        Image.new('RGB', (120, 90), 'blue').save(path)
+        dialog._export_finished(path, None)
+        entered, release = threading.Event(), threading.Event()
+        def blocked(target):
+            self.assertEqual(target, path)
+            entered.set(); self.assertTrue(release.wait(3))
+            return True
+        completed = QSignalSpy(dialog._reveal_signals.completed)
+        try:
+            with patch('livegallery.cover_editor.reveal_in_folder', side_effect=blocked):
+                started = time.monotonic()
+                QTest.mouseClick(dialog.open_export_folder_button, Qt.MouseButton.LeftButton)
+                self.assertLess(time.monotonic() - started, .3)
+                self.assertTrue(entered.wait(1))
+                started = time.monotonic()
+                dialog.close()
+                self.assertLess(time.monotonic() - started, .3)
+                self.assertFalse(dialog.isVisible())
+                self.assertFalse(dialog.wait_for_background(.02))
+                text = dialog.export_status_label.text()
+                release.set()
+                self.assertTrue(dialog.wait_for_background(3))
+                self.app.processEvents()
+                self.assertEqual(completed.count(), 0)
+                self.assertEqual(dialog.export_status_label.text(), text)
+                self.assertIsNone(dialog.last_reveal_path)
+        finally:
+            release.set()
 
     def test_normalized_export_filename_confirms_the_actual_existing_target(self):
         dialog = self.open_dialog()
