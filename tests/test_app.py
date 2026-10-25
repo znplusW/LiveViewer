@@ -9,13 +9,14 @@ import time
 import threading
 import traceback
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QContextMenuEvent, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPalette
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QStyleFactory
@@ -193,6 +194,290 @@ class WindowTests(unittest.TestCase):
             self.window._rescan()
             self.wait_until(lambda: len(self.window.model.items) == 2 and not self.window._scan_pending)
             self.assertEqual(scan.call_count, 2)
+
+    def test_choose_folder_appends_checks_new_directories_and_keeps_current_zoom(self):
+        first = self.picture('A/one.jpg')
+        unchecked = self.picture('A/unchecked/skip.jpg')
+        other = self.picture('B/two.jpg')
+        child = self.picture('B/child/three.jpg')
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: not self.window._scan_pending and self.window._shown_image_path == first)
+        self.window.tree.set_checked_directories((first.parent,))
+        self.window.viewer._zoom_at(2, self.window.viewer._viewport_center())
+        before = self.window._current_id, self.window.viewer.zoom_factor(), self.window.viewer._scene_center()
+        with patch('livegallery.app.select_photo_folders', return_value=(other.parent, other.parent / '.')):
+            self.window.choose_folder()
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window._items) == 4)
+        self.assertEqual(self.window.folders, (first.parent, other.parent))
+        self.assertEqual(self.window.tree.checked_directories, {first.parent, other.parent, child.parent})
+        self.assertNotIn(unchecked.parent, self.window.tree.checked_directories)
+        self.assertEqual(self.window._current_id, before[0])
+        self.assertAlmostEqual(self.window.viewer.zoom_factor(), before[1], places=4)
+        self.assertLess((self.window.viewer._scene_center() - before[2]).manhattanLength(), 3)
+        generation = self.window._scan_generation
+        with patch('livegallery.app.select_photo_folders', return_value=()):
+            self.window.choose_folder()
+        self.assertEqual(self.window._scan_generation, generation)
+
+    def test_removed_branch_stays_out_of_rescan_global_search_restart_and_explicit_child_reimport(self):
+        keep = self.picture('A/keep.jpg')
+        child = self.picture('A/B/C/restore.jpg')
+        sibling = self.picture('A/B/D/stay-out.jpg')
+        original = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (keep, child, sibling)}
+        self.choose_cache('library')
+        self.wait_until(lambda: self.window._cache_key == ('library', None))
+        self.window.load_folders((keep.parent, child.parent))
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window._items) == 3)
+        child_cache = child.parent / 'LiveViewer Cache'
+        self.window._remove_folders((child.parent.parent,))
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window._items) == 1)
+        self.assertEqual(self.window.folders, (keep.parent,))
+        self.assertTrue(child_cache.is_dir())
+        self.window.search_scope.setCurrentIndex(self.window.search_scope.findData('all'))
+        self.window.search.setText('restore')
+        self.assertEqual(self.window.model.items, [])
+        self.window.search.clear()
+        self.window._rescan()
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.assertEqual([item.image_path for item in self.window._items], [keep])
+        self.window.close(); self.assertTrue(self.window.wait_for_shutdown(5)); self.window.deleteLater()
+        self.application.processEvents()
+        self.window = MainWindow(); self.window.show()
+        self.window.load_folders(self.window.preferences.last_folders)
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.assertEqual([item.image_path for item in self.window._items], [keep])
+        with patch('livegallery.app.select_photo_folders', return_value=(child.parent,)):
+            self.window.choose_folder()
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window._items) == 2)
+        self.assertEqual({item.image_path for item in self.window._items}, {keep, child})
+        self.assertNotIn(child.parent.parent, self.window.tree.known_directories)
+        self.assertNotIn(sibling.parent, self.window.tree.known_directories)
+        for mode in ('program', 'user', 'library'):
+            previous = self.window.cache
+            self.choose_cache(mode)
+            self.wait_until(lambda: not self.window._scan_pending and self.window.cache is not previous)
+            self.assertEqual({item.image_path for item in self.window._items}, {keep, child})
+            self.assertNotIn(child.parent.parent, self.window.tree.known_directories)
+        self.assertEqual(self.window.cache.base_for(child), child_cache)
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in original}, original)
+
+    def test_folder_context_action_targets_unchecked_row_and_clearly_counts_descendants(self):
+        keep = self.picture('A/keep.jpg')
+        removed = self.picture('A/B/removed.jpg')
+        descendant = self.picture('A/B/C/removed-child.jpg')
+        self.window.load_folder(keep.parent)
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.window.tree.set_checked_directories((keep.parent,))
+        node = self.window.tree._nodes[removed.parent]
+        calls = []
+        def execute():
+            menu = QApplication.activePopupWidget()
+            if menu is None:
+                QTimer.singleShot(10, execute)
+                return
+            calls.append(menu.actions()[0].text())
+            menu.actions()[0].trigger()
+            menu.close()
+        QTimer.singleShot(0, execute)
+        self.window._folder_context_menu(self.window.tree.visualItemRect(node).center())
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.assertEqual(calls, ['从 LiveViewer 移除 2 个文件夹（含子文件夹）'])
+        self.assertEqual([item.image_path for item in self.window._items], [keep])
+        self.assertEqual(self.window.tree.checked_directories, {keep.parent})
+        self.assertTrue(removed.is_file() and descendant.is_file())
+
+    def test_remove_all_cancels_pending_scan_closes_cache_and_reimport_restores_without_file_changes(self):
+        first = self.picture('A/one.jpg')
+        entered, release = threading.Event(), threading.Event()
+        def held(root, **kwargs):
+            entered.set(); release.wait(5)
+            return scan_folder(root, **kwargs)
+        try:
+            with patch('livegallery.app.scan_folder', side_effect=held):
+                self.window.load_folder(first.parent)
+                self.assertTrue(entered.wait(1))
+                self.window._remove_folders((first.parent,))
+                self.wait_until(lambda: not self.window._scan_pending and not self.window.folders)
+                release.set()
+                self.wait_until(lambda: all(not thread.is_alive() for thread in self.window._load_threads))
+            self.assertEqual(self.window.model.items, [])
+            self.assertIsNone(self.window._displayed_item)
+            self.assertIsNone(self.window.folder)
+            self.assertEqual((Preferences.load().last_folders, Preferences.load().last_folder), ([], ''))
+            self.assertTrue(first.is_file())
+            self.window.add_folders((first.parent,))
+            self.wait_until(lambda: not self.window._scan_pending and len(self.window.model.items) == 1)
+            self.assertEqual(self.window.model.items[0].image_path, first)
+        finally:
+            release.set()
+
+    def test_remove_during_deep_verification_keeps_owner_alive_and_rejects_late_result(self):
+        first = self.picture('A/one.jpg')
+        self.window.load_folder(first.parent)
+        self.wait_until(lambda: not self.window._scan_pending)
+        old = self.window.cache
+        entered, release = threading.Event(), threading.Event()
+        def held(paths, cancel=None, progress=None):
+            entered.set(); release.wait(5)
+            self.assertTrue(cancel())
+            self.assertFalse(old._closed)
+            return {'checked': 1, 'changed': [first], 'cancelled': True}
+        try:
+            with patch.object(old, 'verify_files', side_effect=held):
+                self.window._verify_cache()
+                self.assertTrue(entered.wait(1))
+                self.window._remove_folders((first.parent,))
+                self.wait_until(lambda: not self.window._scan_pending)
+                self.assertFalse(old._closed)
+                release.set()
+                self.wait_until(lambda: old._closed)
+            self.assertEqual(self.window.folders, ())
+            self.assertEqual(self.window.model.items, [])
+        finally:
+            release.set()
+
+    def test_reimported_island_can_exclude_a_deeper_branch_and_persist_it(self):
+        keep = self.picture('A/keep.jpg')
+        restored = self.picture('A/B/C/restore.jpg')
+        removed = self.picture('A/B/C/D/remove-again.jpg')
+        sibling = self.picture('A/B/S/stay-removed.jpg')
+        self.window.load_folder(keep.parent)
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.window._remove_folders((restored.parent.parent,))
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.window.add_folders((restored.parent,))
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window._items) == 3)
+        self.window._remove_folders((removed.parent,))
+        self.wait_until(lambda: not self.window._scan_pending and len(self.window._items) == 2)
+        self.assertEqual({item.image_path for item in self.window._items}, {keep, restored})
+        self.assertEqual(set(map(Path, Preferences.load().excluded_folders)), {restored.parent.parent, removed.parent})
+        self.window._rescan()
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.assertEqual({item.image_path for item in self.window._items}, {keep, restored})
+        self.assertTrue(removed.is_file() and sibling.is_file())
+
+    def test_all_offline_roots_remain_in_sidebar_for_app_only_removal(self):
+        missing = self.base / 'offline-disk'
+        self.window.load_folder(missing)
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.assertIn(missing, self.window.tree.known_directories)
+        self.assertEqual(self.window.tree.removal_targets(self.window.tree._nodes[missing]), (missing,))
+        self.window._remove_folders((missing,))
+        self.wait_until(lambda: not self.window._scan_pending)
+        self.assertEqual(self.window.folders, ())
+        self.assertEqual(self.window.tree.known_directories, set())
+        self.assertEqual(Preferences.load().last_folders, [])
+
+    def test_vertical_film_layout_preserves_photo_transform_selection_and_preferred_extent(self):
+        path = self.picture('one.jpg')
+        self.window.load_folder(path.parent)
+        self.wait_until(lambda: not self.window._scan_pending and self.window._shown_image_path == path)
+        self.window.viewer._zoom_at(2, self.window.viewer._viewport_center())
+        current = self.window._current_id
+        transform, center = self.window.viewer.transform(), self.window.viewer._scene_center()
+        resets = QSignalSpy(self.window.model.modelReset)
+        for side in ('right', 'left'):
+            self.window._set_film_layout('vertical', side)
+            for _ in range(5):
+                self.application.processEvents()
+            self.assertEqual(self.window._current_id, current)
+            self.assertEqual(self.window.viewer.transform(), transform)
+            self.assertLess((self.window.viewer._scene_center() - center).manhattanLength(), 4)
+            self.assertEqual(self.window.strip.scroll_axis, 'vertical')
+            self.assertTrue(self.window.film.side_button.isVisible())
+            self.assertGreaterEqual(self.window.viewer.viewport().width(), 160)
+        self.window._set_film_width(480)
+        self.window.resize(940, 650)
+        for _ in range(4):
+            self.application.processEvents()
+        self.assertEqual(self.window.preferences.filmstrip_width, 480)
+        self.assertLessEqual(self.window.film.width(), 480)
+        self.window.resize(1500, 950)
+        for _ in range(4):
+            self.application.processEvents()
+        self.assertEqual(self.window.film.width(), 480)
+        self.window.film.orientation_button.click()
+        for _ in range(4):
+            self.application.processEvents()
+        self.assertEqual((self.window.film.orientation, self.window.film.side), ('horizontal', 'left'))
+        self.assertEqual(resets.count(), 0)
+        self.assertEqual(Preferences.load().filmstrip_side, 'left')
+
+    def test_fullscreen_left_film_buttons_do_not_overlap_display_corner_live_badge(self):
+        self.show_live_item()
+        self.window._set_film_layout('vertical', 'left')
+        self.window._toggle_fullscreen()
+        for _ in range(5):
+            self.application.processEvents()
+        badge = self.window.fullscreen_live_badge
+        self.assertTrue(badge.isVisible())
+        self.assertEqual(badge.pos(), QPoint(16, 16))
+        for button in (self.window.film.hide_button, self.window.film.orientation_button, self.window.film.side_button):
+            rect = QRect(button.mapTo(self.window.centralWidget(), QPoint()), button.size())
+            self.assertFalse(rect.intersects(badge.geometry()))
+        inset = self.window.film._outer.contentsMargins().top()
+        self.window._displayed_item = replace(self.window._displayed_item, video_path=None)
+        self.window._update_live_overlay()
+        self.assertFalse(badge.isVisible())
+        self.assertEqual(self.window.film._outer.contentsMargins().top(), inset)
+        self.window._exit_fullscreen()
+        self.application.processEvents()
+        self.assertEqual(self.window.film._outer.contentsMargins().top(), 0)
+
+    def test_fullscreen_left_badge_font_dpi_resize_reflows_buttons_without_a_loop(self):
+        self.show_live_item()
+        self.window._set_film_layout('vertical', 'left')
+        self.window._toggle_fullscreen()
+        for _ in range(6):
+            self.application.processEvents()
+        badge = self.window.fullscreen_live_badge
+        original = badge.height()
+        changes = QSignalSpy(badge.sizeChanged)
+        badge.setStyleSheet(badge.styleSheet() + '\nQLabel { font-size: 28px; padding: 8px 14px; }')
+        QApplication.sendEvent(badge, QEvent(QEvent.Type.DevicePixelRatioChange))
+        for _ in range(8):
+            self.application.processEvents()
+        self.assertGreater(badge.height(), original)
+        self.assertGreaterEqual(self.window.film._outer.contentsMargins().top(), badge.geometry().bottom() + 8)
+        for button in (self.window.film.hide_button, self.window.film.orientation_button, self.window.film.side_button):
+            rect = QRect(button.mapTo(self.window.centralWidget(), QPoint()), button.size())
+            self.assertFalse(rect.intersects(badge.geometry()))
+        count = changes.count()
+        for _ in range(12):
+            self.application.processEvents()
+        self.assertEqual(changes.count(), count)
+        self.assertLess(count, 5)
+
+    def test_cancelled_thumbnail_press_then_layout_switch_restores_photo_selection_and_anchor(self):
+        self.show_live_item()
+        first = self.window._displayed_item
+        items = [first, *(MediaItem(f'other-{row}', self.base / f'other-{row}.jpg') for row in range(80))]
+        self.catalog(items, cached=True)
+        self.window._select_row(0, allow_autoplay=False)
+        for _ in range(6):
+            self.application.processEvents()
+        strip = self.window.strip
+        strip.current_scrollbar().setValue(20 * strip.itemDelegate().sizeHint(None, None).width())
+        for _ in range(3):
+            self.application.processEvents()
+        anchor = self.window.film.capture_anchor()
+        row = anchor['index'].row()
+        position = strip.visualRect(self.window.model.index(row)).center()
+        clicked = QSignalSpy(strip.clicked)
+        QTest.mousePress(strip.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        self.assertNotEqual(strip.currentIndex().row(), 0)
+        self.assertEqual(self.window._current_id, first.id)
+        self.window._set_film_layout('vertical', 'left')
+        for _ in range(6):
+            self.application.processEvents()
+        QTest.mouseRelease(strip.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        for _ in range(6):
+            self.application.processEvents()
+        self.assertEqual(strip.currentIndex().row(), 0)
+        self.assertEqual(self.window.grid.currentIndex().row(), 0)
+        self.assertEqual(self.window._current_id, first.id)
+        self.assertEqual(self.window.film.capture_anchor()['index'].row(), row)
+        self.assertEqual(clicked.count(), 0)
 
     def test_folder_checkboxes_filter_exact_directories_and_global_search_temporarily_bypasses_them(self):
         selected = self.picture('A/needle.jpg')

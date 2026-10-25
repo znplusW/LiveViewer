@@ -27,8 +27,13 @@ def _identifier(kind: str, path: Path) -> str:
 
 def scan_folder(root: Path, cancel: Callable[[], bool] | None = None,
                 progress: Callable[[int], None] | None = None, *,
-                recursive: bool = True) -> list[MediaItem]:
+                recursive: bool = True, excluded=()) -> list[MediaItem]:
     root = Path(root).absolute()
+    excluded = tuple(Path(path).absolute() for path in excluded)
+    def omitted(path):
+        return any(path.is_relative_to(branch) for branch in excluded)
+    if omitted(root):
+        return []
     if not root.is_dir():
         raise NotADirectoryError(str(root))
     if root.name.casefold() == ".liveviewer-work":
@@ -43,6 +48,7 @@ def scan_folder(root: Path, cancel: Callable[[], bool] | None = None,
         parent = Path(directory)
         directories[:] = (sorted((name for name in directories
                                   if name.casefold() != ".liveviewer-work"
+                                  and not omitted(parent / name)
                                   and not (parent / name).is_symlink()
                                   and not (name.casefold() == CACHE_DIRECTORY.casefold()
                                            and is_managed_cache_directory(parent / name))), key=natural_key)

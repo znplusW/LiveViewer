@@ -136,6 +136,30 @@ class CachePreferencesTests(unittest.TestCase):
             self.assertEqual(loaded.last_folder, '')
             self.assertEqual(loaded.last_folders, [])
 
+    def test_explicit_empty_import_list_does_not_revive_legacy_root_and_exclusions_are_validated(self):
+        values = {'last_folder': str(self.base / 'old'), 'last_folders': [],
+                  'excluded_folders': [str(self.base / 'removed'), None, 7, 'bad\0path', str(self.base / 'removed')]}
+        (self.data / 'settings.json').write_text(json.dumps(values), encoding='utf-8')
+        result = Preferences.load()
+        self.assertEqual(result.last_folders, [])
+        self.assertEqual(result.last_folder, '')
+        self.assertEqual(result.excluded_folders, [str(self.base / 'removed')])
+        result.save()
+        self.assertEqual(Preferences.load().excluded_folders, result.excluded_folders)
+
+    def test_filmstrip_layout_dimensions_roundtrip_and_validate_without_losing_other_settings(self):
+        Preferences(filmstrip_orientation='vertical', filmstrip_side='left', filmstrip_width=310,
+                    filmstrip_height=260, muted=False).save()
+        result = Preferences.load()
+        self.assertEqual((result.filmstrip_orientation, result.filmstrip_side, result.filmstrip_width,
+                          result.filmstrip_height, result.muted), ('vertical', 'left', 310, 260, False))
+        for width, expected in ((True, 220), ('bad', 220), (20, 180), (900, 480)):
+            (self.data / 'settings.json').write_text(json.dumps({'filmstrip_width': width,
+                'filmstrip_orientation': 'bad', 'filmstrip_side': 'bad', 'muted': False}), encoding='utf-8')
+            result = Preferences.load()
+            self.assertEqual((result.filmstrip_width, result.filmstrip_orientation, result.filmstrip_side,
+                              result.muted), (expected, 'horizontal', 'right', False))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QColor,
     QEventPoint,
     QImage,
+    QInputDevice,
     QMouseEvent,
     QPainter,
     QPixmap,
@@ -159,7 +160,11 @@ class ViewerCanvas(QGraphicsView):
         self._mouse_down = False
         self._mouse_moved = False
         self._mouse_double_drag = False
+        self._mouse_event_source = Qt.MouseEventSource.MouseEventNotSynthesized
+        self._mouse_input_device = None
         self._last_mouse_click_time = 0.0
+        self._last_mouse_click_timestamp = 0
+        self._last_mouse_click_device = None
         self._last_mouse_click_position = QPointF()
         self._pointer_start = QPointF()
         self._pointer_last = QPointF()
@@ -167,6 +172,7 @@ class ViewerCanvas(QGraphicsView):
         self._releasing_capture = False
         self._touch_active = False
         self._touch_had_multi = False
+        self._touch_double_drag = False
         self._touch_was_fit = True
         self._touch_count = 0
         self._touch_device = None
@@ -175,6 +181,8 @@ class ViewerCanvas(QGraphicsView):
         self._pinch_center = QPointF()
         self._ignore_mouse_until = 0.0
         self._last_tap_time = 0.0
+        self._last_tap_timestamp = 0
+        self._last_tap_device = None
         self._last_tap_position = QPointF()
         self._window_filter_target: QWidget | None = None
         self._touch_started_on_image = False
@@ -191,6 +199,9 @@ class ViewerCanvas(QGraphicsView):
     def set_photo(self, image: QImage, video_path: Path | None = None) -> None:
         """Replace the current image, cancelling every pending playback request."""
         self._cancel_zoom_animation(apply_deferred=False)
+        self._last_tap_time = 0.0
+        self._last_tap_timestamp = 0
+        self._last_tap_device = None
         self.zoom_navigator.cancel_interaction()
         self._reset_horizontal_wheel()
         self.stop_live()
@@ -351,12 +362,19 @@ class ViewerCanvas(QGraphicsView):
         self._mouse_moved = False
         self._mouse_double_drag = False
         self._last_mouse_click_time = 0.0
+        self._last_mouse_click_timestamp = 0
+        self._last_mouse_click_device = None
+        self._mouse_input_device = None
         self._hold_consumed = True
         if self._touch_active:
             self._touch_context_cancelled = True
         self._touch_active = False
         self._touch_count = 0
         self._touch_had_multi = False
+        self._touch_double_drag = False
+        self._last_tap_time = 0.0
+        self._last_tap_timestamp = 0
+        self._last_tap_device = None
         self._stop_playback()
         self._release_capture()
         self.viewport().unsetCursor()
@@ -699,28 +717,52 @@ class ViewerCanvas(QGraphicsView):
         return event.source() != Qt.MouseEventSource.MouseEventNotSynthesized
 
     def _ignore_mouse(self, event: QMouseEvent) -> bool:
-        return (
-            self._touch_active
-            or time.monotonic() < self._ignore_mouse_until
-            or self._is_synthesized_mouse(event)
-        )
+        if self._touch_active or time.monotonic() < self._ignore_mouse_until:
+            return True
+        if not self._is_synthesized_mouse(event):
+            return False
+        # An explicitly promoted native double-click can own its following
+        # system mouse tail. Qt-promoted events from our raw touch never do.
+        return not (self._mouse_down and self._mouse_double_drag
+                    and event.source() == self._mouse_event_source
+                    and event.pointingDevice() == self._mouse_input_device)
 
-    def _is_double_drag_press(self, position: QPointF) -> bool:
-        delta = position - self._last_mouse_click_position
+    @staticmethod
+    def _recent_contact(event, last_time, last_timestamp, last_device) -> bool:
+        if last_time <= 0 or event.pointingDevice() != last_device:
+            return False
+        timestamp = event.timestamp()
+        if timestamp > 0 and last_timestamp > 0 and timestamp >= last_timestamp:
+            elapsed = timestamp - last_timestamp
+        else:
+            # Zero/unavailable or backwards clocks must never compare against
+            # another device's epoch, nor create an unbounded repeat gesture.
+            elapsed = (time.monotonic() - last_time) * 1000
+        return 0 <= elapsed <= QApplication.doubleClickInterval()
+
+    def _is_double_drag_press(self, event: QMouseEvent) -> bool:
+        delta = event.position() - self._last_mouse_click_position
+        hints = QApplication.styleHints()
+        distance = hints.mouseDoubleClickDistance()
+        if event.pointingDevice().type() == QInputDevice.DeviceType.TouchPad:
+            distance = max(distance, hints.touchDoubleTapDistance())
         return (
             not self._fit_mode
-            and self._last_mouse_click_time > 0
-            and time.monotonic() - self._last_mouse_click_time <= QApplication.doubleClickInterval() / 1000
-            and max(abs(delta.x()), abs(delta.y())) <= QApplication.styleHints().mouseDoubleClickDistance()
+            and self._recent_contact(event, self._last_mouse_click_time,
+                                     self._last_mouse_click_timestamp, self._last_mouse_click_device)
+            and max(abs(delta.x()), abs(delta.y())) <= distance
         )
 
-    def _begin_mouse_press(self, position: QPointF, *, double_drag: bool = False) -> None:
+    def _begin_mouse_press(self, event: QMouseEvent, *, double_drag: bool = False) -> None:
+        position = event.position()
         self._stop_playback()
         self._hold_timer.stop()
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         self._mouse_down = True
         self._mouse_moved = False
         self._mouse_double_drag = double_drag
+        self._mouse_event_source = event.source()
+        self._mouse_input_device = event.pointingDevice()
         self._hold_consumed = double_drag
         self._pointer_start = QPointF(position)
         self._pointer_last = QPointF(position)
@@ -730,6 +772,8 @@ class ViewerCanvas(QGraphicsView):
             # delay; it must never briefly acquire playback ownership.
             self._click_timer.stop()
             self._last_mouse_click_time = 0.0
+            self._last_mouse_click_timestamp = 0
+            self._last_mouse_click_device = None
         elif self._video_path is not None and self.image_contains_viewport_point(position):
             self._hold_timer.start(self._hold_ms)
         if self.isVisible():
@@ -749,7 +793,7 @@ class ViewerCanvas(QGraphicsView):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
-        self._begin_mouse_press(event.position(), double_drag=self._is_double_drag_press(event.position()))
+        self._begin_mouse_press(event, double_drag=self._is_double_drag_press(event))
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -797,23 +841,34 @@ class ViewerCanvas(QGraphicsView):
                 self._toggle_double_zoom(event.position())
             elif was_click:
                 self._last_mouse_click_time = time.monotonic()
+                self._last_mouse_click_timestamp = event.timestamp()
+                self._last_mouse_click_device = event.pointingDevice()
                 self._last_mouse_click_position = QPointF(event.position())
                 self._click_timer.start(QApplication.doubleClickInterval())
             else:
                 self._last_mouse_click_time = 0.0
+                self._last_mouse_click_timestamp = 0
+                self._last_mouse_click_device = None
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
-        if self._ignore_mouse(event):
+        system_double = (event.source() == Qt.MouseEventSource.MouseEventSynthesizedBySystem
+                         and event.pointingDevice().type() != QInputDevice.DeviceType.TouchScreen
+                         and not self._touch_active and time.monotonic() >= self._ignore_mouse_until)
+        if self._ignore_mouse(event) and not system_double:
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self._click_timer.stop()
-            if self._mouse_double_drag or self._is_double_drag_press(event.position()):
-                if not self._mouse_double_drag:
-                    self._begin_mouse_press(event.position(), double_drag=True)
+            if not self._fit_mode or self._mouse_double_drag:
+                # The native DoubleClick itself identifies the second contact;
+                # do not require a retained first click or a second spatial test.
+                if not self._mouse_double_drag or event.pointingDevice() != self._mouse_input_device:
+                    self._begin_mouse_press(event, double_drag=True)
+                else:
+                    self._mouse_event_source = event.source()
                 event.accept()
                 return
             self._toggle_double_zoom(event.position())
@@ -927,14 +982,27 @@ class ViewerCanvas(QGraphicsView):
             return True
         active = [p for p in points if p.state() != QEventPoint.State.Released]
         if event_type == QEvent.Type.TouchBegin:
+            previous_tap = (self._last_tap_time, self._last_tap_timestamp, self._last_tap_device)
+            second_drag = False
+            if len(active) == 1 and not self._fit_mode and self._touch_started_on_image:
+                delta = active[0].position() - self._last_tap_position
+                distance = max(36, QApplication.styleHints().touchDoubleTapDistance())
+                second_drag = (self._recent_contact(event, self._last_tap_time,
+                                                    self._last_tap_timestamp, self._last_tap_device)
+                               and max(abs(delta.x()), abs(delta.y())) <= distance)
             self.stop_live()
+            if not second_drag:
+                # Starting the next contact is the sole cancellation path that
+                # may retain the preceding tap for a fit-mode double-click.
+                self._last_tap_time, self._last_tap_timestamp, self._last_tap_device = previous_tap
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._touch_active = True
             self._touch_had_multi = False
+            self._touch_double_drag = second_drag
             self._touch_context_cancelled = False
             self._blank_context_seen = False
             self._touch_was_fit = self._fit_mode
-            self._hold_consumed = False
+            self._hold_consumed = second_drag
             self._mouse_moved = False
             self._touch_count = len(active)
             self._touch_device = event.pointingDevice()
@@ -943,7 +1011,11 @@ class ViewerCanvas(QGraphicsView):
                 self._pointer_start = QPointF(active[0].position())
                 self._pointer_last = QPointF(self._pointer_start)
             if len(active) == 1:
-                if self._touch_started_on_image and self._video_path is not None:
+                if second_drag:
+                    self._last_tap_time = 0.0
+                    self._last_tap_timestamp = 0
+                    self._last_tap_device = None
+                elif self._touch_started_on_image and self._video_path is not None:
                     self._hold_timer.start(self._hold_ms)
                 elif not self._touch_started_on_image:
                     self._blank_hold_timer.start(max(
@@ -953,7 +1025,7 @@ class ViewerCanvas(QGraphicsView):
             return True
         if event_type == QEvent.Type.TouchEnd or not active:
             position = QPointF(points[0].position()) if points else self._pointer_last
-            self._finish_touch(position)
+            self._finish_touch(position, event)
             return True
         previous_count = self._touch_count
         self._touch_count = len(active)
@@ -994,10 +1066,11 @@ class ViewerCanvas(QGraphicsView):
         self._pointer_last = position
         return True
 
-    def _finish_touch(self, position: QPointF) -> None:
+    def _finish_touch(self, position: QPointF, event) -> None:
         owned_press = self._touch_active
         delta = position - self._pointer_start
         had_multi = self._touch_had_multi
+        double_drag = owned_press and self._touch_double_drag
         was_fit = self._touch_was_fit
         was_tap = (owned_press and self._touch_started_on_image
                    and not had_multi and not self._mouse_moved and not self._hold_consumed)
@@ -1008,8 +1081,14 @@ class ViewerCanvas(QGraphicsView):
         self._touch_active = False
         self._touch_count = 0
         self._touch_had_multi = False
+        self._touch_double_drag = False
         self._release_capture()
-        if (
+        if double_drag and not had_multi and not self._mouse_moved:
+            self._last_tap_time = 0.0
+            self._last_tap_timestamp = 0
+            self._last_tap_device = None
+            self._toggle_double_zoom(position)
+        elif (
             owned_press
             and not had_multi
             and was_fit
@@ -1021,19 +1100,25 @@ class ViewerCanvas(QGraphicsView):
         elif was_tap:
             now = time.monotonic()
             is_double = (
-                now - self._last_tap_time <= QApplication.doubleClickInterval() / 1000
+                self._recent_contact(event, self._last_tap_time, self._last_tap_timestamp, self._last_tap_device)
                 and (position - self._last_tap_position).manhattanLength() < 36
             )
             if is_double:
                 self._click_timer.stop()
                 self._last_tap_time = 0.0
+                self._last_tap_timestamp = 0
+                self._last_tap_device = None
                 self._toggle_double_zoom(position)
             else:
                 self._last_tap_time = now
+                self._last_tap_timestamp = event.timestamp()
+                self._last_tap_device = event.pointingDevice()
                 self._last_tap_position = position
                 self._click_timer.start(QApplication.doubleClickInterval())
         else:
             self._last_tap_time = 0.0
+            self._last_tap_timestamp = 0
+            self._last_tap_device = None
 
     def _suppress_touch_context(self, event: QContextMenuEvent) -> bool:
         if event.reason() == QContextMenuEvent.Reason.Keyboard:

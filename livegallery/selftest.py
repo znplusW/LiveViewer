@@ -477,7 +477,7 @@ def _check_zoom_navigation_overview(viewer: ViewerCanvas, fixtures: Path, report
 def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
     from unittest.mock import patch
     from PySide6.QtCore import QEvent
-    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtGui import QInputDevice, QMouseEvent, QPointingDevice
 
     original_hold = viewer._hold_ms
     results = []
@@ -488,47 +488,71 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
     viewer.setFocus()
     QCoreApplication.processEvents()
 
-    def mouse(event_type, position):
+    def mouse(event_type, position, *, timestamp=0, device=None,
+              source=Qt.MouseEventSource.MouseEventNotSynthesized):
         # QTest.mouseDClick(QWindow) sends a complete double-click sequence;
         # adding a preceding click would create a third click and reverse zoom.
         # Send the two precise driver variants through the real viewport instead.
         moving = event_type == QEvent.Type.MouseMove
         released = event_type == QEvent.Type.MouseButtonRelease
-        event = QMouseEvent(event_type, QPointF(position),
+        event = QMouseEvent(event_type, QPointF(position), QPointF(position),
                             QPointF(viewer.viewport().mapToGlobal(position)),
                             Qt.MouseButton.NoButton if moving else Qt.MouseButton.LeftButton,
                             Qt.MouseButton.NoButton if released else Qt.MouseButton.LeftButton,
-                            Qt.KeyboardModifier.NoModifier)
+                            Qt.KeyboardModifier.NoModifier, source,
+                            device or QPointingDevice.primaryPointingDevice())
+        event.setTimestamp(timestamp)
         QApplication.sendEvent(viewer.viewport(), event)
         QCoreApplication.processEvents()
 
     try:
         with patch.object(viewer._player, 'play', wraps=viewer._player.play) as playback:
-            for route in ('second-press', 'double-click'):
+            known_pad = QPointingDevice('self-test touchpad', 71010, QInputDevice.DeviceType.TouchPad,
+                                         QPointingDevice.PointerType.Generic,
+                                         QInputDevice.Capability.Position, 1, 3)
+            routes = ('second-press', 'double-click', 'native-without-history',
+                      'system-double-click', 'delayed-input-timestamp', 'known-touchpad-drift')
+            for route in routes:
                 viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'), fixtures / 'Portrait_HEVC.MOV')
                 viewer.set_options(hold_ms=hold)
                 center = viewer.viewport().rect().center()
                 viewer._zoom_at(2.0, QPointF(center))
                 position = center
                 before_scale, before_center = viewer.transform().m11(), viewer._scene_center()
-                mouse(QEvent.Type.MouseButtonPress, position)
-                mouse(QEvent.Type.MouseButtonRelease, position)
-                if route == 'second-press':
-                    mouse(QEvent.Type.MouseButtonPress, position)
-                else:
-                    mouse(QEvent.Type.MouseButtonDblClick, position)
-                mouse(QEvent.Type.MouseMove, position + QPoint(1, 0))
-                QTest.qWait(hold + 80)
-                assert playback.call_count == 0 and not viewer._play_requested, 'Tap-to-drag briefly requested Live playback'
-                assert viewer._photo.isVisible() and not viewer._video.isVisible()
-                mouse(QEvent.Type.MouseMove, position + QPoint(80, 35))
-                mouse(QEvent.Type.MouseButtonRelease, position + QPoint(80, 35))
+                device = known_pad if route == 'known-touchpad-drift' else QPointingDevice.primaryPointingDevice()
+                hints = QApplication.styleHints()
+                mouse_distance = 4 if route == 'known-touchpad-drift' else hints.mouseDoubleClickDistance()
+                touch_distance = 40 if route == 'known-touchpad-drift' else hints.touchDoubleTapDistance()
+                source = (Qt.MouseEventSource.MouseEventSynthesizedBySystem if route == 'system-double-click'
+                          else Qt.MouseEventSource.MouseEventNotSynthesized)
+                with patch.object(hints, 'mouseDoubleClickDistance', return_value=mouse_distance), \
+                        patch.object(hints, 'touchDoubleTapDistance', return_value=touch_distance):
+                    if route != 'native-without-history':
+                        mouse(QEvent.Type.MouseButtonPress, position, timestamp=1000, device=device)
+                        mouse(QEvent.Type.MouseButtonRelease, position, timestamp=1020, device=device)
+                    if route == 'delayed-input-timestamp':
+                        QTest.qWait(QApplication.doubleClickInterval() + 40)
+                    if route == 'known-touchpad-drift':
+                        position += QPoint(12, 0)
+                    if route == 'system-double-click':
+                        mouse(QEvent.Type.MouseButtonPress, position, timestamp=1100, device=device)
+                    second_kind = (QEvent.Type.MouseButtonDblClick if route in (
+                        'double-click', 'native-without-history', 'system-double-click') else QEvent.Type.MouseButtonPress)
+                    mouse(second_kind, position, timestamp=1100, device=device, source=source)
+                    mouse(QEvent.Type.MouseMove, position + QPoint(1, 0), device=device, source=source)
+                    QTest.qWait(hold + 80)
+                    assert playback.call_count == 0 and not viewer._play_requested, f'{route} briefly requested Live playback'
+                    assert viewer._photo.isVisible() and not viewer._video.isVisible()
+                    mouse(QEvent.Type.MouseMove, position + QPoint(80, 35), device=device, source=source)
+                    mouse(QEvent.Type.MouseButtonRelease, position + QPoint(80, 35), device=device, source=source)
                 QCoreApplication.processEvents()
                 assert abs(viewer.transform().m11() - before_scale) < 1e-6, 'Tap-to-drag changed the zoom'
                 assert (viewer._scene_center() - before_center).manhattanLength() > .5, 'Tap-to-drag did not pan'
                 assert not viewer.is_zoom_animating() and not viewer._click_timer.isActive()
                 results.append({'route': route, 'pause_before_drag_ms': hold + 80,
-                                'play_calls': playback.call_count, 'zoom_preserved': True, 'panned': True})
+                                'play_calls': playback.call_count, 'zoom_preserved': True, 'panned': True,
+                                'input_timestamps_ms': [1000, 1020, 1100] if route != 'native-without-history' else [1100],
+                                'input_device': 'explicit touchpad fixture' if device is known_pad else 'primary pointer'})
             center = viewer.viewport().rect().center()
             position = center
             mouse(QEvent.Type.MouseButtonPress, position)
@@ -539,9 +563,40 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
             _wait(lambda: not viewer.is_zoom_animating(), 3)
             assert abs(viewer.zoom_factor() - 1.0) < .005
             assert playback.call_count == 0
+            viewer.set_options(hold_ms=original_hold)
+            mouse(QEvent.Type.MouseButtonPress, position)
+            _wait(lambda: playback.call_count == 1, 5)
+            assert viewer._hold_timer.interval() == original_hold
+            mouse(QEvent.Type.MouseButtonRelease, position)
+            viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'), fixtures / 'Portrait_HEVC.MOV')
+            viewer._zoom_at(2.0, QPointF(center))
+            before_scale, before_center = viewer.transform().m11(), viewer._scene_center()
+            device = QTest.createTouchDevice()
+            gesture = QTest.touchEvent(target, device, False)
+            first = viewer.viewport().mapTo(viewer.window(), center)
+            second = first + QPoint(5, 0)
+            gesture.press(0, first, target).commit()
+            gesture.release(0, first, target).commit()
+            gesture.press(0, second, target).commit()
+            QTest.qWait(original_hold + 80)
+            assert playback.call_count == 1 and not viewer._play_requested, 'Raw second touch started Live during its pause'
+            assert not viewer._hold_timer.isActive(), 'Raw second contact retained a Live hold timer'
+            gesture.move(0, second + QPoint(80, 35), target).commit()
+            gesture.release(0, second + QPoint(80, 35), target).commit()
+            assert abs(viewer.transform().m11() - before_scale) < 1e-6
+            assert (viewer._scene_center() - before_center).manhattanLength() > .5
+            assert not viewer.is_zoom_animating() and not viewer._click_timer.isActive()
+            gesture.press(0, first, target).commit()
+            _wait(lambda: playback.call_count == 2, 5)
+            gesture.release(0, first, target).commit()
         return {'routes': results, 'no_transient_live_request': True, 'zoom_preserved': True,
                 'panned': True, 'ordinary_double_click_zoom_preserved': True,
                 'event_injection': 'Explicit QMouseEvent press/release/second-press or DoubleClick',
+                'native_history_independent': True, 'same_device_input_timestamps': True,
+                'known_touchpad_drift_guard': True, 'raw_second_contact_no_hold': True,
+                'raw_touch_qwindow_injection': True, 'raw_pause_before_drag_ms': original_hold + 80,
+                'mouse_guard_hold_delay_ms': hold, 'raw_hold_delay_ms': original_hold,
+                'independent_mouse_and_touch_hold_play': True, 'independent_hold_delay_ms': original_hold,
                 'hold_setting_unchanged': True, 'physical_touchpad_hardware': False}
     finally:
         viewer.stop_live()
@@ -1202,6 +1257,261 @@ def _check_filter_blank_click(window):
     return {'right_blank_click_keeps_menu_open': True}
 
 
+def _check_filmstrip_layouts(window, report_dir: Path):
+    """Exercise dock buttons, real input and persisted geometry in the application."""
+    from PySide6.QtCore import QRect
+    from PySide6.QtTest import QSignalSpy
+    from .app import MainWindow
+    from .settings import Preferences
+
+    panel, strip, viewer, model = window.film, window.strip, window.viewer, window.model
+    fields = ('filmstrip_orientation', 'filmstrip_side', 'filmstrip_height', 'filmstrip_width')
+    original = {name: getattr(window.preferences, name) for name in fields}
+    remembered, geometry = window._remembered_strip, window.saveGeometry()
+    current_id, generation = window._current_id, window._scan_generation
+    original_transform, original_center = viewer.transform(), viewer._scene_center()
+    original_fit = viewer._fit_mode
+    device = QTest.createTouchDevice()
+    restarted = None
+    trace_reset = None
+    reset_traces = []
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    def settle():
+        for _ in range(5):
+            QCoreApplication.processEvents()
+            QTest.qWait(1)
+
+    def click(button):
+        assert button.isVisible() and button.isEnabled()
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton, pos=button.rect().center())
+        settle()
+
+    def state():
+        tile = strip.visualRect(model.index(0))
+        return {'film_width': panel.width(), 'film_height': panel.height(),
+                'preview_width': tile.width(), 'preview_height': tile.height(),
+                'viewer_width': viewer.viewport().width(), 'viewer_height': viewer.viewport().height()}
+
+    def drag(amount, touch=False):
+        handle = panel.resize_handle
+        horizontal = panel.orientation == 'horizontal'
+        direction = 1 if panel.side == 'left' else -1
+        delta = QPoint(0, -amount) if horizontal else QPoint(direction * amount, 0)
+        start = handle.rect().center()
+        end_global = handle.mapToGlobal(start) + delta
+        if touch:
+            target = window.windowHandle()
+            assert target is not None and target.isExposed()
+            point = handle.mapTo(window, start)
+            sequence = QTest.touchEvent(target, device, False)
+            sequence.press(0, point, target).commit()
+            sequence.move(0, window.mapFromGlobal(end_global), target).commit()
+            settle()
+            sequence.release(0, window.mapFromGlobal(end_global), target).commit()
+        else:
+            QTest.mousePress(handle, Qt.MouseButton.LeftButton, pos=start)
+            QTest.mouseMove(handle, handle.mapFromGlobal(end_global))
+            settle()
+            QTest.mouseRelease(handle, Qt.MouseButton.LeftButton, pos=handle.mapFromGlobal(end_global))
+        settle()
+
+    try:
+        window._toggle_grid(False)
+        window._toggle_strip(True)
+        window._set_film_layout('horizontal', 'right')
+        window._set_film_height(220)
+        window._set_film_width(240)
+        window.resize(1280, 850)
+        window.activateWindow()
+        settle()
+        # Candidate analysis legitimately replaces catalog rows. Finish the
+        # fixture's real pair jobs before measuring layout-only model reuse.
+        pending_pairs = [item for item in window._primary_items if item.pending]
+        for item in pending_pairs:
+            window._request_pair(item, 3)
+        _wait(lambda: not any(item.pending for item in window._primary_items)
+              and not any(context[0] == 'pair' for context in window._request_context.values()), 25)
+        _wait(lambda: bool(model.thumbnails) and not model.pending, 25)
+        cached = {path: value.cacheKey() for path, value in model.thumbnails.items()}
+        assert cached, 'Filmstrip must have real decoded cached thumbnails'
+        resets, selected = QSignalSpy(model.modelReset), QSignalSpy(strip.clicked)
+        def trace_reset():
+            reset_traces.append({'stack': ''.join(traceback.format_stack(limit=14)),
+                                 'pending_pairs': [item.id for item in window._primary_items if item.pending],
+                                 'background_pair': window._background_pair_id})
+        model.modelReset.connect(trace_reset)
+        playback = QSignalSpy(viewer._player.playbackStateChanged)
+        viewer.fit_image()
+        viewer._zoom_at(2.5, viewer._viewport_center())
+        transform, center = viewer.transform(), viewer._scene_center()
+        strip.current_scrollbar().setValue(strip.current_scrollbar().maximum() // 2)
+        settle()
+        anchor = panel.capture_anchor()
+        assert anchor is not None
+
+        def preserved(check_anchor=False):
+            assert window.model is model and strip.model() is model
+            assert window._current_id == current_id and window._scan_generation == generation
+            assert resets.count() == 0 and selected.count() == 0, {
+                'model_reset_count': resets.count(), 'strip_clicked_count': selected.count(),
+                'reset_traces': reset_traces}
+            assert all(path in model.thumbnails and model.thumbnails[path].cacheKey() == key
+                       for path, key in cached.items()), 'Dock change cleared or decoded cached thumbnails again'
+            assert abs(viewer.transform().m11() - transform.m11()) < .00001
+            assert (viewer._scene_center() - center).manhattanLength() < 5
+            assert not viewer._play_requested
+            assert all(str(playback.at(i)[0]).split('.')[-1] != 'PlayingState' for i in range(playback.count()))
+            navigator = viewer.zoom_navigator
+            assert navigator.isVisible() and viewer.viewport().rect().contains(navigator.geometry())
+            if check_anchor:
+                rect = strip.visualRect(model.index(anchor['index'].row()))
+                assert rect.intersects(strip.viewport().rect()), 'Dock change lost the filmstrip browsing anchor'
+
+        preserved(True)
+        assert panel.hide_button.text() == '↓' and not panel.side_button.isVisible()
+        window.grab().save(str(report_dir / 'filmstrip-bottom.png'))
+        click(panel.orientation_button)
+        assert (panel.orientation, panel.side) == ('vertical', 'right')
+        assert panel.hide_button.text() == '→' and panel.side_button.isVisible()
+        assert strip.scroll_axis == 'vertical' and strip.horizontalScrollBar().maximum() == 0
+        preserved(True)
+        right_before = state()
+        drag(42)
+        right_mouse = state()
+        assert right_mouse['film_width'] > right_before['film_width']
+        assert right_mouse['preview_width'] > right_before['preview_width']
+        assert right_mouse['preview_height'] > right_before['preview_height']
+        assert right_mouse['viewer_width'] < right_before['viewer_width']
+        preserved()
+        drag(-42)
+        _wait(lambda: abs(panel.width() - right_before['film_width']) <= 2, 3)
+        drag(38, touch=True)
+        right_touch = state()
+        assert right_touch['film_width'] > right_before['film_width']
+        assert right_touch['preview_height'] > right_before['preview_height']
+        preserved()
+        window.grab().save(str(report_dir / 'filmstrip-right.png'))
+
+        # Vertical scrolling is actual window-routed touch and never selection.
+        bar = strip.current_scrollbar()
+        assert bar.maximum() > 0
+        bar.setValue(0)
+        settle()
+        target = window.windowHandle()
+        point = strip.viewport().mapTo(window, strip.viewport().rect().center())
+        distance = min(90, strip.viewport().height() // 4)
+        sequence = QTest.touchEvent(target, device, False)
+        sequence.press(0, point + QPoint(0, distance), target).commit()
+        sequence.move(0, point, target).commit()
+        sequence.release(0, point - QPoint(0, distance), target).commit()
+        settle()
+        assert bar.value() > 0 and selected.count() == 0
+        assert window._current_id == current_id
+        click(panel.side_button)
+        assert panel.side == 'left' and panel.hide_button.text() == '←'
+        left_before = state()
+        drag(32)
+        assert panel.width() > left_before['film_width'] and state()['viewer_width'] < left_before['viewer_width']
+        drag(-32, touch=True)
+        _wait(lambda: abs(panel.width() - left_before['film_width']) <= 2, 3)
+        preserved()
+        window.grab().save(str(report_dir / 'filmstrip-left.png'))
+
+        # Keep the complete display-corner LIVE badge and film controls separate.
+        assert window._displayed_item.is_live, 'Layout self-test needs a live photo'
+        window._toggle_fullscreen()
+        settle()
+        badge = window.fullscreen_live_badge
+        assert window._fullscreen_active and panel.isVisible() and badge.isVisible()
+        assert not panel.library_label.isVisible() and not panel.analysis_label.isVisible()
+        for button in (panel.hide_button, panel.orientation_button, panel.side_button):
+            rect = QRect(button.mapTo(window.centralWidget(), QPoint()), button.size())
+            assert not rect.intersects(badge.geometry()), 'Fullscreen LIVE badge covers a filmstrip control'
+        window.grab().save(str(report_dir / 'filmstrip-left-fullscreen.png'))
+        click(panel.side_button)
+        assert panel.side == 'right' and panel.isVisible()
+        click(panel.side_button)
+        assert panel.side == 'left' and badge.isVisible()
+        click(panel.hide_button)
+        assert not panel.isVisible()
+        window._toggle_strip(True)
+        settle()
+        assert panel.isVisible() and panel.side == 'left'
+        window._toggle_fullscreen()
+        settle()
+        window._toggle_grid(True)
+        settle()
+        assert window._grid_mode and not panel.isVisible()
+        window._toggle_grid(False)
+        settle()
+        assert panel.isVisible() and panel.side == 'left'
+
+        click(panel.orientation_button)
+        assert panel.orientation == 'horizontal' and panel.side == 'left'
+        click(panel.orientation_button)
+        assert panel.orientation == 'vertical' and panel.side == 'left'
+        window._set_film_width(480)
+        click(panel.orientation_button)
+        window._set_film_height(480)
+        window.resize(940, 650)
+        settle()
+        small_height = panel.height()
+        assert window.preferences.filmstrip_height == 480 and small_height < 480, {
+            'window': window.size().toTuple(), 'photo_area': window.photo_area.height(),
+            'film': small_height, 'preferred': window.preferences.filmstrip_height}
+        window.resize(1500, 950)
+        settle()
+        assert window.preferences.filmstrip_height == 480 and panel.height() == 480
+        click(panel.orientation_button)
+        assert window.preferences.filmstrip_width == 480 and panel.width() == 480
+        window._save_preferences()
+        expected = {name: getattr(window.preferences, name) for name in fields}
+        assert {name: getattr(Preferences.load(), name) for name in fields} == expected
+        restarted = MainWindow()
+        restarted.resize(1280, 850)
+        restarted.show()
+        settle()
+        assert {name: getattr(restarted.preferences, name) for name in fields} == expected
+        assert (restarted.film.orientation, restarted.film.side) == ('vertical', 'left')
+        assert restarted.strip.scroll_axis == 'vertical'
+        return {'bottom_left_right_buttons': True, 'outward_hide_and_vertical_only_side_control': True,
+                'mouse_touch_resize_both_sides': True, 'thumbnails_follow_thickness': True,
+                'vertical_window_touch_scroll_without_selection': True,
+                'same_model_and_cached_thumbnail_identity': True, 'browsing_anchor_preserved': True,
+                'pair_analysis_settled_before_layout_measurement': True,
+                'photo_transform_and_center_preserved': True, 'no_rescan_selection_or_playback': True,
+                'fullscreen_left_badge_and_buttons_do_not_overlap': True,
+                'fullscreen_and_overview_visibility': True, 'navigator_inside_remaining_viewport': True,
+                'layout_side_and_dimensions_restart_restored': True,
+                'small_window_keeps_preferred_dimensions': True, 'small_window_actual_height': small_height,
+                'touch_target': 'QWindow', 'physical_touch_hardware': False,
+                'remembered_layout': expected}
+    finally:
+        if trace_reset is not None:
+            model.modelReset.disconnect(trace_reset)
+        if restarted is not None:
+            restarted.close()
+            assert restarted.wait_for_shutdown(25)
+            restarted.deleteLater()
+        if window._fullscreen_active:
+            window._toggle_fullscreen()
+        window._toggle_grid(False)
+        for name, value in original.items():
+            setattr(window.preferences, name, value)
+        window.restoreGeometry(geometry)
+        window._set_film_layout(original['filmstrip_orientation'], original['filmstrip_side'], remember=False)
+        window._clamp_film_height()
+        window._toggle_strip(remembered)
+        window._save_preferences()
+        settle()
+        if not viewer._image_rect.isEmpty():
+            viewer.setTransform(original_transform)
+            viewer.centerOn(original_center)
+            viewer._fit_mode = original_fit
+            viewer.zoom_changed.emit(viewer.zoom_factor())
+
+
 def _check_settings_controls(settings, window, report_dir: Path):
     """Send real wheel/key/touch events through the shipped settings dialog."""
     from PySide6.QtGui import QAccessible
@@ -1446,6 +1756,105 @@ def _check_application_theme(window, report_dir: Path):
         save_mode(original_mode)
         window.viewer.fit_image()
         window._toggle_grid(original_grid_mode)
+
+
+def _check_folder_append_remove(report_dir: Path):
+    from PIL import Image
+    from unittest.mock import patch
+    from .app import MainWindow
+    from .settings import Preferences
+    previous = os.environ.get('LIVEGALLERY_DATA_DIR')
+    window = None
+    with tempfile.TemporaryDirectory(prefix='folder-management-', dir=report_dir) as directory:
+        base = Path(directory).resolve()
+        root, other = base / 'A 照片', base / 'B photos'
+        branch, island = root / '已移除', root / '已移除' / '单独恢复'
+        deeper = island / '再次移除'
+        files = (root / 'keep.jpg', island / 'restore.png', deeper / 'deep.jpg',
+                 branch / '兄弟目录' / 'stay-out.png', other / 'other.jpg')
+        for number, path in enumerate(files):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new('RGB', (900, 600), (30 + number * 35, 90, 130)).save(path)
+        original = {path: (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) for path in files}
+        os.environ['LIVEGALLERY_DATA_DIR'] = str(base / 'settings')
+        try:
+            window = MainWindow(); window.resize(1280, 850); window.show()
+            window.preferences.cache_location = 'library'
+            with patch('livegallery.app.select_photo_folders', return_value=(root,)):
+                window.open_button.click()
+            _wait(lambda: not window._scan_pending and window._shown_image_path == files[0], 25)
+            window.tree.set_checked_directories((root,))
+            window.viewer._zoom_at(2, window.viewer._viewport_center())
+            current, scale, center = window._current_id, window.viewer.transform(), window.viewer._scene_center()
+            with patch('livegallery.app.select_photo_folders', return_value=(other, other / '.')):
+                window.open_button.click()
+            _wait(lambda: not window._scan_pending and len(window._items) == 5, 25)
+            assert window.folders == (root, other)
+            assert window.tree.checked_directories == {root, other}
+            assert window._current_id == current and window.viewer.transform() == scale
+            assert (window.viewer._scene_center() - center).manhattanLength() < 4
+            generation = window._scan_generation
+            with patch('livegallery.app.select_photo_folders', return_value=()):
+                window.open_button.click()
+            assert window._scan_generation == generation
+
+            menu_labels = []
+            def remove_menu():
+                menu = QApplication.activePopupWidget()
+                if menu is None:
+                    QTimer.singleShot(10, remove_menu)
+                    return
+                menu_labels.append(menu.actions()[0].text())
+                menu.actions()[0].trigger()
+                menu.close()
+            target = window.tree._nodes[branch]
+            expected = window.tree.removal_count((branch,))
+            QTimer.singleShot(0, remove_menu)
+            window._folder_context_menu(window.tree.visualItemRect(target).center())
+            _wait(lambda: not window._scan_pending and len(window._items) == 2, 25)
+            assert menu_labels == [f'从 LiveViewer 移除 {expected} 个文件夹（含子文件夹）']
+            window.search_scope.setCurrentIndex(window.search_scope.findData('all'))
+            window.search.setText('restore')
+            assert not window.model.items
+            window.search.clear()
+            with patch('livegallery.app.select_photo_folders', return_value=(island,)):
+                window.open_button.click()
+            _wait(lambda: not window._scan_pending and len(window._items) == 4, 25)
+            assert branch not in window.tree.known_directories
+            window._remove_folders((deeper,))
+            _wait(lambda: not window._scan_pending and len(window._items) == 3, 25)
+            window._rescan()
+            _wait(lambda: not window._scan_pending, 25)
+            assert {item.image_path for item in window._items} == {files[0], files[1], files[4]}
+            _wait(lambda: window._shown_image_path == files[0]
+                  and not window.viewer._photo.pixmap().isNull(), 25)
+            window.grab().save(str(report_dir / 'folder-append-remove-restored-island.png'))
+            window.close(); assert window.wait_for_shutdown(25); window.deleteLater()
+            QCoreApplication.processEvents()
+            window = MainWindow(); window.show()
+            window.load_folders(window.preferences.last_folders)
+            _wait(lambda: not window._scan_pending and len(window._items) == 3, 25)
+            assert set(map(Path, window.preferences.excluded_folders)) == {branch, deeper}
+            window._remove_folders(window.folders)
+            _wait(lambda: not window._scan_pending and not window.folders, 25)
+            assert not window.model.items and window._displayed_item is None
+            assert Preferences.load().last_folders == [] and Preferences.load().last_folder == ''
+            assert (root / 'LiveViewer Cache').is_dir() and (other / 'LiveViewer Cache').is_dir()
+            window.add_folders((root,))
+            _wait(lambda: not window._scan_pending and len(window._items) == 4, 25)
+            assert not any(Path(path).is_relative_to(root) for path in window.preferences.excluded_folders)
+            assert {path: (hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns) for path in files} == original
+            return {'append_preserves_checks_and_zoom': True, 'context_action_count': expected,
+                    'persistent_subtree_exclusion_and_island_reimport': True,
+                    'remove_all_and_reimport': True, 'original_files_unchanged': True}
+        finally:
+            if window is not None:
+                window.close(); assert window.wait_for_shutdown(25)
+                window.deleteLater(); QCoreApplication.processEvents()
+            if previous is None:
+                os.environ.pop('LIVEGALLERY_DATA_DIR', None)
+            else:
+                os.environ['LIVEGALLERY_DATA_DIR'] = previous
 
 
 def _check_multiple_folder_collection(fixtures: Path, report_dir: Path):
@@ -1762,6 +2171,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         collection = _check_multiple_folder_collection(fixtures, report_dir)
         report['checks'].append({'check': 'multiple_folders_checkboxes_and_search_scope',
                                  **collection, 'status': 'passed'})
+        folder_management = _check_folder_append_remove(report_dir)
+        report['checks'].append({'check': 'folder_import_append_remove_and_restore',
+                                 **folder_management, 'status': 'passed'})
         exact_frames = _check_exact_frame_reader(fixtures, report_dir)
         report['checks'].append({'check': 'exact_frame_index_export_h264_hevc_rotated_and_vfr',
                                  'videos': exact_frames, 'status': 'passed'})
@@ -1854,6 +2266,7 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         center = viewer.viewport().rect().center()
         for target in (2.0, 1.0):
             QTest.mouseDClick(viewer.viewport(), Qt.MouseButton.LeftButton, pos=center)
+            QTest.mouseRelease(viewer.viewport(), Qt.MouseButton.LeftButton, pos=center)
             assert viewer.is_zoom_animating(), 'Double-click did not start a zoom animation'
             viewer._zoom_animation.setCurrentTime(viewer._zoom_animation.duration() // 2)
             assert 1.01 < viewer.zoom_factor() < 1.99, 'Zoom animation has no intermediate scale'
@@ -1987,6 +2400,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         filmstrip_resize = _check_filmstrip_resize(window, report_dir)
         report['checks'].append({'check': 'filmstrip_mouse_touch_resize_and_viewer_fit',
                                  **filmstrip_resize, 'status': 'passed'})
+        filmstrip_layouts = _check_filmstrip_layouts(window, report_dir)
+        report['checks'].append({'check': 'filmstrip_three_layouts_resize_and_persistence',
+                                 **filmstrip_layouts, 'status': 'passed'})
         window.activateWindow()
         window.viewer.setFocus()
         QTest.qWait(50)

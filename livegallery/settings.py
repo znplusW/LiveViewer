@@ -61,11 +61,15 @@ class Preferences:
     last_folders: list[str] = field(default_factory=list)
     search_scope: str = 'current'
     selected_folders: list[str] | None = None
+    excluded_folders: list[str] = field(default_factory=list)
     last_image: str = ''
     last_export_directory: str = ''
     sort_by: str = 'name'
     overview_thumbnail_width: int = 204
     filmstrip_height: int = 200
+    filmstrip_width: int = 220
+    filmstrip_orientation: str = 'horizontal'
+    filmstrip_side: str = 'right'
     theme_mode: str = 'dark'
 
     def normalize_shortcuts(self):
@@ -107,10 +111,15 @@ class Preferences:
             remembered = result.last_folders if isinstance(result.last_folders, list) else []
             result.last_folders = list(dict.fromkeys(value for value in remembered
                                                     if isinstance(value, str) and value and '\0' not in value))
-            if not result.last_folders and result.last_folder:
+            if 'last_folders' not in values and result.last_folder:
                 result.last_folders = [result.last_folder]
             if result.last_folders:
                 result.last_folder = result.last_folders[0]
+            else:
+                result.last_folder = ''
+            excluded = result.excluded_folders if isinstance(result.excluded_folders, list) else []
+            result.excluded_folders = list(dict.fromkeys(value for value in excluded
+                                                        if isinstance(value, str) and value and '\0' not in value))
             if result.search_scope not in ('all', 'current'):
                 result.search_scope = 'current'
             if result.selected_folders is not None:
@@ -139,6 +148,16 @@ class Preferences:
                 result.filmstrip_height = max(160, min(480, int(result.filmstrip_height)))
             except (ValueError, TypeError):
                 result.filmstrip_height = 200
+            try:
+                if isinstance(result.filmstrip_width, bool):
+                    raise ValueError('not a width')
+                result.filmstrip_width = max(180, min(480, int(result.filmstrip_width)))
+            except (ValueError, TypeError):
+                result.filmstrip_width = 220
+            if result.filmstrip_orientation not in ('horizontal', 'vertical'):
+                result.filmstrip_orientation = 'horizontal'
+            if result.filmstrip_side not in ('left', 'right'):
+                result.filmstrip_side = 'right'
             result.normalize_shortcuts()
             if not isinstance(result.filmstrip_visible, bool):
                 result.filmstrip_visible = True

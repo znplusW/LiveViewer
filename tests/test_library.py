@@ -1,8 +1,10 @@
 import json
+import os
 import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from livegallery.cache_locations import (CACHE_DIRECTORY, MANIFEST_NAME, OWNERSHIP_SENTINEL,
                                          PRODUCT, SCHEMA_VERSION)
@@ -136,6 +138,23 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertTrue(items[0].is_live)
         self.assertEqual(items[0].image_path.name, "root.jpeg")
+
+    def test_excluded_branches_are_pruned_before_scanning_and_never_modify_files(self):
+        keep = self.file('keep/photo.jpg')
+        gone = self.file('removed/child/pair.jpeg')
+        movie = self.file('removed/child/pair.mov')
+        for path in (keep, gone, movie):
+            path.write_bytes(b'original immutable fixture ' + path.name.encode())
+        original = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in (keep, gone, movie)}
+        original_scandir = os.scandir
+        def guarded_scandir(path):
+            self.assertFalse(Path(path).is_relative_to(self.root / 'removed'))
+            return original_scandir(path)
+        with patch('livegallery.library.os.scandir', side_effect=guarded_scandir):
+            indexed = scan_folder(self.root, excluded=(self.root / 'removed',))
+        self.assertEqual([item.image_path for item in indexed], [keep])
+        self.assertEqual(scan_folder(self.root / 'removed', excluded=(self.root / 'removed',)), [])
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in original}, original)
 
 
 if __name__ == "__main__":

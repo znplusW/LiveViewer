@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPalette
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QKeySequence, QPalette, QTransform
 from PySide6.QtWidgets import (
     QAbstractItemView, QAbstractSpinBox, QApplication, QCheckBox, QComboBox,
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QGroupBox,
@@ -30,10 +30,11 @@ from .imaging import load_image
 from .jobs import JobQueue
 from .folder_picker import select_photo_folders
 from .folder_tree import FolderTree
+from .filmstrip_panel import FilmstripPanel
 from .library import _identifier, natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
-from .multi_cache import normalise_roots, open_multi_cache, scan_roots
+from .multi_cache import normalise_roots, open_multi_cache
 from .reveal_file import reveal_in_folder
 from .settings import Preferences, app_directory, cache_data_roots, data_directory
 from .settings_controls import PillSwitch, SettingsScrollArea, SettingsWheelGuard, TickCheckBox
@@ -41,7 +42,6 @@ from .theme import DARK_STYLE, stylesheet_for
 from .ui_theme import application_theme, bind_theme, tokens_for
 from .system_open import enumerate_apps, open_with
 from .touch_grid import OverviewGrid
-from .touch_filmstrip import FilmstripResizeHandle, TouchFilmstrip
 from .viewer import ViewerCanvas
 
 
@@ -89,9 +89,12 @@ class _CacheLoad:
 class _FullscreenLiveBadge(QLabel):
     """A free-standing overlay has no layout to apply changed size hints."""
 
+    sizeChanged = Signal()
+
     def fit_contents(self):
         if getattr(self, '_fitting_contents', False):
             return
+        original = self.size()
         self._fitting_contents = True
         try:
             self.ensurePolished()
@@ -100,6 +103,8 @@ class _FullscreenLiveBadge(QLabel):
                 self.resize(hint)
         finally:
             self._fitting_contents = False
+        if self.size() != original:
+            self.sizeChanged.emit()
 
     def event(self, event):
         handled = super().event(event)
@@ -476,6 +481,7 @@ class MainWindow(QMainWindow):
         self.folder: Path | None = None
         self.folders: tuple[Path, ...] = ()
         self._scan_pending = False
+        self._append_checks = None
         self._primary_items: list[MediaItem] = []
         self._extras: dict[str, list[MediaItem]] = {}
         self._items: list[MediaItem] = []
@@ -661,6 +667,8 @@ class MainWindow(QMainWindow):
         side.addWidget(title)
         self.tree = FolderTree()
         self.tree.checkedChanged.connect(self._directories_checked)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._folder_context_menu)
         side.addWidget(self.tree)
         side_note = QLabel("勾选多选 · Shift 选范围 · Ctrl+A 全选\n图片与视频仅在保存封面图时更改\n缓存按设置位置存放")
         side_note.setObjectName("muted")
@@ -743,7 +751,13 @@ class MainWindow(QMainWindow):
         self.grid.customContextMenuRequested.connect(lambda pos: self._list_context_menu(self.grid, pos))
         self.grid.clicked.connect(self._grid_selected)
         self.content.addWidget(self.grid)
-        right_layout.addWidget(self.content, 1)
+        self._right_layout = right_layout
+        self.photo_area = QWidget()
+        self._photo_layout = QHBoxLayout(self.photo_area)
+        self._photo_layout.setContentsMargins(0, 0, 0, 0)
+        self._photo_layout.setSpacing(0)
+        self._photo_layout.addWidget(self.content, 1)
+        right_layout.addWidget(self.photo_area, 1)
 
         self.viewer_tools = QFrame()
         tools = QHBoxLayout(self.viewer_tools)
@@ -763,53 +777,21 @@ class MainWindow(QMainWindow):
         tools.addWidget(self._button("适应", self.viewer.fit_image))
         right_layout.addWidget(self.viewer_tools)
 
-        self.film = QFrame()
-        self.film.setObjectName("film")
-        film_layout = QVBoxLayout(self.film)
-        film_layout.setContentsMargins(12, 0, 12, 5)
-        film_layout.setSpacing(2)
-        self.film_resize_handle = FilmstripResizeHandle(self.film)
-        self.film_resize_handle.heightRequested.connect(self._set_film_height)
-        film_layout.addWidget(self.film_resize_handle)
-        collapse_row = QHBoxLayout()
-        collapse_row.addStretch()
-        self.collapse_strip_button = self._button("⌄", self._hide_strip)
-        self.collapse_strip_button.setObjectName("filmCollapse")
-        self.collapse_strip_button.setFixedSize(38, 22)
-        self.collapse_strip_button.setStyleSheet("padding:0; min-height:0; font-size:18px; border-radius:5px;")
-        self.collapse_strip_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.collapse_strip_button.setToolTip("隐藏胶片条")
-        self.collapse_strip_button.setAccessibleName("隐藏胶片条")
-        collapse_row.addWidget(self.collapse_strip_button)
-        collapse_row.addStretch()
-        film_layout.addLayout(collapse_row)
-        film_header = QHBoxLayout()
-        self.library_label = QLabel("尚未加载照片")
-        self.library_label.setObjectName("muted")
-        film_header.addWidget(self.library_label)
-        film_header.addStretch()
-        self.analysis_label = QLabel("按需加载 · 本机缓存")
-        self.analysis_label.setObjectName("muted")
-        film_header.addWidget(self.analysis_label)
-        film_layout.addLayout(film_header)
-        self.strip = TouchFilmstrip()
-        self.strip.setModel(self.model)
-        self.strip.setItemDelegate(ThumbnailDelegate(self.strip))
-        self.strip.setFlow(QListView.Flow.LeftToRight)
-        self.strip.setWrapping(False)
-        self.strip.setMovement(QListView.Movement.Static)
-        self.strip.setUniformItemSizes(True)
-        self.strip.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.strip.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.strip.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.strip.setMinimumHeight(80)
-        self.strip.viewportHeightChanged.connect(self._resize_strip_thumbnails)
+        self.film = FilmstripPanel(self.model)
+        self.strip = self.film.strip
+        self.film_resize_handle = self.film.resize_handle
+        self.collapse_strip_button = self.film.hide_button
+        self.library_label = self.film.library_label
+        self.analysis_label = self.film.analysis_label
+        self.film.hideRequested.connect(self._hide_strip)
+        self.film.layoutRequested.connect(self._set_film_layout)
+        self.film.thicknessRequested.connect(self._set_film_thickness)
         self.strip.clicked.connect(lambda index: self._select_row(index.row()))
         self.strip.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.strip.customContextMenuRequested.connect(lambda pos: self._list_context_menu(self.strip, pos))
-        film_layout.addWidget(self.strip, 1)
-        self.film.setFixedHeight(self.preferences.filmstrip_height)
         right_layout.addWidget(self.film)
+        self._film_layout_generation = 0
+        self._set_film_layout(self.preferences.filmstrip_orientation, self.preferences.filmstrip_side, remember=False)
         splitter.addWidget(right)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([220, 1200])
@@ -821,6 +803,8 @@ class MainWindow(QMainWindow):
         self.fullscreen_live_badge.adjustSize()
         self.fullscreen_live_badge.move(16, 16)
         self.fullscreen_live_badge.hide()
+        self.fullscreen_live_badge.sizeChanged.connect(self._update_live_overlay,
+                                                       Qt.ConnectionType.QueuedConnection)
         self.content.currentChanged.connect(self._update_live_overlay)
         self.film.setVisible(self._remembered_strip)
         self._update_navigation()
@@ -835,7 +819,59 @@ class MainWindow(QMainWindow):
             self._show_message('无法打开文件夹选择窗口：' + str(error))
             return
         if selected:
-            self.load_folders(selected)
+            self.add_folders(selected)
+
+    def add_folders(self, folders):
+        chosen = normalise_roots(folders)
+        if not chosen:
+            return
+        merged = normalise_roots((*self.folders, *chosen))
+        exclusions = normalise_roots(self.preferences.excluded_folders)
+        remaining = tuple(path for path in exclusions if not any(path.is_relative_to(root) for root in chosen))
+        restored = remaining != exclusions or any(self._folder_excluded(root) for root in chosen)
+        if merged == self.folders and not restored:
+            return
+        if self._append_checks is None:
+            self._append_checks = (self.tree.known_directories,
+                                   None if self.preferences.selected_folders is None
+                                   else frozenset(map(Path, self.preferences.selected_folders)))
+        self.preferences.excluded_folders = list(map(str, remaining))
+        self.load_folders(merged, preserve_view=True, _keep_checks=True)
+
+    def _folder_excluded(self, path, roots=None, excluded=None):
+        roots = self.folders if roots is None else roots
+        excluded = self.preferences.excluded_folders if excluded is None else excluded
+        path = Path(path)
+        removed_depth = max((len(Path(branch).parts) for branch in excluded
+                             if path.is_relative_to(Path(branch))), default=-1)
+        selected_depth = max((len(root.parts) for root in roots if path.is_relative_to(root)), default=-1)
+        return removed_depth >= selected_depth and removed_depth >= 0
+
+    def _folder_context_menu(self, position):
+        targets = self.tree.removal_targets(self.tree.itemAt(position))
+        count = self.tree.removal_count(targets)
+        if not count:
+            return
+        menu = QMenu(self)
+        action = menu.addAction(f'从 LiveViewer 移除 {count} 个文件夹（含子文件夹）')
+        action.setToolTip('只从浏览列表移除，不删除或移动磁盘文件。')
+        action.triggered.connect(lambda _checked=False: self._remove_folders(targets))
+        menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def _remove_folders(self, branches):
+        branches = normalise_roots(branches)
+        if not branches:
+            return
+        remaining = tuple(root for root in self.folders if not any(root.is_relative_to(branch) for branch in branches))
+        excluded = normalise_roots((*self.preferences.excluded_folders, *branches))
+        # Keep deeper exclusions too: an explicitly reimported root can form
+        # an included island beneath an older removed ancestor.
+        self.preferences.excluded_folders = list(map(str, excluded))
+        self._append_checks = None
+        if self.preferences.selected_folders is not None:
+            self.preferences.selected_folders = [path for path in self.preferences.selected_folders
+                                                 if not any(Path(path).is_relative_to(branch) for branch in branches)]
+        self.load_folders(remaining, preserve_view=True, _keep_checks=True, _allow_empty=True)
 
     def _cache_load_key(self, folders):
         location = self.preferences.cache_location
@@ -932,12 +968,14 @@ class MainWindow(QMainWindow):
         key = self._cache_load_key(folders)
         recursive = self.preferences.recursive
         max_bytes = self.preferences.cache_mb * 1024 ** 2
+        excluded = normalise_roots(self.preferences.excluded_folders)
 
         def prepare():
             owned = False
             prepared = None
             try:
-                available = tuple(root for root in folders if root.is_dir())
+                available = tuple(root for root in folders if root.is_dir()
+                                  and not self._folder_excluded(root, folders, excluded))
                 missing = tuple(root for root in folders if root not in available)
                 if scan and not available:
                     raise NotADirectoryError('没有可访问的已导入文件夹。请检查硬盘连接。')
@@ -986,7 +1024,13 @@ class MainWindow(QMainWindow):
                     return
                 items, seen, discovered = ([] if scan else None), set(), 0
                 scanned, scan_errors = 0, []
-                for folder in scan_roots(available, recursive) if scan else ():
+                # A root explicitly reimported beneath an excluded ancestor
+                # must be scanned independently of its retained outer root.
+                indexed_roots = tuple(root for root in available if not recursive or not any(
+                    root != parent and root.is_relative_to(parent) and not any(
+                        root.is_relative_to(branch) and branch.is_relative_to(parent) for branch in excluded)
+                    for parent in available))
+                for folder in indexed_roots if scan else ():
                     if cancel.is_set():
                         break
                     count_at_start = discovered
@@ -995,7 +1039,11 @@ class MainWindow(QMainWindow):
                         latest_count[0] = count
                         self._scan_signals.progress.emit(generation, count_at_start + count)
                     try:
-                        indexed = scan_folder(folder, cancel=cancel.is_set, progress=progress, recursive=recursive)
+                        omit = tuple(branch for branch in excluded if not folder.is_relative_to(branch))
+                        arguments = dict(cancel=cancel.is_set, progress=progress, recursive=recursive)
+                        if omit:
+                            arguments['excluded'] = omit
+                        indexed = scan_folder(folder, **arguments)
                     except OSError as error:
                         discovered += latest_count[0]
                         scan_errors.append(str(folder) + ': ' + str(error))
@@ -1044,13 +1092,16 @@ class MainWindow(QMainWindow):
     def load_folder(self, folder: Path, *, preserve_view=False):
         self.load_folders((folder,), preserve_view=preserve_view)
 
-    def load_folders(self, folders, *, preserve_view=False):
+    def load_folders(self, folders, *, preserve_view=False, _keep_checks=False, _allow_empty=False):
         folders = normalise_roots(folders)
-        if not folders:
+        if not folders and not _allow_empty:
             return
         remembered = normalise_roots(self.preferences.last_folders)
-        if folders != self.folders and (self.folders or folders != remembered):
+        if not _keep_checks and folders != self.folders and (self.folders or folders != remembered):
             self.preferences.selected_folders = None
+        if not _keep_checks:
+            self._append_checks = None
+        preserved = preserve_view and self._shown_image_path is not None and bool(folders)
         self._restore_grid_after_scan = self._grid_mode if preserve_view else False
         self._scan_allow_autoplay = not preserve_view
         self._cancel_verification()
@@ -1063,7 +1114,7 @@ class MainWindow(QMainWindow):
         self._request_context.clear()
         self.jobs.cancel_where(lambda _key: True)
         self.folders = folders
-        self.folder = folders[0]
+        self.folder = folders[0] if folders else None
         self._scan_pending = True
         self._directory_filter = None
         self._primary_items = []
@@ -1071,42 +1122,53 @@ class MainWindow(QMainWindow):
         self._pair_revisions.clear()
         self._items = []
         self._file_times.clear()
-        self._current_id = None
-        self._displayed_item = None
+        if not preserved:
+            self._current_id = None
+            self._displayed_item = None
         self._awaiting_pair = None
         self._deferred_upgrade = None
         self._deferred_candidate = None
-        self._shown_image_path = None
+        if not preserved:
+            self._shown_image_path = None
         self._navigation_target_id = None
         self._navigation_timer.stop()
-        self._previews.clear()
-        self._preview_bytes = 0
-        self.viewer.clear()
+        self.viewer.stop_live()
+        if not preserved:
+            self._previews.clear()
+            self._preview_bytes = 0
+            self.viewer.clear()
         self.model.set_items([])
         self.model.pending.clear()
         self.model.failures.clear()
         self.model.thumbnails.clear()
         self.tree.clear()
-        self._grid_mode = False
-        self.grid_button.setChecked(False)
-        self._set_empty("正在扫描文件夹", "先建立文件索引，再按需载入照片与视频。\n可以随时选择其他文件夹取消本次扫描。", "◌")
-        self.empty_open.hide()
+        if not preserved:
+            self._grid_mode = False
+            self.grid_button.setChecked(False)
+            self._set_empty("正在扫描文件夹" if folders else "从一个文件夹开始",
+                            "先建立文件索引，再按需载入照片与视频。\n可以随时选择其他文件夹取消本次扫描。" if folders
+                            else "选择照片文件夹开始浏览。磁盘中的文件不会被移除。", "◌" if folders else "◉")
+        self.empty_open.setVisible(not folders)
         self._missing_folders = frozenset()
         self._update_path_label()
-        self.filename_label.setText("正在建立照片索引…")
+        if not preserved:
+            self.filename_label.setText("正在建立照片索引…" if folders else "你的本地照片库")
         self.live_badge.hide()
         self.preferences.last_folders = [str(folder) for folder in folders]
-        self.preferences.last_folder = str(self.folder)
+        self.preferences.last_folder = str(self.folder) if self.folder else ''
+        if not folders:
+            self.preferences.last_image = ''
+            self.preferences.selected_folders = None
         self._save_preferences()
         self._disk_missing = False
         self._background_pair_id = None
         self._analysis_timer.stop()
         self._update_navigation()
-        self._prepare_cache_and_scan(folders, generation, cancel)
+        self._prepare_cache_and_scan(folders, generation, cancel, scan=bool(folders))
 
     def _update_path_label(self):
         self.path_label.setText(str(self.folder) if len(self.folders) == 1
-                                else f'已打开 {len(self.folders)} 个文件夹')
+                                else f'已打开 {len(self.folders)} 个文件夹' if self.folders else '尚未打开文件夹')
         paths = '\n'.join(str(folder) for folder in self.folders)
         if self._missing_folders:
             paths += '\n\n暂不可访问：\n' + '\n'.join(map(str, self._missing_folders))
@@ -1132,9 +1194,15 @@ class MainWindow(QMainWindow):
             warning = items.warning
             items = items.items
             if items is None:
-                self._show_message(warning or '缓存保存位置已切换。')
+                self._show_message(warning or ('缓存保存位置已切换。' if self.folders
+                                               else '已移除全部文件夹；磁盘文件未更改。'))
                 return
         if error:
+            self._current_id = None
+            self._displayed_item = None
+            self._shown_image_path = None
+            self.viewer.clear()
+            self._build_tree()
             self._set_empty("无法打开此文件夹", "请检查文件夹权限或移动硬盘连接。\n" + str(error), "!")
             self.empty_open.show()
             self._show_message("扫描失败：请检查文件夹和硬盘连接。")
@@ -1142,8 +1210,20 @@ class MainWindow(QMainWindow):
         self._primary_items = items
         self._rebuild_items()
         self._build_tree()
+        if self._append_checks is not None:
+            known, checked = self._append_checks
+            self._append_checks = None
+            selected = None if checked is None else checked | (self.tree.known_directories - known)
+            self.tree.set_checked_directories(selected)
+            self.preferences.selected_folders = (None if self.tree.selection_spec is None
+                                                  else list(map(str, self.tree.selection_spec)))
+            self._save_preferences()
         self._apply_filters(select_first=False)
         if not self._items:
+            self._current_id = None
+            self._displayed_item = None
+            self._shown_image_path = None
+            self.viewer.clear()
             self._set_empty("此文件夹中没有支持的图片", "支持 JPG、JPEG、HEIC、PNG、WebP、BMP、GIF、TIFF 和 AVIF。\n可在设置中开启扫描子文件夹。", "◉")
             self.empty_open.show()
             return
@@ -1152,7 +1232,15 @@ class MainWindow(QMainWindow):
             return
         preferred = next((row for row, item in enumerate(self.model.items)
                           if str(item.image_path) == self.preferences.last_image), 0)
-        self._select_row(preferred, allow_autoplay=getattr(self, '_scan_allow_autoplay', True))
+        current = next((item for item in self.model.items if item.id == self._current_id), None)
+        if (not self._scan_allow_autoplay and current is not None
+                and self._shown_image_path == current.image_path):
+            self._autoplay_armed = False
+            self._load_current(current)
+            if current.pending:
+                self._request_pair(current, 3)
+        else:
+            self._select_row(preferred, allow_autoplay=getattr(self, '_scan_allow_autoplay', True))
         if getattr(self, '_restore_grid_after_scan', False):
             self._toggle_grid(True)
         self._analysis_timer.start(1500)
@@ -1174,7 +1262,9 @@ class MainWindow(QMainWindow):
         for item in self._items:
             parent = item.image_path.parent
             counts[parent] = counts.get(parent, 0) + 1
-        self.tree.set_directories(self.folders, counts, self.preferences.selected_folders)
+        roots = tuple(root for root in self.folders if not self._folder_excluded(root))
+        self.tree.set_directories(roots, counts, self.preferences.selected_folders,
+                                  include=lambda path: not self._folder_excluded(path))
 
     def _directory_selected(self, tree_item):
         value = tree_item.data(0, Qt.ItemDataRole.UserRole)
@@ -1192,9 +1282,9 @@ class MainWindow(QMainWindow):
         self._apply_filters()
 
     def _rebuild_items(self):
-        self._items = list(self._primary_items)
+        self._items = [item for item in self._primary_items if not self._folder_excluded(item.image_path)]
         for extras in self._extras.values():
-            self._items.extend(extras)
+            self._items.extend(item for item in extras if not self._folder_excluded(item.image_path))
 
     def _apply_filters(self, *_args, select_first=True):
         if not hasattr(self, "model"):
@@ -1224,10 +1314,10 @@ class MainWindow(QMainWindow):
         old_row = next((row for row, item in enumerate(self.model.items)
                         if item.id == self._current_id), 0)
         grid_scroll = self.grid.verticalScrollBar().value()
-        strip_scroll = self.strip.horizontalScrollBar().value()
+        strip_scroll = self.strip.current_scrollbar().value()
         self.model.set_items(visible)
         self.grid.verticalScrollBar().setValue(grid_scroll)
-        self.strip.horizontalScrollBar().setValue(strip_scroll)
+        self.strip.current_scrollbar().setValue(strip_scroll)
         self.library_label.setText(f"{len(visible):,} / {len(self._items):,} 项 · {sum(i.is_live for i in visible):,} 个 LIVE")
         current_row = next((row for row, item in enumerate(visible) if item.id == self._current_id), None)
         if current_row is not None:
@@ -1702,37 +1792,78 @@ class MainWindow(QMainWindow):
         self.preferences.overview_thumbnail_width = width
         self._grid_size_save_timer.start()
 
-    def _set_film_height(self, requested, remember=True):
-        available = self.content.height() + (self.film.height() if self.film.isVisible() else 0)
-        maximum = max(160, min(480, available - 160))
-        height = max(160, min(maximum, int(requested)))
-        self.film.setFixedHeight(height)
+    def _set_film_layout(self, orientation, side='right', remember=True):
+        if orientation not in ('horizontal', 'vertical') or side not in ('left', 'right'):
+            return
+        self.viewer.stop_live()
+        self._keyboard_live_pressed = False
+        anchor = self.film.capture_anchor()
+        transform, center = QTransform(self.viewer.transform()), self.viewer._scene_center()
+        was_fit = self.viewer._fit_mode
+        selected = self._current_id
+        self._film_layout_generation += 1
+        generation = self._film_layout_generation
+        self._right_layout.removeWidget(self.film)
+        self._photo_layout.removeWidget(self.film)
+        self.film.set_mode(orientation, side)
+        if orientation == 'horizontal':
+            self._right_layout.addWidget(self.film)
+        else:
+            self._photo_layout.insertWidget(0 if side == 'left' else 1, self.film)
         if remember:
-            self.preferences.filmstrip_height = height
+            self.preferences.filmstrip_orientation = orientation
+            self.preferences.filmstrip_side = side
+            self._save_preferences()
+        self._clamp_film_height()
+        row = next((row for row, item in enumerate(self.model.items) if item.id == self._current_id), None)
+        if row is not None:
+            # Native mouse press can highlight a thumbnail before clicked is
+            # committed. Cancelling that press during a dock change keeps the
+            # application photo as the single selected item.
+            self._sync_selection(row, scroll=False)
+        self.film.restore_anchor(anchor)
+        self._update_live_overlay()
+        def restore():
+            if self._closed or generation != self._film_layout_generation or selected != self._current_id:
+                return
+            if not self.viewer._image_rect.isEmpty():
+                if was_fit:
+                    self.viewer._fit_view()
+                else:
+                    self.viewer.setTransform(transform)
+                    self.viewer.centerOn(center)
+                    self.viewer._fit_mode = False
+                self.viewer.zoom_changed.emit(self.viewer.zoom_factor())
+        QTimer.singleShot(0, restore)
+
+    def _set_film_thickness(self, orientation, requested):
+        if orientation == 'vertical':
+            self._set_film_width(requested)
+        else:
+            self._set_film_height(requested)
+
+    def _set_film_height(self, requested, remember=True):
+        preferred = max(160, min(480, int(requested)))
+        available = self.photo_area.height() + (self.film.height() if self.film.isVisible()
+                                               and self.film.orientation == 'horizontal' else 0)
+        maximum = max(160, min(480, available - 160))
+        if self.film.orientation == 'horizontal':
+            self.film.set_extent(min(maximum, preferred))
+        if remember:
+            self.preferences.filmstrip_height = preferred
             self._grid_size_save_timer.start()
 
-    def _resize_strip_thumbnails(self, _viewport_height):
-        delegate = self.strip.itemDelegate()
-        # Reserve the scrollbar even while it is hidden. Its appearance must
-        # not change the cell height and trigger an endless relayout cycle.
-        scroll_height = self.strip.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
-        height = max(64, self.strip.height() - 2 * self.strip.frameWidth() - scroll_height - 4)
-        if height == delegate.thumbnail_height:
-            return
-        center = self.strip.viewport().rect().center()
-        index = self.strip.indexAt(center)
-        if not index.isValid() and self.model.rowCount():
-            width = max(1, delegate.sizeHint(None, None).width())
-            row = (self.strip.horizontalScrollBar().value() + center.x()) // width
-            index = self.model.index(min(self.model.rowCount() - 1, row))
-        before = self.strip.visualRect(index).center().x() if index.isValid() else None
-        delegate.set_thumbnail_height(height)
-        self.strip.doItemsLayout()
-        if before is not None:
-            delta = self.strip.visualRect(index).center().x() - before
-            bar = self.strip.horizontalScrollBar()
-            bar.setValue(bar.value() + delta)
-        self.strip.viewport().update()
+    def _set_film_width(self, requested, remember=True):
+        preferred = max(180, min(480, int(requested)))
+        maximum = max(180, min(480, self.photo_area.width() - 160))
+        if self.film.orientation == 'vertical':
+            self.film.set_extent(min(maximum, preferred))
+        if remember:
+            self.preferences.filmstrip_width = preferred
+            self._grid_size_save_timer.start()
+
+    def _resize_strip_thumbnails(self, _viewport_height=None):
+        self.film._queue_relayout()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1740,8 +1871,11 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._clamp_film_height)
 
     def _clamp_film_height(self):
-        if not self._closed and self.film.isVisible():
-            self._set_film_height(self.preferences.filmstrip_height, remember=False)
+        if not self._closed and hasattr(self, 'film'):
+            if self.film.orientation == 'vertical':
+                self._set_film_width(self.preferences.filmstrip_width, remember=False)
+            else:
+                self._set_film_height(self.preferences.filmstrip_height, remember=False)
 
     def _grid_selected(self, index):
         self._grid_mode = False
@@ -1788,8 +1922,7 @@ class MainWindow(QMainWindow):
         self.viewer_tools.setVisible(visible and not self._grid_mode)
         self.film.setVisible(self._remembered_strip and not self._grid_mode)
         QTimer.singleShot(0, self._clamp_film_height)
-        self.library_label.setVisible(visible)
-        self.analysis_label.setVisible(visible)
+        self.film.set_info_visible(visible)
         self.sidebar.setVisible(visible and self.sidebar_button.isChecked())
         self.statusBar().setVisible(visible)
         if not visible:
@@ -1799,6 +1932,10 @@ class MainWindow(QMainWindow):
     def _update_live_overlay(self, *_args):
         if not hasattr(self, "fullscreen_live_badge"):
             return
+        self.fullscreen_live_badge.fit_contents()
+        inset = (self.fullscreen_live_badge.geometry().bottom() + 8
+                 if self._fullscreen_active and self.film.orientation == 'vertical' and self.film.side == 'left' else 0)
+        self.film.set_top_inset(inset)
         item = self._displayed_item
         visible = (self._fullscreen_active and not self._grid_mode
                    and self.content.currentWidget() is self.viewer
@@ -2203,6 +2340,8 @@ class MainWindow(QMainWindow):
             return
         changed = report.get('changed', ())
         if changed:
+            self._previews.clear()
+            self._preview_bytes = 0
             self.load_folders(self.folders, preserve_view=True)
         action = '已取消校验' if report.get('cancelled') else '深入校验完成'
         self._show_message(f"{action}：已检查 {report.get('checked', 0):,} 个文件，更新 {len(changed):,} 项缓存；手动选择已保留。")

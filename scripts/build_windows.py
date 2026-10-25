@@ -11,7 +11,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "LiveViewer"
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 USER_DOCUMENTS = ("使用说明.txt", "产品说明.txt")
 RUNTIME_DIRECTORIES = frozenset({"data", "liveviewer cache", ".liveviewer-work"})
 

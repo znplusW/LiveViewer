@@ -79,7 +79,29 @@ class FolderTree(QTreeWidget):
     def selection_spec(self):
         return None if self._checked == set(self._nodes) else tuple(sorted(self._checked, key=natural_key))
 
-    def set_directories(self, roots, counts, checked=None):
+    def removal_targets(self, item):
+        """Checked context rows remove that selection; unchecked rows stand alone."""
+        if item is None:
+            return ()
+        if item is self.all_item:
+            targets = set(self._checked)
+        else:
+            value = item.data(0, Qt.ItemDataRole.UserRole)
+            if not value:
+                return ()
+            path = Path(value)
+            targets = set(self._checked) if path in self._checked else {path}
+        branches = []
+        for path in sorted(targets, key=lambda value: (len(value.parts), natural_key(value))):
+            if not any(parent in targets for parent in path.parents):
+                branches.append(path)
+        return tuple(sorted(branches, key=natural_key))
+
+    def removal_count(self, targets):
+        targets = set(targets)
+        return sum(path in targets or any(parent in targets for parent in path.parents) for path in self._nodes)
+
+    def set_directories(self, roots, counts, checked=None, *, include=None):
         roots = tuple(Path(root) for root in roots)
         direct = {Path(path): count for path, count in counts.items()}
         known = set(roots) | set(direct)
@@ -89,7 +111,8 @@ class FolderTree(QTreeWidget):
                 boundary = min(ancestors, key=lambda root: len(root.parts))
                 parent = path.parent
                 while parent != path and parent.is_relative_to(boundary):
-                    known.add(parent)
+                    if include is None or include(parent):
+                        known.add(parent)
                     if parent == boundary:
                         break
                     parent = parent.parent

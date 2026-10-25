@@ -46,7 +46,7 @@ jobs:
         run: |
           $env:QT_QPA_PLATFORM = 'offscreen'
           New-Item -ItemType Directory -Force 'reports' | Out-Null
-          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_touch_filmstrip.py', '-v' -PassThru -RedirectStandardOutput 'reports/preflight-touch-filmstrip.stdout.log' -RedirectStandardError 'reports/preflight-touch-filmstrip.stderr.log'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'unittest', 'tests.test_touch_filmstrip', 'tests.test_filmstrip_panel', '-v' -PassThru -RedirectStandardOutput 'reports/preflight-touch-filmstrip.stdout.log' -RedirectStandardError 'reports/preflight-touch-filmstrip.stderr.log'
           $finished = $process.WaitForExit(150000)
           if (-not $finished) { Stop-Process -Id $process.Id -Force }
           $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
@@ -221,7 +221,7 @@ jobs:
         if: ${{ !inputs.preflight_only }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: LiveViewer-Windows-x64-v0.7.2
+          name: LiveViewer-Windows-x64-v0.7.3
           path: release/
           if-no-files-found: error
           retention-days: 3

@@ -128,6 +128,16 @@ class FolderTreeTests(unittest.TestCase):
         self.assertEqual(self.tree.checked_directories, selected)
         self.assertEqual(changed.count(), 1)
 
+    def test_removal_context_checked_branches_include_descendants_but_unchecked_row_is_independent(self):
+        self.tree.set_checked_directories((self.a, self.b))
+        self.assertEqual(self.tree.removal_targets(self.node(self.b)), (self.a, self.b))
+        self.assertEqual(self.tree.removal_count((self.a, self.b)), 3)
+        self.assertEqual(self.tree.removal_targets(self.node(self.child)), (self.child,))
+        self.assertEqual(self.tree.checked_directories, {self.a, self.b})
+        self.tree.set_checked_directories((self.root, self.b))
+        self.assertEqual(self.tree.removal_targets(self.node(self.b)), (self.root,))
+        self.assertEqual(self.tree.removal_count((self.root,)), 5)
+
     def test_hollow_unchecked_boxes_and_white_ticks_are_clear_in_both_themes_and_dpr(self):
         for theme in ('light', 'dark'):
             self.tree.setProperty('liveviewerTheme', theme)
