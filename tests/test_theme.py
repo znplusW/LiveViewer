@@ -160,6 +160,17 @@ class ThemeTests(unittest.TestCase):
         self.assertIn('selection-color: #ffffff', LIGHT_STYLE)
         self.assertIn('QMenu::item:disabled', LIGHT_STYLE)
 
+    def test_button_arrows_and_boundaries_remain_readable_in_both_themes(self):
+        for theme in ('dark', 'light'):
+            with self.subTest(theme=theme):
+                colors = theme_tokens(theme)
+                for surface in ('control_button', 'control_button_hover', 'control_button_pressed'):
+                    self.assertGreater(_contrast(colors['control_arrow'], colors[surface]), 4.5)
+                self.assertGreater(_contrast(colors['control_arrow_disabled'],
+                                             colors['control_button_disabled']), 3)
+                self.assertGreater(_contrast(colors['control_button_border'], colors['field']), 3)
+                self.assertGreater(_contrast(colors['focus'], colors['field']), 3)
+
     def test_windows_reader_reads_apps_dword_only_and_never_writes(self):
         registry = MagicMock()
         registry.HKEY_CURRENT_USER, registry.KEY_READ, registry.REG_DWORD = 1, 2, 4

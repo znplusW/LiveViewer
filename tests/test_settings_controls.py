@@ -1,20 +1,24 @@
 """Actual settings wheel, checkbox accessibility and input behavior."""
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, Qt
-from PySide6.QtGui import QAccessible, QKeySequence, QWheelEvent
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
+from PySide6.QtGui import QAccessible, QColor, QImage, QKeySequence, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QCheckBox, QDialog
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSpinBox,
+                               QStyle, QStyleOptionComboBox, QStyleOptionSpinBox,
+                               QVBoxLayout, QWidget)
 
 from livegallery.app import MediaTypeFilter, SettingsDialog, STYLE
 from livegallery.settings import Preferences
 from livegallery.settings_controls import PillSwitch, TickCheckBox
+from livegallery import theme as appearance
 
 
 class WheelRecorder(QObject):
@@ -229,6 +233,194 @@ class SettingsControlTests(unittest.TestCase):
             menu.close()
             button.close()
             button.deleteLater()
+
+
+class ControlButtonAppearanceTests(unittest.TestCase):
+    """Render real Qt subcontrols: a valid QSS string alone cannot prove an arrow is visible."""
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        self.window = QWidget()
+        self.layout = QVBoxLayout(self.window)
+        self.combo = QComboBox()
+        self.combo.addItems(['First choice', 'Second choice'])
+        self.spin = QSpinBox()
+        self.spin.setRange(0, 10)
+        self.spin.setValue(5)
+        self.layout.addWidget(self.combo)
+        self.layout.addWidget(self.spin)
+        self.window.resize(320, 150)
+
+    def tearDown(self):
+        self.combo.hidePopup()
+        self.window.close()
+        self.window.deleteLater()
+        self.application.processEvents()
+
+    def use_theme(self, mode, *, override=''):
+        self.window.setPalette(appearance.theme_palette(mode))
+        self.window.setStyleSheet(appearance.stylesheet_for(mode) + override)
+        self.window.show()
+        self.window.activateWindow()
+        QTest.mouseMove(self.window, QPoint(1, 1))
+        self.application.processEvents()
+
+    def button_rect(self, field, subcontrol):
+        option = QStyleOptionComboBox() if field is self.combo else QStyleOptionSpinBox()
+        field.initStyleOption(option)
+        control = QStyle.ComplexControl.CC_ComboBox if field is self.combo else QStyle.ComplexControl.CC_SpinBox
+        return field.style().subControlRect(control, option, subcontrol, field)
+
+    def render(self, field, ratio=1):
+        image = QImage(field.width() * ratio, field.height() * ratio, QImage.Format.Format_ARGB32)
+        image.setDevicePixelRatio(ratio)
+        image.fill(Qt.GlobalColor.transparent)
+        field.render(image)
+        return image
+
+    def color(self, field, position):
+        return self.render(field).pixelColor(position).name()
+
+    def assert_visible_arrow(self, field, rect, color, ratio=1):
+        image = self.render(field, ratio)
+        target = QColor(color)
+        center = rect.center()
+        region = QRect((center.x() - 9) * ratio, (center.y() - 6) * ratio, 19 * ratio, 13 * ratio)
+        ink = []
+        for y in range(region.top(), region.bottom() + 1):
+            for x in range(region.left(), region.right() + 1):
+                pixel = image.pixelColor(x, y)
+                if max(abs(pixel.red() - target.red()), abs(pixel.green() - target.green()),
+                       abs(pixel.blue() - target.blue())) <= 20:
+                    ink.append((x, y))
+        self.assertGreaterEqual(len(ink), 12 * ratio * ratio, 'arrow glyph is missing or too faint')
+        self.assertGreaterEqual(max(x for x, _ in ink) - min(x for x, _ in ink) + 1, 10 * ratio)
+        self.assertGreaterEqual(max(y for _, y in ink) - min(y for _, y in ink) + 1, 5 * ratio)
+
+    def test_visible_large_arrows_and_buttons_work_at_one_and_two_times_resolution(self):
+        for mode in ('light', 'dark'):
+            with self.subTest(theme=mode):
+                self.use_theme(mode)
+                colors = appearance.theme_tokens(mode)
+                controls = ((self.combo, QStyle.SubControl.SC_ComboBoxArrow),
+                            (self.spin, QStyle.SubControl.SC_SpinBoxUp),
+                            (self.spin, QStyle.SubControl.SC_SpinBoxDown))
+                for field, subcontrol in controls:
+                    rect = self.button_rect(field, subcontrol)
+                    self.assertGreaterEqual(rect.width(), 34)
+                    self.assertGreaterEqual(rect.height(), 18)
+                    self.assertGreaterEqual(field.height(), 40)
+                    # The arrow area has a separate background from the editable field.
+                    self.assertEqual(self.color(field, QPoint(rect.left() + 3, rect.center().y())),
+                                     colors['control_button'])
+                    for ratio in (1, 2):
+                        self.assert_visible_arrow(field, rect, colors['control_arrow'], ratio)
+                before = self.spin.value()
+                QTest.mouseClick(self.spin, Qt.MouseButton.LeftButton,
+                                 pos=self.button_rect(self.spin, QStyle.SubControl.SC_SpinBoxUp).center())
+                self.assertEqual(self.spin.value(), before + 1)
+                QTest.mouseClick(self.spin, Qt.MouseButton.LeftButton,
+                                 pos=self.button_rect(self.spin, QStyle.SubControl.SC_SpinBoxDown).center())
+                self.assertEqual(self.spin.value(), before)
+                QTest.mouseClick(self.combo, Qt.MouseButton.LeftButton,
+                                 pos=self.button_rect(self.combo, QStyle.SubControl.SC_ComboBoxArrow).center())
+                self.assertTrue(self.combo.view().isVisible())
+                self.combo.hidePopup()
+
+    def test_button_hover_pressed_disabled_limit_and_focus_states_are_visible(self):
+        for mode in ('light', 'dark'):
+            with self.subTest(theme=mode):
+                self.use_theme(mode)
+                colors = appearance.theme_tokens(mode)
+                self.spin.setEnabled(True)
+                self.spin.setValue(5)
+                self.combo.setEnabled(True)
+                combo_rect = self.button_rect(self.combo, QStyle.SubControl.SC_ComboBoxArrow)
+                combo_sample = QPoint(combo_rect.left() + 3, combo_rect.center().y())
+                QTest.mouseMove(self.combo, combo_rect.center())
+                self.application.processEvents()
+                self.assertEqual(self.color(self.combo, combo_sample), colors['control_button_hover'])
+                self.combo.showPopup()
+                self.application.processEvents()
+                self.assertEqual(self.color(self.combo, combo_sample), colors['control_button_pressed'])
+                self.combo.hidePopup()
+                self.window.activateWindow()
+                self.combo.setFocus()
+                self.application.processEvents()
+                self.assertTrue(self.combo.hasFocus())
+                self.assertEqual(self.color(self.combo, QPoint(0, self.combo.height() // 2)), colors['focus'])
+                self.combo.setEnabled(False)
+                self.assertEqual(self.color(self.combo, combo_sample), colors['control_button_disabled'])
+                self.assert_visible_arrow(self.combo, combo_rect, colors['control_arrow_disabled'])
+                QTest.mouseClick(self.combo, Qt.MouseButton.LeftButton, pos=combo_rect.center())
+                self.assertFalse(self.combo.view().isVisible())
+                self.combo.setEnabled(True)
+                rect = self.button_rect(self.spin, QStyle.SubControl.SC_SpinBoxUp)
+                sample = QPoint(rect.left() + 3, rect.center().y())
+                QTest.mouseMove(self.spin, rect.center())
+                self.application.processEvents()
+                self.assertEqual(self.color(self.spin, sample), colors['control_button_hover'])
+                QTest.mousePress(self.spin, Qt.MouseButton.LeftButton, pos=rect.center())
+                self.assertEqual(self.color(self.spin, sample), colors['control_button_pressed'])
+                QTest.mouseRelease(self.spin, Qt.MouseButton.LeftButton, pos=rect.center())
+                self.spin.setFocus()
+                self.application.processEvents()
+                self.assertEqual(self.color(self.spin, QPoint(0, self.spin.height() // 2)), colors['focus'])
+                self.spin.setValue(self.spin.maximum())
+                QTest.mouseMove(self.window, QPoint(1, 1))
+                self.assertEqual(self.color(self.spin, sample), colors['control_button_disabled'])
+                self.assert_visible_arrow(self.spin, rect, colors['control_arrow_disabled'])
+                self.spin.setEnabled(False)
+                self.assertEqual(self.color(self.spin, sample), colors['control_button_disabled'])
+                self.assert_visible_arrow(self.spin, rect, colors['control_arrow_disabled'])
+                before = self.spin.value()
+                QTest.mouseClick(self.spin, Qt.MouseButton.LeftButton, pos=rect.center())
+                self.assertEqual(self.spin.value(), before)
+                self.spin.setEnabled(True)
+                self.spin.setValue(5)
+
+    def test_arrow_resources_load_from_source_and_frozen_directories_containing_spaces(self):
+        with tempfile.TemporaryDirectory(prefix='LiveViewer resource path ') as temporary:
+            base = Path(temporary).resolve()
+            source = Path(appearance.__file__).resolve().parents[1] / 'assets' / 'controls'
+            shutil.copytree(source, base / 'assets' / 'controls')
+            for frozen in (False, True):
+                with self.subTest(frozen=frozen), \
+                     patch.object(appearance, '__file__', str(base / 'livegallery' / 'theme.py')), \
+                     patch.object(appearance.sys, '_MEIPASS', str(base) if frozen else None, create=True):
+                    url = appearance._control_icon_url('light', 'down')
+                    self.assertEqual(url, 'url("' + (base / 'assets/controls/chevron-down-light.svg').as_posix() + '")')
+                    self.use_theme('light', override=appearance._control_stylesheet('light'))
+                    for field, subcontrol in ((self.combo, QStyle.SubControl.SC_ComboBoxArrow),
+                                              (self.spin, QStyle.SubControl.SC_SpinBoxUp),
+                                              (self.spin, QStyle.SubControl.SC_SpinBoxDown)):
+                        self.assert_visible_arrow(field, self.button_rect(field, subcontrol),
+                                                  appearance.theme_tokens('light')['control_arrow'], 2)
+                    self.spin.setEnabled(False)
+                    self.assert_visible_arrow(self.spin,
+                        self.button_rect(self.spin, QStyle.SubControl.SC_SpinBoxUp),
+                        appearance.theme_tokens('light')['control_arrow_disabled'], 2)
+                    self.spin.setEnabled(True)
+
+    def test_compact_dropdown_edit_fields_fit_scope_and_sort_labels_beside_buttons(self):
+        for mode in ('light', 'dark'):
+            self.use_theme(mode)
+            for text, width in (('已选文件夹', 145), ('文件名排序', 150)):
+                with self.subTest(theme=mode, label=text):
+                    self.combo.setItemText(0, text)
+                    self.combo.setCurrentIndex(0)
+                    self.combo.setFixedWidth(width)
+                    self.application.processEvents()
+                    option = QStyleOptionComboBox()
+                    self.combo.initStyleOption(option)
+                    edit = self.combo.style().subControlRect(QStyle.ComplexControl.CC_ComboBox,
+                        option, QStyle.SubControl.SC_ComboBoxEditField, self.combo)
+                    self.assertGreaterEqual(edit.width(), self.combo.fontMetrics().horizontalAdvance(text) + 2)
+                    button = self.button_rect(self.combo, QStyle.SubControl.SC_ComboBoxArrow)
+                    self.assertGreaterEqual(button.width(), 34)
+                    self.assertLess(edit.right(), button.left())
 
 
 if __name__ == '__main__':

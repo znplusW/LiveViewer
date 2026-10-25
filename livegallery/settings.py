@@ -1,7 +1,7 @@
 import json
 import os
 import sys
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 
@@ -58,7 +58,11 @@ class Preferences:
     cache_location: str = 'user'
     recursive: bool = True
     last_folder: str = ''
+    last_folders: list[str] = field(default_factory=list)
+    search_scope: str = 'current'
+    selected_folders: list[str] | None = None
     last_image: str = ''
+    last_export_directory: str = ''
     sort_by: str = 'name'
     overview_thumbnail_width: int = 204
     filmstrip_height: int = 200
@@ -98,6 +102,27 @@ class Preferences:
             result = cls(**{k: v for k, v in values.items() if k in valid})
             if values.get('cache_location') not in ('user', 'program', 'library'):
                 result.cache_location = default_cache_location()
+            if not isinstance(result.last_folder, str) or '\0' in result.last_folder:
+                result.last_folder = ''
+            remembered = result.last_folders if isinstance(result.last_folders, list) else []
+            result.last_folders = list(dict.fromkeys(value for value in remembered
+                                                    if isinstance(value, str) and value and '\0' not in value))
+            if not result.last_folders and result.last_folder:
+                result.last_folders = [result.last_folder]
+            if result.last_folders:
+                result.last_folder = result.last_folders[0]
+            if result.search_scope not in ('all', 'current'):
+                result.search_scope = 'current'
+            if result.selected_folders is not None:
+                selected = result.selected_folders
+                if not isinstance(selected, list):
+                    result.selected_folders = None
+                else:
+                    valid_paths = list(dict.fromkeys(value for value in selected
+                                                     if isinstance(value, str) and value and '\0' not in value))
+                    result.selected_folders = valid_paths if valid_paths or not selected else None
+            if not isinstance(result.last_export_directory, str) or '\0' in result.last_export_directory:
+                result.last_export_directory = ''
             if result.theme_mode not in ('dark', 'light', 'system'):
                 result.theme_mode = 'dark'
             result.hold_ms = max(150, min(1000, int(result.hold_ms)))

@@ -35,8 +35,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .native_touch import install_image_touch_filter
+from .native_touch import TouchContextMenuGuard, install_image_touch_filter
 from .ui_theme import tokens_for
+from .zoom_navigator import ZoomNavigator
 
 
 class ViewerCanvas(QGraphicsView):
@@ -57,6 +58,8 @@ class ViewerCanvas(QGraphicsView):
 
     def apply_theme(self, colors):
         self.setBackgroundBrush(QColor(colors['canvas']))
+        if hasattr(self, 'zoom_navigator'):
+            self.zoom_navigator.apply_theme(colors)
         self.viewport().update()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -155,6 +158,9 @@ class ViewerCanvas(QGraphicsView):
 
         self._mouse_down = False
         self._mouse_moved = False
+        self._mouse_double_drag = False
+        self._last_mouse_click_time = 0.0
+        self._last_mouse_click_position = QPointF()
         self._pointer_start = QPointF()
         self._pointer_last = QPointF()
         self._hold_consumed = False
@@ -163,6 +169,8 @@ class ViewerCanvas(QGraphicsView):
         self._touch_had_multi = False
         self._touch_was_fit = True
         self._touch_count = 0
+        self._touch_device = None
+        self._touch_ids: set[int] = set()
         self._pinch_distance = 0.0
         self._pinch_center = QPointF()
         self._ignore_mouse_until = 0.0
@@ -174,10 +182,16 @@ class ViewerCanvas(QGraphicsView):
         self._blank_context_seen = False
         self._last_physical_right_press = 0.0
         self._native_touch_filter = install_image_touch_filter(self)
+        self.zoom_navigator = ZoomNavigator(self.viewport())
+        self.zoom_navigator.apply_theme(tokens_for(self))
+        self.zoom_navigator.interactionStarted.connect(self._begin_navigator_interaction)
+        self.zoom_navigator.centerRequested.connect(self._navigate_from_thumbnail)
+        self.zoom_changed.connect(self._update_zoom_navigator)
 
     def set_photo(self, image: QImage, video_path: Path | None = None) -> None:
         """Replace the current image, cancelling every pending playback request."""
         self._cancel_zoom_animation(apply_deferred=False)
+        self.zoom_navigator.cancel_interaction()
         self._reset_horizontal_wheel()
         self.stop_live()
         self._click_timer.stop()
@@ -335,6 +349,8 @@ class ViewerCanvas(QGraphicsView):
         self._click_timer.stop()
         self._mouse_down = False
         self._mouse_moved = False
+        self._mouse_double_drag = False
+        self._last_mouse_click_time = 0.0
         self._hold_consumed = True
         if self._touch_active:
             self._touch_context_cancelled = True
@@ -504,6 +520,33 @@ class ViewerCanvas(QGraphicsView):
         if self._image_rect.isEmpty():
             return
         self.centerOn(self._scene_center() - delta / self.transform().m11())
+        self._update_zoom_navigator()
+
+    def _begin_navigator_interaction(self):
+        self.stop_live()
+        self._last_tap_time = 0.0
+        self._cancel_zoom_animation()
+
+    def _navigate_from_thumbnail(self, center):
+        self.centerOn(center)
+        self._update_zoom_navigator()
+
+    def _update_zoom_navigator(self, *_):
+        if not hasattr(self, 'zoom_navigator'):
+            return
+        navigator = self.zoom_navigator
+        navigator.set_photo(self._photo.pixmap(), self._image_rect)
+        navigator.set_available_size(self.viewport().size())
+        navigator.set_view(self.mapToScene(self.viewport().rect()).boundingRect())
+        navigator.move(max(0, self.viewport().width() - navigator.width() - 12),
+                       max(0, self.viewport().height() - navigator.height() - 12))
+        navigator.setVisible(not self._image_rect.isEmpty() and self.zoom_factor() > 1.001
+                             and self.viewport().width() >= 48 and self.viewport().height() >= 48)
+        navigator.raise_()
+
+    def scrollContentsBy(self, dx, dy):
+        super().scrollContentsBy(dx, dy)
+        self._update_zoom_navigator()
 
     def _toggle_double_zoom(self, position: QPointF) -> None:
         self.stop_live()
@@ -662,6 +705,36 @@ class ViewerCanvas(QGraphicsView):
             or self._is_synthesized_mouse(event)
         )
 
+    def _is_double_drag_press(self, position: QPointF) -> bool:
+        delta = position - self._last_mouse_click_position
+        return (
+            not self._fit_mode
+            and self._last_mouse_click_time > 0
+            and time.monotonic() - self._last_mouse_click_time <= QApplication.doubleClickInterval() / 1000
+            and max(abs(delta.x()), abs(delta.y())) <= QApplication.styleHints().mouseDoubleClickDistance()
+        )
+
+    def _begin_mouse_press(self, position: QPointF, *, double_drag: bool = False) -> None:
+        self._stop_playback()
+        self._hold_timer.stop()
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._mouse_down = True
+        self._mouse_moved = False
+        self._mouse_double_drag = double_drag
+        self._hold_consumed = double_drag
+        self._pointer_start = QPointF(position)
+        self._pointer_last = QPointF(position)
+        if double_drag:
+            # The second tap belongs to tap-to-drag. It can stay stationary
+            # before the touchpad starts sending movement, beyond the Live
+            # delay; it must never briefly acquire playback ownership.
+            self._click_timer.stop()
+            self._last_mouse_click_time = 0.0
+        elif self._video_path is not None and self.image_contains_viewport_point(position):
+            self._hold_timer.start(self._hold_ms)
+        if self.isVisible():
+            self.viewport().grabMouse()
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.RightButton and not self._is_synthesized_mouse(event):
             # Real mouse right-click remains available even immediately after
@@ -676,17 +749,7 @@ class ViewerCanvas(QGraphicsView):
         if event.button() != Qt.MouseButton.LeftButton:
             super().mousePressEvent(event)
             return
-        self._stop_playback()
-        self.setFocus(Qt.FocusReason.MouseFocusReason)
-        self._mouse_down = True
-        self._mouse_moved = False
-        self._hold_consumed = False
-        self._pointer_start = QPointF(event.position())
-        self._pointer_last = QPointF(event.position())
-        if self._video_path is not None and self.image_contains_viewport_point(event.position()):
-            self._hold_timer.start(self._hold_ms)
-        if self.isVisible():
-            self.viewport().grabMouse()
+        self._begin_mouse_press(event.position(), double_drag=self._is_double_drag_press(event.position()))
         event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -716,8 +779,10 @@ class ViewerCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             owned_press = self._mouse_down
+            double_drag = owned_press and self._mouse_double_drag
             was_click = owned_press and not self._mouse_moved and not self._hold_consumed
             self._mouse_down = False
+            self._mouse_double_drag = False
             self._hold_timer.stop()
             # Switching from a mouse hold to the once shortcut releases this
             # pointer's ownership. Its eventual button-up cannot stop the new
@@ -726,8 +791,16 @@ class ViewerCanvas(QGraphicsView):
                 self._stop_playback()
             self._release_capture()
             self.viewport().unsetCursor()
-            if was_click:
+            if double_drag and not self._mouse_moved:
+                # A completed second click zooms; moving while held pans at
+                # the original scale instead. Decide only on button-up.
+                self._toggle_double_zoom(event.position())
+            elif was_click:
+                self._last_mouse_click_time = time.monotonic()
+                self._last_mouse_click_position = QPointF(event.position())
                 self._click_timer.start(QApplication.doubleClickInterval())
+            else:
+                self._last_mouse_click_time = 0.0
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -738,6 +811,11 @@ class ViewerCanvas(QGraphicsView):
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self._click_timer.stop()
+            if self._mouse_double_drag or self._is_double_drag_press(event.position()):
+                if not self._mouse_double_drag:
+                    self._begin_mouse_press(event.position(), double_drag=True)
+                event.accept()
+                return
             self._toggle_double_zoom(event.position())
             event.accept()
             return
@@ -780,6 +858,7 @@ class ViewerCanvas(QGraphicsView):
 
     def viewportEvent(self, event: QEvent) -> bool:
         event_type = event.type()
+        context_guard = None
         if event_type in (
             QEvent.Type.TouchBegin,
             QEvent.Type.TouchUpdate,
@@ -807,9 +886,17 @@ class ViewerCanvas(QGraphicsView):
             self._hold_consumed = True
             self._blank_hold_timer.stop()
             self._click_timer.stop()
+            if self._touch_active and self._touch_device is not None:
+                context_guard = TouchContextMenuGuard(self._touch_device, self._touch_ids)
         if event_type == QEvent.Type.UngrabMouse and not self._releasing_capture:
             if self._mouse_down:
                 self.stop_live()
+        if context_guard is not None:
+            # CustomContextMenu invokes MainWindow's synchronous QMenu.exec.
+            # Keep ownership of the opening touch across its nested event loop,
+            # even when opening the menu cancels playback/focus on this canvas.
+            with context_guard:
+                return super().viewportEvent(event)
         return super().viewportEvent(event)
 
     def image_contains_viewport_point(self, position: QPointF) -> bool:
@@ -850,6 +937,8 @@ class ViewerCanvas(QGraphicsView):
             self._hold_consumed = False
             self._mouse_moved = False
             self._touch_count = len(active)
+            self._touch_device = event.pointingDevice()
+            self._touch_ids = {point.id() for point in active}
             if active:
                 self._pointer_start = QPointF(active[0].position())
                 self._pointer_last = QPointF(self._pointer_start)
@@ -975,6 +1064,7 @@ class ViewerCanvas(QGraphicsView):
 
     def focusOutEvent(self, event) -> None:
         self._cancel_zoom_animation()
+        self.zoom_navigator.cancel_interaction()
         self.stop_live()
         super().focusOutEvent(event)
 

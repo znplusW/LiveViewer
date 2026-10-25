@@ -73,6 +73,18 @@ class CachePreferencesTests(unittest.TestCase):
         loaded.save()
         self.assertEqual(Preferences.load(), loaded)
 
+    def test_last_export_directory_survives_restart_and_rejects_malformed_values(self):
+        destination = str(self.base / '导出图片 with spaces')
+        Preferences(last_export_directory=destination, muted=False).save()
+        loaded = Preferences.load()
+        self.assertEqual(loaded.last_export_directory, destination)
+        self.assertFalse(loaded.muted)
+        for value in (None, True, 7, ['folder'], 'invalid\0path'):
+            (self.data / 'settings.json').write_text(json.dumps({'last_export_directory':value, 'muted':False}))
+            loaded = Preferences.load()
+            self.assertEqual(loaded.last_export_directory, '')
+            self.assertFalse(loaded.muted)
+
     def test_appearance_defaults_roundtrips_and_rejects_invalid_values(self):
         self.assertEqual(Preferences.load().theme_mode, 'dark')
         for mode in ('dark', 'light', 'system'):
@@ -83,6 +95,46 @@ class CachePreferencesTests(unittest.TestCase):
             loaded = Preferences.load()
             self.assertEqual(loaded.theme_mode, 'dark')
             self.assertFalse(loaded.muted)
+
+    def test_multiple_folders_and_search_scope_roundtrip_and_migrate_single_folder(self):
+        folders = [str(self.base / '图库 A'), str(self.base / '图库 B')]
+        Preferences(last_folders=folders, last_folder=folders[0], search_scope='all', muted=False).save()
+        loaded = Preferences.load()
+        self.assertEqual(loaded.last_folders, folders)
+        self.assertEqual(loaded.last_folder, folders[0])
+        self.assertEqual(loaded.search_scope, 'all')
+        self.assertFalse(loaded.muted)
+        (self.data / 'settings.json').write_text(json.dumps({'last_folder':folders[1]}), encoding='utf-8')
+        migrated = Preferences.load()
+        self.assertEqual(migrated.last_folders, [folders[1]])
+        self.assertEqual(migrated.search_scope, 'current')
+        for invalid in (None, True, 'all folders', 7, ['all']):
+            (self.data / 'settings.json').write_text(json.dumps({
+                'last_folders': [folders[0], None, 7, folders[0], 'bad\0path', folders[1]],
+                'search_scope': invalid, 'last_export_directory': str(self.base / 'exports')}), encoding='utf-8')
+            normalized = Preferences.load()
+            self.assertEqual(normalized.last_folders, folders)
+            self.assertEqual(normalized.last_folder, folders[0])
+            self.assertEqual(normalized.search_scope, 'current')
+            self.assertEqual(normalized.last_export_directory, str(self.base / 'exports'))
+        first, second = Preferences(), Preferences()
+        first.last_folders.append('one')
+        self.assertEqual(second.last_folders, [])
+
+    def test_checked_folder_selection_distinguishes_all_none_and_subset(self):
+        for selected in (None, [], [str(self.base / 'one')]):
+            Preferences(selected_folders=selected).save()
+            self.assertEqual(Preferences.load().selected_folders, selected)
+        for invalid in (True, 7, 'one folder', [None, 7, 'bad\0path']):
+            (self.data / 'settings.json').write_text(json.dumps({'selected_folders':invalid}), encoding='utf-8')
+            self.assertIsNone(Preferences.load().selected_folders)
+
+    def test_invalid_legacy_folder_is_not_migrated_into_startup_paths(self):
+        for value in (7, None, True, ['folder'], 'bad\0path'):
+            (self.data / 'settings.json').write_text(json.dumps({'last_folder':value}), encoding='utf-8')
+            loaded = Preferences.load()
+            self.assertEqual(loaded.last_folder, '')
+            self.assertEqual(loaded.last_folders, [])
 
 
 if __name__ == '__main__':

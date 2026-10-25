@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, Qt, QUrl
-from PySide6.QtGui import QContextMenuEvent, QEventPoint, QImage, QTouchEvent, QWheelEvent
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QPointF, Qt, QTimer, QUrl
+from PySide6.QtGui import QContextMenuEvent, QEventPoint, QImage, QMouseEvent, QTouchEvent, QWheelEvent
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QtVideo
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 from livegallery.viewer import ViewerCanvas
 from livegallery.native_touch import (
@@ -241,6 +241,79 @@ class CanvasTests(unittest.TestCase):
         self.finish_zoom_animation()
         self.assertAlmostEqual(self.canvas.zoom_factor(), 1.0, places=8)
         self.assertTrue(self.canvas._fit_mode)
+
+    def test_zoomed_trackpad_tap_then_held_second_press_never_starts_live(self):
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        scale = self.canvas.transform().m11()
+        center = self.canvas._scene_center()
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        # Tap-to-drag can hold the second press still (or below drag distance)
+        # longer than the user's Live hold delay before its first drag update.
+        QTest.mouseMove(self.canvas.viewport(), self.center + QPoint(1, 0))
+        QTest.qWait(180)
+        self.assertEqual(self.player.play_calls, 0, 'Second tap briefly started Live playback')
+        QTest.mouseMove(self.canvas.viewport(), self.center + QPoint(80, 25))
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton,
+                           pos=self.center + QPoint(80, 25))
+        self.assertLess((self.canvas._scene_center() - center).x(), -20)
+        self.assertAlmostEqual(self.canvas.transform().m11(), scale)
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.assertFalse(self.canvas._click_timer.isActive())
+
+    def test_zoomed_qt_double_click_held_second_press_pans_without_live_or_zoom(self):
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        original = self.canvas.transform().m11()
+        center = self.canvas._scene_center()
+        QTest.mouseClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        # Qt's standard sequence replaces the second press with DoubleClick.
+        QTest.mouseDClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.qWait(180)
+        self.assertEqual(self.player.play_calls, 0)
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.assertAlmostEqual(self.canvas.transform().m11(), original)
+        QTest.mouseMove(self.canvas.viewport(), self.center + QPoint(-90, 40))
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton,
+                           pos=self.center + QPoint(-90, 40))
+        self.assertGreater((self.canvas._scene_center() - center).x(), 20)
+        self.assertAlmostEqual(self.canvas.transform().m11(), original)
+        self.assertFalse(self.canvas.is_zoom_animating())
+
+    def test_zoomed_double_click_release_still_animates_and_normal_hold_keeps_user_delay(self):
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        QTest.mouseClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.mouseDClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.mouseMove(self.canvas.viewport(), self.center + QPoint(1, 0))
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton,
+                           pos=self.center + QPoint(1, 0))
+        self.assertTrue(self.canvas.is_zoom_animating())
+        self.canvas._zoom_animation.setCurrentTime(100)
+        self.assertGreater(self.canvas.zoom_factor(), 1)
+        self.assertLess(self.canvas.zoom_factor(), 2)
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 1)
+        self.assertEqual(self.player.play_calls, 0)
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        self.assertEqual(self.canvas._hold_timer.interval(), 100)
+        self.wait_for_play_calls(1)
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+
+    def test_double_drag_candidate_photo_change_cancels_late_zoom_and_touch_hold_still_plays(self):
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        QTest.mouseClick(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        QTest.mousePress(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        self.canvas.set_photo(self.image, self.video_path)
+        QTest.mouseRelease(self.canvas.viewport(), Qt.MouseButton.LeftButton, pos=self.center)
+        self.assertFalse(self.canvas.is_zoom_animating())
+        self.assertFalse(self.canvas._click_timer.isActive())
+        self.assertEqual(self.player.play_calls, 0)
+        self.canvas._zoom_at(2.0, QPointF(self.center))
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        self.wait_for_play_calls(1)
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+        self.assertFalse(self.canvas._play_requested)
 
     def test_double_click_from_other_zoom_returns_fit_and_rapid_retarget_is_continuous(self):
         self.canvas.zoom_in()
@@ -578,6 +651,108 @@ class CanvasTests(unittest.TestCase):
         self.assertFalse(self.canvas._blank_hold_timer.isActive())
         self.canvas._blank_hold_timeout()
         self.assertEqual(menus.count(), 2)
+
+    def check_held_touch_menu(self, *, native_context=False, cancel=False, choose="mouse"):
+        self.portrait_with_letterboxing()
+        self.canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        device = QTest.createTouchDevice()
+        window = self.canvas.windowHandle()
+        sequence = QTest.touchEvent(window, device, False)
+        point = self.canvas.viewport().mapTo(self.canvas, QPoint(20, 300))
+        result = {}
+        menus = []
+
+        def popup(position):
+            # Match MainWindow._item_menu, including its nested event loop and
+            # cancellation of the canvas input state before QMenu takes over.
+            self.canvas.stop_live()
+            menu = QMenu(self.canvas)
+            menus.append(menu)
+            action = menu.addAction("Choose deliberately")
+            triggered = QSignalSpy(action.triggered)
+
+            def release_original_contact():
+                # Small contact drift while still holding is enough for QMenu
+                # to mistake its eventual promoted release for a menu choice.
+                for x in (24, 28, 32, 36):
+                    sequence.move(0, point + QPoint(x - 20, 0), window).commit()
+                result["visible_while_held"] = menu.isVisible()
+                if cancel:
+                    QApplication.sendEvent(window, QTouchEvent(QEvent.Type.TouchCancel, device))
+                else:
+                    sequence.release(0, point + QPoint(16, 0), window).commit()
+                # Windows may also promote the original press-and-hold to a
+                # system mouse release, after the raw touch has already ended.
+                local = QPointF(menu.actionGeometry(action).center())
+                QApplication.sendEvent(menu, QMouseEvent(
+                    QEvent.Type.MouseButtonRelease, local, local,
+                    QPointF(menu.mapToGlobal(local.toPoint())),
+                    Qt.MouseButton.RightButton, Qt.MouseButton.NoButton,
+                    Qt.KeyboardModifier.NoModifier,
+                    Qt.MouseEventSource.MouseEventSynthesizedBySystem,
+                ))
+                result["visible_after_release"] = menu.isVisible()
+                result["accidental_choices"] = triggered.count()
+                if menu.isVisible():
+                    if choose in ("touch", "other_touch"):
+                        target = menu.windowHandle()
+                        next_device = QTest.createTouchDevice() if choose == "other_touch" else device
+                        tap = QTest.touchEvent(target, next_device, False)
+                        tap.press(0, local.toPoint(), target).commit()
+                        tap.release(0, local.toPoint(), target).commit()
+                    elif choose == "keyboard":
+                        QTest.keyClick(menu, Qt.Key.Key_Down)
+                        QTest.keyClick(menu, Qt.Key.Key_Return)
+                    else:
+                        QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=local.toPoint())
+                result["deliberate_choices"] = triggered.count()
+
+            # Deliberately longer than the old viewer's 650ms mouse suppression.
+            QTimer.singleShot(750, release_original_contact)
+            QTimer.singleShot(1800, menu.close)  # Bound a broken nested loop.
+            menu.exec(self.canvas.mapToGlobal(position))
+
+        self.canvas.customContextMenuRequested.connect(popup)
+        # QMenu saves Qt's last global mouse position when it opens and ignores
+        # a press at that exact origin. A previous touch-menu test can leave it
+        # at this row's center. Move the real QWindow pointer to a neutral spot
+        # before the opening touch, without changing any gesture assertions.
+        QTest.mouseMove(window, self.canvas.viewport().mapTo(
+            self.canvas, QPoint(self.canvas.viewport().width() - 15, 15)))
+        sequence.press(0, point, window).commit()
+        self.assertTrue(self.canvas._touch_active)
+        if native_context:
+            context_position = QPoint(20, 300)
+            QTimer.singleShot(30, lambda: QApplication.sendEvent(
+                self.canvas.viewport(), QContextMenuEvent(
+                    QContextMenuEvent.Reason.Mouse, context_position,
+                    self.canvas.viewport().mapToGlobal(context_position),
+                ),
+            ))
+        else:
+            self.canvas._blank_hold_timer.start(30)
+        QTest.qWait(2100)
+        self.assertEqual(len(menus), 1)
+        self.assertTrue(result.get("visible_while_held"), result)
+        self.assertTrue(result.get("visible_after_release"), result)
+        self.assertEqual(result.get("accidental_choices"), 0, result)
+        self.assertEqual(result.get("deliberate_choices"), 1, result)
+        self.assertEqual(self.player.play_calls, 0)
+        self.assertFalse(self.canvas._click_timer.isActive())
+        for menu in menus:
+            menu.deleteLater()
+
+    def test_blank_long_press_menu_survives_held_touch_movement_and_late_release(self):
+        self.check_held_touch_menu()
+
+    def test_native_blank_context_menu_accepts_next_touch_after_original_release(self):
+        self.check_held_touch_menu(native_context=True, choose="touch")
+
+    def test_blank_context_menu_accepts_new_independent_touch_device(self):
+        self.check_held_touch_menu(choose="other_touch")
+
+    def test_blank_context_touch_cancel_leaves_menu_for_keyboard_choice(self):
+        self.check_held_touch_menu(cancel=True, choose="keyboard")
 
     def test_blank_tap_and_hold_cancellation_leave_no_late_menu_or_play(self):
         self.portrait_with_letterboxing()

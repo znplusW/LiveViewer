@@ -1,10 +1,12 @@
 import errno
 import os
+import stat
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PIL import Image
@@ -40,6 +42,19 @@ class CoverSaveTests(unittest.TestCase):
     def assert_no_pending_files(self):
         work = self.folder / WORK_DIRECTORY
         self.assertTrue(not work.exists() or not list(work.iterdir()))
+
+    def test_windows_directory_readonly_marker_is_not_an_acl_denial(self):
+        directory = SimpleNamespace(stat=lambda: SimpleNamespace(st_mode=stat.S_IFDIR | 0o555))
+        regular = SimpleNamespace(stat=lambda: SimpleNamespace(st_mode=stat.S_IFREG | 0o444))
+        with patch.object(cover_save.os, 'name', 'nt'):
+            cover_save._writable(directory)
+            with self.assertRaises(CoverSaveError):
+                cover_save._writable(regular)
+        with patch.object(cover_save.os, 'name', 'posix'):
+            with self.assertRaises(CoverSaveError):
+                cover_save._writable(directory)
+            with self.assertRaises(CoverSaveError):
+                cover_save._writable(regular)
 
     def test_copy_pair_shares_version_preserves_extension_and_video_bytes(self):
         result = save_cover(self.source, self.frame)

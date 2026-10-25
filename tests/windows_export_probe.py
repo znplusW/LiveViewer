@@ -91,6 +91,7 @@ def click_native_save(stop, trace):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--report', type=Path, default=Path('reports/native-export.json'))
+    parser.add_argument('--readonly-directory', action='store_true')
     args = parser.parse_args()
     report = {'status': 'failed', 'real_native_save_clicked': False}
     if sys.platform != 'win32':
@@ -111,8 +112,23 @@ def main():
         fixtures = Path(__file__).parent / 'fixtures'
         shutil.copy2(fixtures / 'VFR_PAIR.jpg', still)
         shutil.copy2(fixtures / 'VFR_PAIR.MOV', video)
+        export_folder = Path(directory) / '另一个导出目录 with spaces'
+        export_folder.mkdir()
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.GetFileAttributesW.argtypes = [wintypes.LPCWSTR]
+        kernel.GetFileAttributesW.restype = wintypes.DWORD
+        kernel.SetFileAttributesW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+        kernel.SetFileAttributesW.restype = wintypes.BOOL
+        original_attributes = int(kernel.GetFileAttributesW(str(export_folder)))
         try:
-            dialog = EditorDialog(MediaItem('native-export', still, video))
+            assert original_attributes != 0xffffffff
+            if args.readonly_directory:
+                assert kernel.SetFileAttributesW(str(export_folder), original_attributes | 0x1)
+                report['destination_readonly_attribute'] = True
+                proof = export_folder / 'write-permission-proof.tmp'
+                proof.write_bytes(b'Windows directory readonly is not an ACL denial')
+                proof.unlink()
+            dialog = EditorDialog(MediaItem('native-export', still, video), initial_export_directory=export_folder)
             dialog.show()
             def wait_for(condition, seconds=25):
                 deadline = time.monotonic() + seconds
@@ -135,15 +151,20 @@ def main():
             QTimer.singleShot(0, activate_export)
             dialog._preview_menu(dialog.preview.rect().center())
             wait_for(lambda: bool(dialog.last_export_path or report.get('error')
-                                  or '未完成' in dialog.status_label.text()), 30)
-            report.update(editor_status=dialog.status_label.text(),
+                                  or dialog.last_export_error), 30)
+            report.update(editor_status=dialog.status_label.text(), export_feedback=dialog.export_status_label.text(),
                           last_export_path=str(dialog.last_export_path) if dialog.last_export_path else None,
-                          files=[p.name for p in folder.iterdir() if p.is_file()])
+                          files=[p.name for p in folder.iterdir() if p.is_file()],
+                          export_files=[p.name for p in export_folder.iterdir() if p.is_file()])
             assert not report.get('error'), report.get('error')
             assert report['real_native_save_clicked'], 'Native Save button was not clicked'
             assert dialog.last_export_path is not None, dialog.status_label.text()
             target = Path(dialog.last_export_path)
             assert target.is_file(), 'Exported output file is absent'
+            assert target.parent.resolve() == export_folder.resolve(), 'Export ignored the chosen other directory'
+            if args.readonly_directory:
+                assert int(kernel.GetFileAttributesW(str(export_folder))) & 0x1, 'Exporter modified the directory attribute'
+            report['other_directory_export_verified'] = True
             image = load_image(target, None)
             assert image.size == (320, 240)
             expected, actual = (207, 66, 194), image.getpixel((160, 120))
@@ -160,6 +181,7 @@ def main():
         except Exception as error:
             report.update(error=str(error), traceback=traceback.format_exc())
         finally:
+            kernel.SetFileAttributesW(str(export_folder), original_attributes)
             stop.set()
             if worker is not None:
                 worker.join(6)
@@ -172,6 +194,8 @@ def main():
                     QTest.qWait(10)
                 report['workers_stopped'] = not dialog._worker.thread.is_alive() and not (
                     dialog._export_thread and dialog._export_thread.is_alive())
+                if not report['workers_stopped']:
+                    report.update(status='failed', cleanup_error='Editor workers did not stop before cleanup')
             if original_data is None:
                 os.environ.pop('LIVEGALLERY_DATA_DIR', None)
             else:

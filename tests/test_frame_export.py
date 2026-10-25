@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from PIL import Image, ImageColor
 
 from livegallery.cover_save import CoverSaveError, FileFingerprint, SourceChangedError, WORK_DIRECTORY
-from livegallery.frame_export import FrameExportError, export_frame
+from livegallery.frame_export import FrameExportError, export_destination, export_frame
 from livegallery.frame_reader import FrameReader
 from livegallery.heic_encoder import _executable
 from livegallery.imaging import load_image
@@ -50,6 +50,55 @@ class FrameExportTests(unittest.TestCase):
         root = self.base / WORK_DIRECTORY
         self.assertFalse(root.exists() and any(root.iterdir()))
         self.assertEqual(self.video.read_bytes(), self.original_video)
+
+    def test_export_destination_adds_selected_suffix_to_dotted_or_extensionless_names(self):
+        for name, preferred, expected in (
+                ('edited.v1', 'png', 'edited.v1.png'), ('newname.', 'png', 'newname.png'),
+                ('中文 文件', 'jpg', '中文 文件.jpg'), ('photo.v2', 'heic', 'photo.v2.heic'),
+                ('photo.JPEG', 'png', 'photo.JPEG'), ('photo.HEIC', 'jpg', 'photo.HEIC')):
+            self.assertEqual(export_destination(self.base / name, preferred), self.base / expected)
+
+    def test_readonly_file_or_real_stage_permission_error_never_overwrites_target(self):
+        target = self.base / 'protected.png'
+        target.write_bytes(b'preserve original target')
+        target.chmod(0o444)
+        try:
+            with self.assertRaises(CoverSaveError):
+                export_frame(self.video, 4, target, expected_video=self.source, reader_factory=SmallReader)
+        finally:
+            target.chmod(0o600)
+        with patch('livegallery.frame_export._work_root', side_effect=PermissionError('ACL denies creating files')):
+            with self.assertRaises(PermissionError):
+                export_frame(self.video, 4, target, expected_video=self.source, reader_factory=SmallReader)
+        self.assertEqual(target.read_bytes(), b'preserve original target')
+        self.assert_clean()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows directory attributes require Windows')
+    def test_real_windows_readonly_directory_allows_all_export_formats(self):
+        import ctypes
+        folder = self.base / 'other folder'
+        folder.mkdir()
+        api = ctypes.WinDLL('kernel32', use_last_error=True)
+        api.GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
+        api.GetFileAttributesW.restype = ctypes.c_uint32
+        api.SetFileAttributesW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        api.SetFileAttributesW.restype = ctypes.c_int
+        original = api.GetFileAttributesW(str(folder))
+        self.assertNotEqual(original, 0xffffffff)
+        self.assertTrue(api.SetFileAttributesW(str(folder), original | 0x1))
+        try:
+            for suffix in ('.png', '.jpg', '.jpeg', '.heic'):
+                with self.subTest(suffix=suffix):
+                    target = folder / ('exported' + suffix)
+                    export_frame(self.video, 4, target, expected_video=self.source, reader_factory=SmallReader)
+                    decoded = load_image(target, None)
+                    self.assertEqual(decoded.size, (321, 243))
+                    self.assertEqual(api.GetFileAttributesW(str(target)) & (0x2 | 0x4), 0)
+        finally:
+            api.SetFileAttributesW(str(folder), original)
+        work = folder / WORK_DIRECTORY
+        self.assertFalse(work.exists() and any(work.iterdir()))
+        self.assert_clean()
 
     def test_real_variable_rate_indices_export_exact_full_resolution_frames(self):
         with FrameReader(self.video) as reader:

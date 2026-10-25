@@ -27,9 +27,12 @@ from .cache_locations import open_cache
 from .catalog_model import CatalogModel, ThumbnailDelegate
 from .imaging import load_image
 from .jobs import JobQueue
+from .folder_picker import select_photo_folders
+from .folder_tree import FolderTree
 from .library import _identifier, natural_key, scan_folder
 from .matching import close_video_probe, resolve_pair
 from .models import MediaItem
+from .multi_cache import normalise_roots, open_multi_cache, scan_roots
 from .reveal_file import reveal_in_folder
 from .settings import Preferences, app_directory, cache_data_roots, data_directory
 from .settings_controls import PillSwitch, SettingsScrollArea, SettingsWheelGuard, TickCheckBox
@@ -78,6 +81,33 @@ class _CacheLoad:
     warning: str = ''
     location: str = 'user'
     owned: bool = True
+    bound_roots: tuple = ()
+    missing_roots: tuple = ()
+
+
+class _FullscreenLiveBadge(QLabel):
+    """A free-standing overlay has no layout to apply changed size hints."""
+
+    def fit_contents(self):
+        if getattr(self, '_fitting_contents', False):
+            return
+        self._fitting_contents = True
+        try:
+            self.ensurePolished()
+            hint = self.sizeHint().expandedTo(self.minimumSizeHint())
+            if hint.isValid() and self.size() != hint:
+                self.resize(hint)
+        finally:
+            self._fitting_contents = False
+
+    def event(self, event):
+        handled = super().event(event)
+        if event.type() in (QEvent.Type.StyleChange, QEvent.Type.FontChange,
+                            QEvent.Type.ApplicationFontChange, QEvent.Type.Polish,
+                            QEvent.Type.DevicePixelRatioChange, QEvent.Type.ScreenChangeInternal,
+                            QEvent.Type.Show):
+            self.fit_contents()
+        return handled
 
 
 class FilenameField(QLineEdit):
@@ -160,6 +190,7 @@ APP_SHORTCUTS = {
     "next": ("Right", "下一张"),
     "fullscreen": ("F11", "切换全屏"),
     "open_folder": ("Ctrl+O", "打开文件夹"),
+    "select_folders": ("Ctrl+A", "全选侧栏文件夹"),
 }
 
 
@@ -198,6 +229,8 @@ def _shortcut_overrides(hold: QKeySequence, once: QKeySequence, filmstrip: QKeyS
             if sequence == QKeySequence(key):
                 if key == "F11":
                     overrides.append(f"F11：窗口模式改为“{label}”；全屏时仍用于退出全屏")
+                elif key == 'Ctrl+A':
+                    overrides.append(f"Ctrl+A：侧栏仍用于全选文件夹；其他区域改为“{label}”")
                 else:
                     overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
         if not sequence.isEmpty():
@@ -405,10 +438,13 @@ class MainWindow(QMainWindow):
             bootstrap = 'user'
             bootstrap_warning = '软件目录缓存暂不可写，已使用本机缓存。'
         self._cache_key = (bootstrap, None)
+        self._cache_bound_roots = ()
         self._cache_warning = bootstrap_warning or self.cache.recovery_warning
         self._cache_location = bootstrap
         self._cache_lock = threading.RLock()
+        self._cache_prepare_lock = threading.Lock()
         self._cache_stores = {id(self.cache): self.cache}
+        self._cache_close_locks = {}
         self._cache_reapers = []
         self._load_threads = []
         self._verify_threads = {}
@@ -436,6 +472,8 @@ class MainWindow(QMainWindow):
         self._shutdown_error = None
         self._shutdown_thread = None
         self.folder: Path | None = None
+        self.folders: tuple[Path, ...] = ()
+        self._scan_pending = False
         self._primary_items: list[MediaItem] = []
         self._extras: dict[str, list[MediaItem]] = {}
         self._items: list[MediaItem] = []
@@ -467,6 +505,7 @@ class MainWindow(QMainWindow):
         self._pre_fullscreen_geometry = None
         self._pre_fullscreen_maximized = False
         self._disk_missing = False
+        self._missing_folders = frozenset()
         self._background_pair_id = None
         self._remembered_strip = self.preferences.filmstrip_visible
         self._live_sequence = QKeySequence(self.preferences.live_key)
@@ -512,6 +551,7 @@ class MainWindow(QMainWindow):
         self.fullscreen_live_badge.setStyleSheet(
             f"QLabel {{ color: {colors['badge_text']}; background: {colors['badge_background']}; "
             f"border: 1px solid {colors['badge_border']}; border-radius: 5px; padding: 5px 8px; font-weight: 600; }}")
+        self.fullscreen_live_badge.fit_contents()
         self.grid.viewport().update()
         self.strip.viewport().update()
         self.film_resize_handle.update()
@@ -579,6 +619,15 @@ class MainWindow(QMainWindow):
         self.search.setMaximumWidth(260)
         self.search.textChanged.connect(self._apply_filters)
         filters.addWidget(self.search, 1)
+        self.search_scope = QComboBox()
+        self.search_scope.setAccessibleName('搜索范围')
+        self.search_scope.addItem('已选文件夹', 'current')
+        self.search_scope.addItem('全局', 'all')
+        self.search_scope.setCurrentIndex(max(0, self.search_scope.findData(self.preferences.search_scope)))
+        self.search_scope.setMaximumWidth(145)
+        self.search_scope.setToolTip('已选文件夹：只搜索侧栏勾选的文件夹。全局：搜索全部已导入图片。清空搜索后恢复勾选范围。')
+        self.search_scope.currentIndexChanged.connect(self._search_scope_changed)
+        filters.addWidget(self.search_scope)
         self.kind_filter = MediaTypeFilter()
         self.kind_filter.changed.connect(self._apply_filters)
         filters.addWidget(self.kind_filter)
@@ -608,13 +657,12 @@ class MainWindow(QMainWindow):
         title.setObjectName('muted')
         title.setStyleSheet("font-size:12px;font-weight:600;padding-left:5px")
         side.addWidget(title)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setIndentation(16)
-        self.tree.itemClicked.connect(self._directory_selected)
+        self.tree = FolderTree()
+        self.tree.checkedChanged.connect(self._directories_checked)
         side.addWidget(self.tree)
-        side_note = QLabel("图片与视频仅在保存封面图时更改\n缓存按设置位置存放")
+        side_note = QLabel("勾选多选 · Shift 选范围 · Ctrl+A 全选\n图片与视频仅在保存封面图时更改\n缓存按设置位置存放")
         side_note.setObjectName("muted")
+        side_note.setWordWrap(True)
         side_note.setStyleSheet("font-size:11px;padding:5px")
         side.addWidget(side_note)
         self.sidebar.setMinimumWidth(170)
@@ -764,7 +812,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([220, 1200])
         root.addWidget(splitter, 1)
-        self.fullscreen_live_badge = QLabel("◉ LIVE", central)
+        self.fullscreen_live_badge = _FullscreenLiveBadge("◉ LIVE", central)
         self.fullscreen_live_badge.setObjectName("fullscreenLiveBadge")
         self.fullscreen_live_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.fullscreen_live_badge.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -779,20 +827,56 @@ class MainWindow(QMainWindow):
         self._navigation_timer.stop()
         self._navigation_target_id = None
         self.viewer.stop_live()
-        selected = QFileDialog.getExistingDirectory(self, "选择照片文件夹", str(self.folder or Path.home()))
+        try:
+            selected = select_photo_folders(self, self.folder or Path.home())
+        except OSError as error:
+            self._show_message('无法打开文件夹选择窗口：' + str(error))
+            return
         if selected:
-            self.load_folder(Path(selected))
+            self.load_folders(selected)
 
-    def _cache_load_key(self, folder):
+    def _cache_load_key(self, folders):
         location = self.preferences.cache_location
         # Global databases can own read-through handles to a gallery cache.
         # Rebind on every gallery change so those handles retire with that
         # gallery, even when the selected global cache directory is unchanged.
-        return location, str(Path(folder).absolute()) if folder is not None else None
+        folders = normalise_roots(folders) if folders else ()
+        paths = tuple(str(folder) for folder in folders)
+        return location, paths[0] if len(paths) == 1 else paths if paths else None
 
     def _register_cache(self, cache):
         with self._cache_lock:
             self._cache_stores[id(cache)] = cache
+
+    def _close_cache(self, cache):
+        # CacheStore marks itself closed before releasing portable readers and
+        # its directory lock. Serialize the whole close, including callbacks.
+        with self._cache_lock:
+            guard = self._cache_close_locks.setdefault(id(cache), threading.Lock())
+        with guard:
+            cache.close()
+        with self._cache_lock:
+            self._cache_stores.pop(id(cache), None)
+
+    @staticmethod
+    def _writer_roots(cache):
+        if hasattr(cache, 'writer_roots'):
+            return cache.writer_roots
+        root = cache.library_root
+        return (root,) if root is not None and cache.base.parent == root else ()
+
+    def _drain_conflicting_caches(self, roots):
+        with self._cache_lock:
+            conflicts = [cache for cache in self._cache_stores.values()
+                         if set(roots) & set(self._writer_roots(cache))]
+        for cache in conflicts:
+            self.jobs.wait_owner(cache)
+            with self._cache_lock:
+                verifiers = [thread for thread, owner in self._verify_threads.items() if owner is cache]
+            for verifier in verifiers:
+                if verifier is not threading.current_thread():
+                    verifier.join()
+            self._close_cache(cache)
 
     def _retire_cache(self, cache):
         """Release inactive database/file locks after their actual users finish."""
@@ -805,11 +889,7 @@ class MainWindow(QMainWindow):
                     user.join()
             if cache is self.cache and not self._closed:
                 return
-            try:
-                cache.close()
-            finally:
-                with self._cache_lock:
-                    self._cache_stores.pop(id(cache), None)
+            self._close_cache(cache)
         thread = threading.Thread(target=retire, name='cache-retire', daemon=True)
         self._cache_reapers.append(thread)
         thread.start()
@@ -824,52 +904,101 @@ class MainWindow(QMainWindow):
             dialog.close()
             dialog.deleteLater()
 
-    def _prepare_cache_and_scan(self, folder, generation, cancel, *, scan=True):
-        key = self._cache_load_key(folder)
-        cache, old_key, old_warning = self.cache, self._cache_key, self._cache_warning
-        location = self._cache_location
+    def _prepare_cache_and_scan(self, folders, generation, cancel, *, scan=True):
+        folders = normalise_roots(folders) if folders else ()
+        key = self._cache_load_key(folders)
         recursive = self.preferences.recursive
         max_bytes = self.preferences.cache_mb * 1024 ** 2
-        same_gallery = (cache.library_root is None or
-                        (folder is not None and cache.library_root == Path(folder).absolute()))
-        # Portable keys are relative to their gallery. Never use gallery A as
-        # a source for gallery B, where an unrelated file can have the same
-        # name, size and timestamp.
-        sources = ((cache.base,) if same_gallery else ())
-        source_paths = tuple(dict.fromkeys((*sources, self._data_base / 'cache',
-                                           self._user_cache_base / 'cache', self._program_cache_base / 'cache')))
 
         def prepare():
             owned = False
-            prepared = cache
-            packet = None
+            prepared = None
             try:
-                if cancel.is_set():
-                    return
-                warning = old_warning
-                actual = location
-                if key != old_key or location != key[0] or cache._closed:
-                    binding = open_cache(key[0], folder, user_base=self._user_cache_base,
-                                         program_base=self._program_cache_base, max_bytes=max_bytes,
-                                         legacy_sources=source_paths)
-                    prepared, warning, actual = binding.cache, binding.warning, binding.location
-                    owned = prepared is not cache
-                    self._register_cache(prepared)
+                available = tuple(root for root in folders if root.is_dir())
+                missing = tuple(root for root in folders if root not in available)
+                if scan and not available:
+                    raise NotADirectoryError('没有可访问的已导入文件夹。请检查硬盘连接。')
+                with self._cache_prepare_lock:
+                    if cancel.is_set() or self._closed:
+                        return
+                    cache = self.cache
+                    prepared, warning, actual = cache, self._cache_warning, self._cache_location
+                    if (key != self._cache_key or actual != key[0] or cache._closed
+                            or available != self._cache_bound_roots):
+                        same_gallery = cache.library_root is None or cache.library_root in available
+                        sources = (getattr(cache, 'actual_paths', (cache.base,)) if same_gallery else ())
+                        source_paths = tuple(dict.fromkeys((*sources, self._data_base / 'cache',
+                                                           self._user_cache_base / 'cache', self._program_cache_base / 'cache')))
+                        if key[0] == 'library':
+                            self._drain_conflicting_caches(available)
+                        if cancel.is_set() or self._closed:
+                            return
+                        arguments = dict(user_base=self._user_cache_base, program_base=self._program_cache_base,
+                                         max_bytes=max_bytes, legacy_sources=source_paths)
+                        while True:
+                            try:
+                                binding = (open_cache(key[0], available[0] if available else None, **arguments)
+                                           if len(available) <= 1 else
+                                           open_multi_cache(key[0], available, cancel=cancel.is_set, **arguments))
+                                break
+                            except OSError:
+                                remaining = tuple(root for root in available if root.is_dir())
+                                if not remaining or remaining == available or cancel.is_set():
+                                    raise
+                                # A removable disk can disappear during cache
+                                # opening. The provider closes a partial bind;
+                                # retry only when a root actually went away.
+                                available = remaining
+                                missing = tuple(root for root in folders if root not in available)
+                        prepared, warning, actual = binding.cache, binding.warning, binding.location
+                        owned = prepared is not cache
+                        self._register_cache(prepared)
+                    if cancel.is_set() or self._closed:
+                        if owned:
+                            self._close_cache(prepared)
+                        return
                 if cancel.is_set():
                     if owned:
                         self._retire_cache(prepared)
                     return
-                items = (scan_folder(folder, cancel=cancel.is_set,
-                                     progress=lambda count: self._scan_signals.progress.emit(generation, count),
-                                     recursive=recursive) if scan else None)
-                packet = _CacheLoad(prepared, key, items, warning, actual, owned)
+                items, seen, discovered = ([] if scan else None), set(), 0
+                scanned, scan_errors = 0, []
+                for folder in scan_roots(available, recursive) if scan else ():
+                    if cancel.is_set():
+                        break
+                    count_at_start = discovered
+                    latest_count = [0]
+                    def progress(count):
+                        latest_count[0] = count
+                        self._scan_signals.progress.emit(generation, count_at_start + count)
+                    try:
+                        indexed = scan_folder(folder, cancel=cancel.is_set, progress=progress, recursive=recursive)
+                    except OSError as error:
+                        discovered += latest_count[0]
+                        scan_errors.append(str(folder) + ': ' + str(error))
+                        missing = tuple(dict.fromkeys((*missing, *(root for root in folders
+                                                                   if root.is_relative_to(folder)))))
+                        continue
+                    scanned += 1
+                    discovered += latest_count[0]
+                    for item in indexed:
+                        identity = os.path.normcase(str(item.image_path))
+                        if identity not in seen:
+                            items.append(item)
+                            seen.add(identity)
+                if scan and not scanned and scan_errors and not cancel.is_set():
+                    raise OSError('\n'.join(scan_errors))
+                if missing:
+                    warning = '\n'.join(filter(None, (warning, '部分文件夹暂不可访问，已载入其余文件夹：' +
+                                                        '、'.join(str(root) for root in missing))))
+                packet = _CacheLoad(prepared, key, items, warning, actual, owned, available, missing)
                 if cancel.is_set() or self._closed:
                     if owned:
                         self._retire_cache(prepared)
                     return
                 self._scan_signals.complete.emit(generation, packet, None)
             except Exception as error:
-                if owned:
+                if owned and prepared is not None:
                     self._retire_cache(prepared)
                 if not cancel.is_set() and not self._closed:
                     self._scan_signals.complete.emit(generation, None, str(error))
@@ -881,6 +1010,7 @@ class MainWindow(QMainWindow):
         previous = self.cache
         self.cache = packet.cache
         self._cache_key = packet.key
+        self._cache_bound_roots = packet.bound_roots
         self._cache_warning = packet.warning
         self._cache_location = packet.location
         self.cache.max_bytes = self.preferences.cache_mb * 1024 ** 2
@@ -889,7 +1019,15 @@ class MainWindow(QMainWindow):
             self._retire_cache(previous)
 
     def load_folder(self, folder: Path, *, preserve_view=False):
-        folder = Path(folder).absolute()
+        self.load_folders((folder,), preserve_view=preserve_view)
+
+    def load_folders(self, folders, *, preserve_view=False):
+        folders = normalise_roots(folders)
+        if not folders:
+            return
+        remembered = normalise_roots(self.preferences.last_folders)
+        if folders != self.folders and (self.folders or folders != remembered):
+            self.preferences.selected_folders = None
         self._restore_grid_after_scan = self._grid_mode if preserve_view else False
         self._scan_allow_autoplay = not preserve_view
         self._cancel_verification()
@@ -901,7 +1039,9 @@ class MainWindow(QMainWindow):
         self._epoch += 1
         self._request_context.clear()
         self.jobs.cancel_where(lambda _key: True)
-        self.folder = folder
+        self.folders = folders
+        self.folder = folders[0]
+        self._scan_pending = True
         self._directory_filter = None
         self._primary_items = []
         self._extras.clear()
@@ -928,17 +1068,26 @@ class MainWindow(QMainWindow):
         self.grid_button.setChecked(False)
         self._set_empty("正在扫描文件夹", "先建立文件索引，再按需载入照片与视频。\n可以随时选择其他文件夹取消本次扫描。", "◌")
         self.empty_open.hide()
-        self.path_label.setText(str(folder))
-        self.path_label.setToolTip(str(folder))
+        self._missing_folders = frozenset()
+        self._update_path_label()
         self.filename_label.setText("正在建立照片索引…")
         self.live_badge.hide()
-        self.preferences.last_folder = str(folder)
+        self.preferences.last_folders = [str(folder) for folder in folders]
+        self.preferences.last_folder = str(self.folder)
         self._save_preferences()
         self._disk_missing = False
         self._background_pair_id = None
         self._analysis_timer.stop()
         self._update_navigation()
-        self._prepare_cache_and_scan(folder, generation, cancel)
+        self._prepare_cache_and_scan(folders, generation, cancel)
+
+    def _update_path_label(self):
+        self.path_label.setText(str(self.folder) if len(self.folders) == 1
+                                else f'已打开 {len(self.folders)} 个文件夹')
+        paths = '\n'.join(str(folder) for folder in self.folders)
+        if self._missing_folders:
+            paths += '\n\n暂不可访问：\n' + '\n'.join(map(str, self._missing_folders))
+        self.path_label.setToolTip(paths)
 
     def _scan_progress(self, generation, count):
         if generation == self._scan_generation and not self._closed:
@@ -950,9 +1099,13 @@ class MainWindow(QMainWindow):
             if isinstance(items, _CacheLoad) and items.owned and items.cache is not self.cache:
                 self._retire_cache(items.cache)
             return
+        self._scan_pending = False
         warning = ''
         if isinstance(items, _CacheLoad):
             self._install_cache(items)
+            self._missing_folders = frozenset(items.missing_roots)
+            self._disk_missing = bool(self._missing_folders)
+            self._update_path_label()
             warning = items.warning
             items = items.items
             if items is None:
@@ -967,9 +1120,12 @@ class MainWindow(QMainWindow):
         self._rebuild_items()
         self._build_tree()
         self._apply_filters(select_first=False)
-        if not self.model.items:
+        if not self._items:
             self._set_empty("此文件夹中没有支持的图片", "支持 JPG、JPEG、HEIC、PNG、WebP、BMP、GIF、TIFF 和 AVIF。\n可在设置中开启扫描子文件夹。", "◉")
             self.empty_open.show()
+            return
+        if not self.model.items:
+            self.empty_open.hide()
             return
         preferred = next((row for row, item in enumerate(self.model.items)
                           if str(item.image_path) == self.preferences.last_image), 0)
@@ -982,36 +1138,34 @@ class MainWindow(QMainWindow):
             self._request_times()
 
     def _rescan(self):
-        if self.folder:
-            self.load_folder(self.folder)
+        if self.folders:
+            self.load_folders(self.folders)
         else:
             self.choose_folder()
 
     def _build_tree(self):
-        self.tree.clear()
-        if self.folder is None:
+        if not self.folders:
+            self.tree.clear()
             return
-        root_item = QTreeWidgetItem([f"全部文件夹  ·  {len(self._items):,}"])
-        root_item.setData(0, Qt.ItemDataRole.UserRole, str(self.folder))
-        self.tree.addTopLevelItem(root_item)
-        entries = {self.folder: root_item}
+        counts = {}
         for item in self._items:
-            relative = item.image_path.parent.relative_to(self.folder)
-            path = self.folder
-            parent = root_item
-            for part in relative.parts:
-                path = path / part
-                if path not in entries:
-                    child = QTreeWidgetItem([part])
-                    child.setData(0, Qt.ItemDataRole.UserRole, str(path))
-                    parent.addChild(child)
-                    entries[path] = child
-                parent = entries[path]
-        root_item.setExpanded(True)
-        self.tree.setCurrentItem(root_item)
+            parent = item.image_path.parent
+            counts[parent] = counts.get(parent, 0) + 1
+        self.tree.set_directories(self.folders, counts, self.preferences.selected_folders)
 
     def _directory_selected(self, tree_item):
-        self._directory_filter = Path(tree_item.data(0, Qt.ItemDataRole.UserRole))
+        value = tree_item.data(0, Qt.ItemDataRole.UserRole)
+        self.tree.set_checked_directories((Path(value),) if value else None)
+
+    def _directories_checked(self, selected):
+        self._directory_filter = selected[0] if selected is not None and len(selected) == 1 else None
+        self.preferences.selected_folders = None if selected is None else [str(path) for path in selected]
+        self._save_preferences()
+        self._apply_filters()
+
+    def _search_scope_changed(self, *_args):
+        self.preferences.search_scope = self.search_scope.currentData()
+        self._save_preferences()
         self._apply_filters()
 
     def _rebuild_items(self):
@@ -1026,10 +1180,11 @@ class MainWindow(QMainWindow):
         show_live = self.kind_filter.live.isChecked()
         show_static = self.kind_filter.static.isChecked()
         pending_only = self.kind_filter.pending.isChecked()
-        directory = self._directory_filter
+        selected = self.tree.checked_directories if self.folders else None
+        global_search = bool(needle) and self.search_scope.currentData() == 'all'
         visible = []
         for item in self._items:
-            if directory and not item.image_path.is_relative_to(directory):
+            if not global_search and selected is not None and item.image_path.parent not in selected:
                 continue
             if needle and needle not in str(item.image_path).casefold():
                 continue
@@ -1213,12 +1368,13 @@ class MainWindow(QMainWindow):
         """
         if self._closed or self._background_pair_id is not None:
             return
-        if self._is_playing or self.viewer._play_requested or self._disk_missing:
+        if self._is_playing or self.viewer._play_requested:
             self._analysis_timer.start(1200)
             return
         pending_ids = {context[2].id for context in self._request_context.values()
                        if context[0] == "pair" and context[1] == self._epoch}
-        item = next((item for item in self._primary_items if item.pending and item.id not in pending_ids), None)
+        item = next((item for item in self._primary_items if item.pending and item.id not in pending_ids
+                     and not any(item.image_path.is_relative_to(root) for root in self._missing_folders)), None)
         if item is None:
             if any(item.pending for item in self._primary_items):
                 self._analysis_timer.start(1200)
@@ -1624,6 +1780,8 @@ class MainWindow(QMainWindow):
         visible = (self._fullscreen_active and not self._grid_mode
                    and self.content.currentWidget() is self.viewer
                    and item is not None and item.id == self._current_id and item.is_live)
+        if visible:
+            self.fullscreen_live_badge.fit_contents()
         self.fullscreen_live_badge.setVisible(visible)
         if visible:
             self.fullscreen_live_badge.move(16, 16)
@@ -1694,16 +1852,16 @@ class MainWindow(QMainWindow):
         self._update_hint()
         self._save_preferences()
         if cache_changed:
-            if self.folder:
-                self.load_folder(self.folder, preserve_view=True)
+            if self.folders:
+                self.load_folders(self.folders, preserve_view=True)
             else:
                 self._switch_cache_without_folder()
             if portable_changed:
                 self._show_message('缓存位置正在切换。设置保存位置已更改，重启后生效。')
         elif portable_changed:
             self._show_message("设置已保存到新模式目录。请重启 LiveViewer；现有缓存保留原位。")
-        elif recursive_changed and self.folder:
-            self.load_folder(self.folder)
+        elif recursive_changed and self.folders:
+            self.load_folders(self.folders)
         else:
             self._show_message("设置已保存。")
 
@@ -1742,10 +1900,11 @@ class MainWindow(QMainWindow):
         applications = []
         self._add_open_with_menu(menu, item, applications)
         menu.addAction("打开所在文件夹", lambda item=item: self._open_image_folder(item))
-        menu.addAction("打开缓存位置", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.cache.base))))
+        menu.addAction("打开缓存位置", lambda item=item: QDesktopServices.openUrl(QUrl.fromLocalFile(
+            str(self.cache.base_for(item) if hasattr(self.cache, 'base_for') else self.cache.base))))
         menu.addAction("深入校验当前图库…", self._verify_cache)
         menu.addSeparator()
-        menu.addAction("重新扫描当前文件夹", self._rescan)
+        menu.addAction("重新扫描已导入文件夹", self._rescan)
         try:
             menu.exec(position)
         finally:
@@ -1796,7 +1955,8 @@ class MainWindow(QMainWindow):
         dialog = None
         try:
             from .cover_editor import EditorDialog
-            dialog = EditorDialog(item, self)
+            dialog = EditorDialog(item, self, initial_export_directory=self.preferences.last_export_directory)
+            dialog.frame_exported.connect(self._remember_frame_export)
             if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_result is not None:
                 self._apply_cover_result(item, dialog.saved_result, versions)
         except (OSError, ValueError, RuntimeError) as error:
@@ -1807,6 +1967,10 @@ class MainWindow(QMainWindow):
                 # deletion drops its frame/metadata instead of retaining one
                 # large child dialog for every edit during this app session.
                 dialog.deleteLater()
+
+    def _remember_frame_export(self, path):
+        self.preferences.last_export_directory = str(Path(path).parent)
+        self._save_preferences()
 
     def _apply_cover_result(self, original, result, previous_versions=()):
         """Refresh a committed editor result without rescanning the whole disk."""
@@ -1927,6 +2091,9 @@ class MainWindow(QMainWindow):
         self._show_message("正在应用静态图片选择…")
 
     def _clear_cache(self):
+        if self._scan_pending or self.cache._closed:
+            self._show_message('正在准备文件夹与缓存，请载入后再清理。')
+            return
         cache = self.cache
         self._submit("clear", "thumbnails", cache.clear_thumbnails, 2, (self._epoch,), cache=cache)
 
@@ -1938,10 +2105,10 @@ class MainWindow(QMainWindow):
         self._epoch += 1
         self._request_context.clear()
         self.jobs.cancel_where(lambda _key: True)
-        self._prepare_cache_and_scan(None, self._scan_generation, self._scan_cancel, scan=False)
+        self._prepare_cache_and_scan((), self._scan_generation, self._scan_cancel, scan=False)
 
     def _verify_cache(self):
-        if self.folder is None or self._closed:
+        if not self.folders or self._closed:
             return
         if self._verify_running:
             dialog = getattr(self, '_verify_dialog', None)
@@ -2013,7 +2180,7 @@ class MainWindow(QMainWindow):
             return
         changed = report.get('changed', ())
         if changed:
-            self.load_folder(self.folder, preserve_view=True)
+            self.load_folders(self.folders, preserve_view=True)
         action = '已取消校验' if report.get('cancelled') else '深入校验完成'
         self._show_message(f"{action}：已检查 {report.get('checked', 0):,} 个文件，更新 {len(changed):,} 项缓存；手动选择已保留。")
 
@@ -2036,17 +2203,22 @@ class MainWindow(QMainWindow):
                 self._show_message("设置暂时无法保存：" + str(error))
 
     def _check_disk(self):
-        if self.folder is None or self._closed:
+        if not self.folders or self._closed:
             return
-        available = self.folder.is_dir()
-        if not available and not self._disk_missing:
-            self._disk_missing = True
-            self.viewer.stop_live()
+        missing = frozenset(root for root in self.folders if not root.is_dir())
+        lost = missing - self._missing_folders
+        restored = self._missing_folders - missing
+        self._missing_folders = missing
+        self._disk_missing = bool(missing)
+        self._update_path_label()
+        if lost:
+            if self._displayed_item is not None and any(
+                    self._displayed_item.image_path.is_relative_to(root) for root in lost):
+                self.viewer.stop_live()
             self._verify_cancel.set()
-            self._show_message("照片文件夹暂时不可访问。已保留索引，请重新连接硬盘后点击 ↻。")
-        elif available and self._disk_missing:
-            self._disk_missing = False
-            self._show_message("照片文件夹已恢复连接，可继续浏览或点击 ↻ 重新扫描。")
+            self._show_message(f"{len(lost)} 个照片文件夹暂时不可访问，已保留索引；其他文件夹仍可浏览。请重新连接硬盘后点击 ↻。")
+        elif restored:
+            self._show_message(f"{len(restored)} 个照片文件夹已恢复连接，可继续浏览或点击 ↻ 重新扫描。")
 
     def eventFilter(self, watched, event):
         if self._closed:
@@ -2085,6 +2257,10 @@ class MainWindow(QMainWindow):
                            and event.modifiers() == Qt.KeyboardModifier.NoModifier)
         if editing and not filename_escape:
             return False
+        if focus is self.tree and _matches_shortcut(event, 'select_folders'):
+            if kind == QEvent.Type.KeyPress and not event.isAutoRepeat():
+                self.tree.set_all_checked(True)
+            return True
         if kind == QEvent.Type.KeyRelease and not event.isAutoRepeat() and (
                 _matches_shortcut(event, "previous") or _matches_shortcut(event, "next")):
             self._flush_navigation()
@@ -2221,13 +2397,9 @@ def run(folder: Path | None = None, screenshot: Path | None = None) -> int:
             application.quit()
         window.image_ready.connect(lambda: QTimer.singleShot(900, capture))
         QTimer.singleShot(11_500, capture)
-    initial = folder
-    if initial is None and window.preferences.last_folder:
-        remembered = Path(window.preferences.last_folder)
-        if remembered.is_dir():
-            initial = remembered
-    if initial is not None:
-        QTimer.singleShot(0, lambda: window.load_folder(initial))
+    initial = (folder,) if folder is not None else tuple(window.preferences.last_folders)
+    if initial:
+        QTimer.singleShot(0, lambda: window.load_folders(initial))
     elif screenshot is not None:
         QTimer.singleShot(900, capture)
     result = application.exec()

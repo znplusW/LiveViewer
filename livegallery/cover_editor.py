@@ -8,14 +8,14 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
 from PySide6.QtGui import QColor, QEventPoint, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMenu, QPushButton,
+    QDialog, QDialogButtonBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
     QRadioButton, QSlider, QSizePolicy, QStyle, QStyleOptionSlider, QVBoxLayout,
 )
 
 from .cover_save import CoverSource, SaveResult, save_cover
 from .frame_reader import FrameCancelled, FrameReader
 from .models import MediaItem
-from .frame_export import export_frame
+from .frame_export import export_destination, export_frame
 from .ui_theme import bind_theme, tokens_for
 from .viewer import ViewerCanvas
 
@@ -45,6 +45,7 @@ class FramePreview(ViewerCanvas):
             return
         if self._image_rect.size().toSize() == image.size():
             self._photo.setPixmap(QPixmap.fromImage(image))
+            self._update_zoom_navigator()
             self.viewport().update()
         else:
             self._cancel_zoom_animation()
@@ -430,8 +431,11 @@ _DEFAULT_PREVIEW = object()
 class EditorDialog(QDialog):
     """On acceptance, ``saved_result`` describes the completed disk operation."""
 
+    frame_exported = Signal(object)
+
     def __init__(self, item: MediaItem, parent=None, *, reader_factory=None, save_function=None,
-                 preview_factory=_DEFAULT_PREVIEW, save_dialog_factory=None):
+                 preview_factory=_DEFAULT_PREVIEW, save_dialog_factory=None,
+                 initial_export_directory=None):
         super().__init__(parent)
         self.setWindowTitle("更改封面图 — LiveViewer")
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
@@ -456,6 +460,9 @@ class EditorDialog(QDialog):
         self._cancel_pending = False
         self._item = item
         self.last_export_path = None
+        self.last_export_error = None
+        self._export_directory = (Path(initial_export_directory) if initial_export_directory
+                                  else self._item.image_path.parent)
         self._export_busy = False
         self._export_choosing = False
         self._export_closed = False
@@ -540,6 +547,13 @@ class EditorDialog(QDialog):
         self.status_label = QLabel("正在读取视频…")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self.export_status_label = QLabel()
+        self.export_status_label.setObjectName('frameExportStatus')
+        self.export_status_label.setWordWrap(True)
+        self.export_status_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.export_status_label.hide()
+        layout.addWidget(self.export_status_label)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         self.save_button = self.buttons.button(QDialogButtonBox.StandardButton.Save)
         self.save_button.setText("保存封面图")
@@ -651,7 +665,13 @@ class EditorDialog(QDialog):
             menu.deleteLater()
 
     def _choose_export_path(self, index):
-        dialog = QFileDialog(self, '导出静帧画面', str(self._item.image_path.parent))
+        directory = self._export_directory
+        try:
+            if not directory.is_dir():
+                directory = self._item.image_path.parent
+        except OSError:
+            directory = self._item.image_path.parent
+        dialog = QFileDialog(self, '导出静帧画面', str(directory))
         dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
         dialog.setFileMode(QFileDialog.FileMode.AnyFile)
         dialog.setOption(QFileDialog.Option.DontConfirmOverwrite, False)
@@ -671,7 +691,21 @@ class EditorDialog(QDialog):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return None
             selected = dialog.selectedFiles()
-            return Path(selected[0]) if selected else None
+            if not selected:
+                return None
+            original = Path(selected[0])
+            destination = export_destination(original, filters.get(dialog.selectedNameFilter(), 'png'))
+            # Qt only adds defaultSuffix when a name has no suffix. A dotted
+            # user name may need normalization after the native dialog closes;
+            # confirm the actual target if it already exists.
+            if destination != original and destination.exists():
+                choice = QMessageBox.question(
+                    self, '替换现有图片', f'「{destination.name}」已存在，是否替换？',
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if choice != QMessageBox.StandardButton.Yes:
+                    return None
+            return destination
         finally:
             dialog.deleteLater()
 
@@ -683,14 +717,25 @@ class EditorDialog(QDialog):
         self._export_choosing = True
         try:
             destination = self._choose_export_path(index)
+        except Exception as error:
+            self.last_export_error = str(error)
+            message = '导出静帧画面未完成：' + self.last_export_error
+            self.status_label.setText(message)
+            self.export_status_label.setText(message)
+            self.export_status_label.show()
+            return
         finally:
             self._export_choosing = False
         if destination is None or self._export_closed:
             return
         self._export_busy = True
+        self.last_export_path = None
+        self.last_export_error = None
         self.save_button.setEnabled(False)
         cancel = self._export_cancel = threading.Event()
         self.status_label.setText('正在导出完整分辨率静帧画面…')
+        self.export_status_label.setText('正在导出静帧画面至：' + str(destination))
+        self.export_status_label.show()
         signals, video = self._export_signals, self._item.video_path
         def export():
             result, error = None, None
@@ -710,7 +755,15 @@ class EditorDialog(QDialog):
     def _export_finished(self, result, error):
         self._export_busy = False
         if result is not None and error is None:
-            self.last_export_path = result
+            self.last_export_path = Path(result)
+            self.last_export_error = None
+            self._export_directory = self.last_export_path.parent
+            self.export_status_label.setText('已导出静帧画面：' + str(self.last_export_path))
+            self.frame_exported.emit(self.last_export_path)
+        else:
+            self.last_export_error = str(error or '未生成导出文件，请重新尝试。')
+            self.export_status_label.setText('导出静帧画面未完成：' + self.last_export_error)
+        self.export_status_label.show()
         if self._export_cancel_pending:
             self._export_cancel_pending = False
             super().reject()
@@ -719,8 +772,10 @@ class EditorDialog(QDialog):
             return
         if error:
             self.status_label.setText('导出静帧画面未完成：' + error)
-        else:
+        elif result is not None:
             self.status_label.setText('已导出静帧画面：' + Path(result).name)
+        else:
+            self.status_label.setText(self.export_status_label.text())
         self.save_button.setEnabled(self._loaded_sequence == self._request_sequence
                                     and not self._saving and not self._choosing_save)
 

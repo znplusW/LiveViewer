@@ -15,8 +15,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PIL import Image
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPalette, QTouchEvent, QWheelEvent
-from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QGroupBox, QMenu
+from PySide6.QtTest import QSignalSpy, QTest
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QFileDialog, QGroupBox, QLineEdit, QMenu, QMessageBox
 
 from livegallery.cover_editor import CoverTimelineSlider, EditorDialog, SaveModeDialog
 from livegallery.cover_preview import PreviewSession
@@ -207,6 +207,66 @@ class CoverEditorTests(unittest.TestCase):
         self.dialog._save()
         self.assertEqual(len(captured), 1)
 
+    def export_with_actual_save_button(self, name, *, cancel=False, choose_directory=None):
+        """Click the menu action and the real QFileDialog Save/Cancel button."""
+        previous = QApplication.testAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
+        errors, observed = [], []
+        watchdog = QTimer(self.dialog)
+        watchdog.setSingleShot(True)
+        def timed_out():
+            errors.append(AssertionError('Actual export dialog interaction timed out'))
+            popup, modal = QApplication.activePopupWidget(), QApplication.activeModalWidget()
+            if popup is not None:
+                popup.close()
+            if modal is not None:
+                modal.reject()
+        watchdog.timeout.connect(timed_out)
+        watchdog.start(6000)
+        def choose_file():
+            prompt = QApplication.activeModalWidget()
+            if not isinstance(prompt, QFileDialog):
+                QTimer.singleShot(5, choose_file)
+                return
+            try:
+                observed.append(Path(prompt.directory().absolutePath()))
+                if choose_directory is not None:
+                    prompt.setDirectory(str(choose_directory))
+                filename = prompt.findChild(QLineEdit, 'fileNameEdit')
+                self.assertIsNotNone(filename)
+                filename.setText(name)
+                buttons = prompt.findChild(QDialogButtonBox)
+                role = QDialogButtonBox.StandardButton.Cancel if cancel else QDialogButtonBox.StandardButton.Save
+                button = buttons.button(role)
+                self.assertTrue(button.isEnabled())
+                QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+            except Exception as error:
+                errors.append(error)
+                prompt.reject()
+        def choose_action():
+            menu = QApplication.activePopupWidget()
+            try:
+                self.assertIsInstance(menu, QMenu)
+                action = next(action for action in menu.actions() if action.text().startswith('导出静帧画面'))
+                self.assertTrue(action.isEnabled())
+                QTimer.singleShot(0, choose_file)
+                QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center())
+            except Exception as error:
+                errors.append(error)
+                if menu is not None:
+                    menu.close()
+        try:
+            QTimer.singleShot(0, choose_action)
+            self.dialog._preview_menu(self.dialog.preview.rect().center())
+            if errors:
+                raise errors[0]
+            self.assertEqual(len(observed), 1)
+            return observed[0]
+        finally:
+            watchdog.stop()
+            watchdog.deleteLater()
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, previous)
+
     def assert_originals(self):
         self.assertEqual(self.photo.read_bytes(), self.original_photo)
         self.assertEqual(self.video.read_bytes(), self.original_video)
@@ -386,6 +446,7 @@ class CoverEditorTests(unittest.TestCase):
 
     def test_export_late_committed_result_is_retained_when_close_was_requested(self):
         dialog = self.open_dialog()
+        successful = QSignalSpy(dialog.frame_exported)
         entered = threading.Event()
         destination = self.folder / 'committed.png'
         def committed(video, index, target, *, expected_video, cancel_event):
@@ -402,10 +463,85 @@ class CoverEditorTests(unittest.TestCase):
             dialog.reject()
             self.wait(lambda: not dialog.isVisible() and not dialog._export_busy)
         self.assertEqual(dialog.last_export_path, destination)
+        self.assertEqual(successful.count(), 1)
+        self.assertEqual(successful.at(0)[0], destination)
+        self.assertEqual(dialog._export_directory, destination.parent)
         with Image.open(destination) as image:
             image.load()
             self.assertEqual(image.size, (120, 90))
         self.assert_originals()
+
+    def test_actual_export_save_button_writes_dotted_name_and_remembers_only_success(self):
+        shutil.copyfile(Path(__file__).parent / 'fixtures' / 'VFR_PAIR.MOV', self.video)
+        self.original_video = self.video.read_bytes()
+        other = self.folder / '其他目录 with spaces'
+        other.mkdir()
+        self.dialog = EditorDialog(self.item, reader_factory=FrameReader, preview_factory=False,
+                                   initial_export_directory=other)
+        dialog = self.dialog
+        dialog.show()
+        self.wait(lambda: dialog.save_button.isEnabled())
+        dialog.timeline.setValue(4)
+        self.wait(lambda: dialog.displayed_frame_index == 4 and dialog.save_button.isEnabled())
+        successful = QSignalSpy(dialog.frame_exported)
+        shown = self.export_with_actual_save_button('edited.v1')
+        self.assertEqual(shown, other)
+        destination = other / 'edited.v1.png'
+        self.wait(lambda: not dialog._export_busy and dialog.last_export_path == destination,
+                  self.REAL_SAVE_TIMEOUT)
+        with Image.open(destination) as image:
+            image.load()
+            self.assertEqual(image.format, 'PNG')
+            self.assertEqual(image.size, (320, 240))
+            expected = (207, 66, 194)
+            self.assertLess(max(abs(a-b) for a,b in zip(image.getpixel((160, 120)), expected)), 10)
+        self.assertEqual(successful.count(), 1)
+        self.assertEqual(successful.at(0)[0], destination)
+        self.assertIn(str(destination), dialog.export_status_label.text())
+        cancelled = self.folder / 'cancelled folder'
+        cancelled.mkdir()
+        self.assertEqual(self.export_with_actual_save_button('cancel.png', cancel=True,
+                                                            choose_directory=cancelled), other)
+        self.assertEqual(dialog._export_directory, other)
+        self.assertEqual(successful.count(), 1)
+        self.assertFalse((cancelled / 'cancel.png').exists())
+        with patch('livegallery.frame_export._work_root', side_effect=PermissionError('ACL denies writing')):
+            self.assertEqual(self.export_with_actual_save_button('failed.png', choose_directory=cancelled), other)
+            self.wait(lambda: not dialog._export_busy and dialog.last_export_error is not None,
+                      self.REAL_SAVE_TIMEOUT)
+        message = dialog.export_status_label.text()
+        self.assertIn('ACL denies writing', message)
+        self.assertTrue(dialog.export_status_label.isVisible())
+        dialog.timeline.setValue(2)
+        self.wait(lambda: dialog.displayed_frame_index == 2 and dialog.save_button.isEnabled())
+        self.assertEqual(dialog.export_status_label.text(), message)
+        self.assertEqual(dialog._export_directory, other)
+        self.assertEqual(successful.count(), 1)
+        self.assertFalse((cancelled / 'failed.png').exists())
+        self.assertIsNone(dialog.saved_result)
+        self.assertEqual(len(list(self.folder.rglob('*.MOV'))), 1)
+        self.assert_originals()
+
+    def test_missing_initial_export_directory_falls_back_when_save_dialog_opens(self):
+        dialog = self.open_dialog(initial_export_directory=self.folder / 'missing folder')
+        self.assertEqual(self.export_with_actual_save_button('cancel.png', cancel=True), self.folder)
+        self.assertEqual(dialog._export_directory, self.folder / 'missing folder')
+        self.assertIsNone(dialog.last_export_path)
+
+    def test_normalized_export_filename_confirms_the_actual_existing_target(self):
+        dialog = self.open_dialog()
+        target = self.folder / 'edited.v1.png'
+        target.write_bytes(b'existing normalized target')
+        successful = QSignalSpy(dialog.frame_exported)
+        with patch('livegallery.cover_editor.QMessageBox.question', return_value=QMessageBox.StandardButton.No) as question, \
+                patch('livegallery.cover_editor.export_frame') as export:
+            self.export_with_actual_save_button('edited.v1')
+        question.assert_called_once()
+        self.assertIn(target.name, question.call_args.args[2])
+        export.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'existing normalized target')
+        self.assertEqual(successful.count(), 0)
+        self.assertFalse(dialog._export_busy)
 
     def test_initial_window_fits_scaled_small_desktop(self):
         screen = SimpleNamespace(availableGeometry=lambda: QRect(0, 0, 960, 540))

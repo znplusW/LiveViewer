@@ -124,7 +124,14 @@ class SaveResult:
 
 
 def _writable(path: Path) -> None:
-    if not path.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+    status = path.stat()
+    # Windows directory READONLY is also used for folder customization. It
+    # is not an ACL write denial; creating the private stage and publishing
+    # the result provide the actual permission checks. Keep the guard for
+    # Windows files and POSIX directories/files where these bits apply.
+    if os.name == 'nt' and stat.S_ISDIR(status.st_mode):
+        return
+    if not status.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
         raise CoverSaveError("目标文件或文件夹为只读，未更改任何原文件。")
 
 

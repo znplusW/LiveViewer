@@ -18,6 +18,21 @@ class FrameExportError(CoverSaveError):
     pass
 
 
+def export_destination(path, preferred_suffix='png'):
+    """Keep supported suffixes and add the selected format to dotted names."""
+    path = Path(path)
+    preferred_suffix = preferred_suffix.casefold().lstrip('.')
+    supported = ('.png', '.jpg', '.jpeg', '.heic')
+    if '.' + preferred_suffix not in supported:
+        raise FrameExportError('请选择 PNG、JPG、JPEG 或 HEIC 图片格式。')
+    if path.suffix.casefold() in supported:
+        return path
+    name = path.name.rstrip(' .')
+    if not name:
+        raise FrameExportError('请输入有效的图片文件名。')
+    return path.with_name(name + '.' + preferred_suffix)
+
+
 class _CallbackCancellation:
     def __init__(self, callback):
         self.callback = callback

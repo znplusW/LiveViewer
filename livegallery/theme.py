@@ -7,6 +7,7 @@ It never changes Windows settings or requires PowerToys to be installed.
 from __future__ import annotations
 
 import ctypes
+from pathlib import Path
 import sys
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QTimer, Qt, Signal
@@ -25,6 +26,10 @@ _TOKENS = {
         'switch_off': '#58616d', 'switch_thumb': '#ffffff', 'focus': '#9ac5ff',
         'tick': '#ffffff', 'divider': '#2a313b', 'grip': '#7d8998',
         'badge_background': '#31281c', 'badge_text': '#f1cf91', 'badge_border': '#775e38',
+        'control_button': '#2c3a4c', 'control_button_hover': '#3a4f69',
+        'control_button_pressed': '#1b2c43', 'control_button_disabled': '#222b36',
+        'control_button_border': '#718299', 'control_arrow': '#f2f6fc',
+        'control_arrow_disabled': '#93a2b5',
     },
     'light': {
         'background': '#f4f6f8', 'surface': '#ffffff', 'field': '#ffffff',
@@ -37,6 +42,10 @@ _TOKENS = {
         'switch_off': '#8793a3', 'switch_thumb': '#ffffff', 'focus': '#1d4ed8',
         'tick': '#ffffff', 'divider': '#cbd3dc', 'grip': '#64748b',
         'badge_background': '#fff1cf', 'badge_text': '#6d4b10', 'badge_border': '#c7a76b',
+        'control_button': '#e1e8f1', 'control_button_hover': '#cfdef1',
+        'control_button_pressed': '#b9cde7', 'control_button_disabled': '#e9eef4',
+        'control_button_border': '#7c8fa7', 'control_arrow': '#23344d',
+        'control_arrow_disabled': '#64758b',
     },
 }
 
@@ -178,6 +187,62 @@ QStatusBar { background: #eef2f6; color: #566474; border-top: 1px solid #cbd3dc;
 QSplitter::handle { background: #cbd3dc; width: 1px; }
 QToolTip { background: #ffffff; color: #202833; border: 1px solid #aab8c8; padding: 6px; }
 """
+
+
+def _control_icon_url(theme, direction, *, disabled=False):
+    bundle_root = getattr(sys, '_MEIPASS', None)
+    root = Path(bundle_root) if bundle_root else Path(__file__).resolve().parents[1]
+    suffix = '-disabled' if disabled else ''
+    path = root / 'assets/controls' / f'chevron-{direction}-{theme}{suffix}.svg'
+    return 'url("' + path.as_posix().replace('"', '\\"') + '")'
+
+
+def _control_stylesheet(theme):
+    colors = theme_tokens(theme)
+    down = _control_icon_url(theme, 'down')
+    up = _control_icon_url(theme, 'up')
+    down_disabled = _control_icon_url(theme, 'down', disabled=True)
+    up_disabled = _control_icon_url(theme, 'up', disabled=True)
+    return f"""
+QComboBox, QSpinBox {{
+    min-height: 24px; padding: 6px 8px;
+    border: 2px solid {colors['control_button_border']}; border-radius: 6px;
+}}
+QComboBox:focus, QSpinBox:focus {{ border-color: {colors['focus']}; }}
+QSpinBox QLineEdit {{ border: none; background: transparent; padding: 0px; }}
+QComboBox::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: top right; width: 34px;
+    border-left: 1px solid {colors['control_button_border']};
+    border-top-right-radius: 4px; border-bottom-right-radius: 4px;
+    background: {colors['control_button']};
+}}
+QComboBox::drop-down:hover {{ background: {colors['control_button_hover']}; }}
+QComboBox::drop-down:pressed, QComboBox::drop-down:on {{ background: {colors['control_button_pressed']}; }}
+QComboBox::down-arrow {{ image: {down}; width: 16px; height: 10px; }}
+QComboBox::down-arrow:on {{ top: 1px; }}
+QComboBox::drop-down:disabled {{ background: {colors['control_button_disabled']}; }}
+QComboBox::down-arrow:disabled {{ image: {down_disabled}; }}
+QSpinBox::up-button, QSpinBox::down-button {{
+    subcontrol-origin: padding; width: 34px; border: none;
+    border-left: 1px solid {colors['control_button_border']};
+    background: {colors['control_button']};
+}}
+QSpinBox::up-button {{ subcontrol-position: top right; border-bottom: 1px solid {colors['control_button_border']}; border-top-right-radius: 4px; }}
+QSpinBox::down-button {{ subcontrol-position: bottom right; border-bottom-right-radius: 4px; }}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {colors['control_button_hover']}; }}
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{ background: {colors['control_button_pressed']}; }}
+QSpinBox::up-arrow {{ image: {up}; width: 16px; height: 10px; }}
+QSpinBox::down-arrow {{ image: {down}; width: 16px; height: 10px; }}
+QSpinBox::up-arrow:pressed, QSpinBox::down-arrow:pressed {{ top: 1px; }}
+QSpinBox::up-button:disabled, QSpinBox::up-button:off,
+QSpinBox::down-button:disabled, QSpinBox::down-button:off {{ background: {colors['control_button_disabled']}; }}
+QSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off {{ image: {up_disabled}; }}
+QSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off {{ image: {down_disabled}; }}
+"""
+
+
+DARK_STYLE += _control_stylesheet('dark')
+LIGHT_STYLE += _control_stylesheet('light')
 
 
 def stylesheet_for(theme):

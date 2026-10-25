@@ -1,4 +1,4 @@
-"""Windows system-gesture policy for the actual displayed image rectangle.
+"""Touch-popup ownership and Windows gesture policy for the image rectangle.
 
 Qt continues to receive raw touch points for swipe/pinch. Only Windows' own
 press-and-hold/right-click recognizer is disabled for contacts on the image;
@@ -11,7 +11,8 @@ import ctypes
 import sys
 import weakref
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QPoint, QPointF
+from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, QPoint, QPointF, Qt
+from PySide6.QtGui import QEventPoint
 from PySide6.QtWidgets import QApplication
 
 
@@ -20,6 +21,65 @@ WM_GESTURENOTIFY = 0x011A
 WM_POINTERDOWN = 0x0246
 TABLET_DISABLE_PRESSANDHOLD = 0x00000001
 GC_ALLGESTURES = 0x00000001
+
+
+class TouchContextMenuGuard(QObject):
+    """Keep the opening long press from becoming a selection in its popup.
+
+    Qt deliberately converts touch updates/releases to mouse events while a
+    popup is open. Its menu can then treat the original held contact as a new
+    mouse drag and activate an item on release. Observe the raw contact through
+    the nested menu event loop, but leave its delivery/cleanup to Qt. Suppress
+    only the promoted mouse tail; a new touch or physical mouse press restores
+    normal menu interaction immediately.
+    """
+
+    def __init__(self, device, contact_ids) -> None:
+        super().__init__()
+        self._device = device
+        self._contacts = set(contact_ids)
+        self._armed = bool(self._contacts)
+        self._application = QApplication.instance()
+
+    def __enter__(self):
+        self._application.installEventFilter(self)
+        return self
+
+    def __exit__(self, *exception):
+        self._application.removeEventFilter(self)
+
+    def eventFilter(self, receiver, event):
+        if not self._armed:
+            return False
+        event_type = event.type()
+        if event_type in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
+                          QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            if event.pointingDevice() != self._device:
+                if event_type == QEvent.Type.TouchBegin:
+                    self._armed = False  # An independent touch device takes over.
+                return False
+            if event_type == QEvent.Type.TouchBegin and not self._contacts:
+                self._armed = False  # A deliberate second tap may choose an item.
+            elif event_type == QEvent.Type.TouchCancel:
+                self._contacts.clear()
+            else:
+                for point in event.points():
+                    if point.state() == QEventPoint.State.Released:
+                        self._contacts.discard(point.id())
+                    else:
+                        self._contacts.add(point.id())
+            # Do not consume raw touch: Qt must retire its own active points.
+            return False
+        if event_type in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                          QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove):
+            if event.source() == Qt.MouseEventSource.MouseEventNotSynthesized:
+                if event_type == QEvent.Type.MouseButtonPress:
+                    self._armed = False
+                return False
+            if QApplication.activePopupWidget() is not None:
+                event.accept()
+                return True
+        return False
 
 
 class _Point(ctypes.Structure):

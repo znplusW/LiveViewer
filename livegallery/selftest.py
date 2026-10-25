@@ -13,6 +13,7 @@ import time
 import traceback
 import tempfile
 from pathlib import Path
+from contextlib import contextmanager
 
 from PySide6.QtCore import QCoreApplication, QPoint, QPointF, Qt, QTimer
 from PySide6.QtGui import QImage, QKeySequence, QWheelEvent
@@ -423,6 +424,256 @@ def _check_canvas_touch_and_wheel(viewer: ViewerCanvas, fixtures: Path):
         viewer.navigate_requested.disconnect(navigation.append)
 
 
+def _check_zoom_navigation_overview(viewer: ViewerCanvas, fixtures: Path, report_dir: Path):
+    from unittest.mock import patch
+
+    viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'), fixtures / 'Portrait_HEVC.MOV')
+    navigator = viewer.zoom_navigator
+    assert not navigator.isVisible()
+    viewer._zoom_at(2.0, viewer._viewport_center())
+    assert navigator.isVisible()
+    image, visible = navigator.image_rect(), navigator.visible_rect()
+    scene = viewer._image_rect
+    clipped = viewer.mapToScene(viewer.viewport().rect()).boundingRect().intersected(scene)
+    expected = (clipped.width() / scene.width(), clipped.height() / scene.height())
+    assert abs(visible.width() / image.width() - expected[0]) < 1e-5
+    assert abs(visible.height() / image.height() - expected[1]) < 1e-5
+    revision = navigator.thumbnail_revision
+    viewer._pan_by(QPointF(70, 55))
+    assert navigator.visible_rect() != visible and navigator.thumbnail_revision == revision
+    with patch.object(viewer._player, 'play', wraps=viewer._player.play) as playback:
+        point = QPoint(round(image.center().x()), round(image.top() + image.height() * .85))
+        before = viewer._scene_center()
+        QTest.mouseClick(navigator, Qt.MouseButton.LeftButton, pos=point)
+        assert (viewer._scene_center() - before).manhattanLength() > .5
+        target = viewer.window().windowHandle()
+        assert target is not None and target.isExposed()
+        device = QTest.createTouchDevice()
+        touch = QTest.touchEvent(target, device, False)
+        point = navigator.visible_rect().center().toPoint()
+        start = navigator.mapTo(viewer.window(), point)
+        end = navigator.mapTo(viewer.window(), point + QPoint(0, -18))
+        before = viewer._scene_center()
+        touch.press(0, start, target).commit()
+        touch.move(0, end, target).commit()
+        touch.release(0, end, target).commit()
+        QCoreApplication.processEvents()
+        assert (viewer._scene_center() - before).manhattanLength() > .5
+        assert playback.call_count == 0 and not viewer._play_requested
+    assert navigator.thumbnail_revision == revision
+    assert navigator.pos() == QPoint(max(0, viewer.viewport().width() - navigator.width() - 12),
+                                     max(0, viewer.viewport().height() - navigator.height() - 12))
+    viewer.grab().save(str(report_dir / 'zoom-navigation-overview.png'))
+    navigator.grab().save(str(report_dir / 'zoom-navigation-detail.png'))
+    viewer.fit_image()
+    assert not navigator.isVisible()
+    return {'only_visible_when_zoomed': True, 'visible_region_matches_scene': True,
+            'rectangle_tracks_pan': True, 'thumbnail_reused_without_redecode': True,
+            'mouse_and_touch_can_reposition': True, 'navigation_does_not_play_live': True,
+            'fixed_bottom_right': True, 'logical_maximum_size': [160, 160],
+            'physical_touch_hardware': False}
+
+
+def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
+    from unittest.mock import patch
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+
+    original_hold = viewer._hold_ms
+    results = []
+    hold = 150
+    target = viewer.window().windowHandle()
+    assert target is not None and target.isExposed()
+    viewer.activateWindow()
+    viewer.setFocus()
+    QCoreApplication.processEvents()
+
+    def mouse(event_type, position):
+        # QTest.mouseDClick(QWindow) sends a complete double-click sequence;
+        # adding a preceding click would create a third click and reverse zoom.
+        # Send the two precise driver variants through the real viewport instead.
+        moving = event_type == QEvent.Type.MouseMove
+        released = event_type == QEvent.Type.MouseButtonRelease
+        event = QMouseEvent(event_type, QPointF(position),
+                            QPointF(viewer.viewport().mapToGlobal(position)),
+                            Qt.MouseButton.NoButton if moving else Qt.MouseButton.LeftButton,
+                            Qt.MouseButton.NoButton if released else Qt.MouseButton.LeftButton,
+                            Qt.KeyboardModifier.NoModifier)
+        QApplication.sendEvent(viewer.viewport(), event)
+        QCoreApplication.processEvents()
+
+    try:
+        with patch.object(viewer._player, 'play', wraps=viewer._player.play) as playback:
+            for route in ('second-press', 'double-click'):
+                viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'), fixtures / 'Portrait_HEVC.MOV')
+                viewer.set_options(hold_ms=hold)
+                center = viewer.viewport().rect().center()
+                viewer._zoom_at(2.0, QPointF(center))
+                position = center
+                before_scale, before_center = viewer.transform().m11(), viewer._scene_center()
+                mouse(QEvent.Type.MouseButtonPress, position)
+                mouse(QEvent.Type.MouseButtonRelease, position)
+                if route == 'second-press':
+                    mouse(QEvent.Type.MouseButtonPress, position)
+                else:
+                    mouse(QEvent.Type.MouseButtonDblClick, position)
+                mouse(QEvent.Type.MouseMove, position + QPoint(1, 0))
+                QTest.qWait(hold + 80)
+                assert playback.call_count == 0 and not viewer._play_requested, 'Tap-to-drag briefly requested Live playback'
+                assert viewer._photo.isVisible() and not viewer._video.isVisible()
+                mouse(QEvent.Type.MouseMove, position + QPoint(80, 35))
+                mouse(QEvent.Type.MouseButtonRelease, position + QPoint(80, 35))
+                QCoreApplication.processEvents()
+                assert abs(viewer.transform().m11() - before_scale) < 1e-6, 'Tap-to-drag changed the zoom'
+                assert (viewer._scene_center() - before_center).manhattanLength() > .5, 'Tap-to-drag did not pan'
+                assert not viewer.is_zoom_animating() and not viewer._click_timer.isActive()
+                results.append({'route': route, 'pause_before_drag_ms': hold + 80,
+                                'play_calls': playback.call_count, 'zoom_preserved': True, 'panned': True})
+            center = viewer.viewport().rect().center()
+            position = center
+            mouse(QEvent.Type.MouseButtonPress, position)
+            mouse(QEvent.Type.MouseButtonRelease, position)
+            mouse(QEvent.Type.MouseButtonDblClick, position)
+            mouse(QEvent.Type.MouseButtonRelease, position)
+            assert viewer.is_zoom_animating(), 'Deliberate double-click lost its zoom animation'
+            _wait(lambda: not viewer.is_zoom_animating(), 3)
+            assert abs(viewer.zoom_factor() - 1.0) < .005
+            assert playback.call_count == 0
+        return {'routes': results, 'no_transient_live_request': True, 'zoom_preserved': True,
+                'panned': True, 'ordinary_double_click_zoom_preserved': True,
+                'event_injection': 'Explicit QMouseEvent press/release/second-press or DoubleClick',
+                'hold_setting_unchanged': True, 'physical_touchpad_hardware': False}
+    finally:
+        viewer.stop_live()
+        viewer.set_options(hold_ms=original_hold)
+        viewer.fit_image()
+
+
+def _check_blank_touch_context_menu(viewer: ViewerCanvas, report_dir: Path):
+    """Exercise the opening contact through a real popup's nested event loop."""
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QTouchEvent
+    from PySide6.QtTest import QSignalSpy
+    from PySide6.QtWidgets import QMenu
+
+    viewer.stop_live()
+    viewer.fit_image()
+    viewer.show()
+    viewer.activateWindow()
+    viewer.setFocus()
+    QCoreApplication.processEvents()
+    window = viewer.window()
+    target = window.windowHandle()
+    assert target is not None and target.isExposed(), 'Touch menu needs an exposed window'
+    left = viewer.mapFromScene(viewer._image_rect.topLeft()).x()
+    point = QPoint(max(10, left - 30), viewer.viewport().height() // 2)
+    assert not viewer.image_contains_viewport_point(QPointF(point)), 'Touch menu needs a blank letterbox'
+    position = viewer.viewport().mapTo(window, point)
+    device = QTest.createTouchDevice()
+    original_policy = viewer.contextMenuPolicy()
+    viewer.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    routes = []
+    report_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for choice in ('touch', 'mouse'):
+            sequence = QTest.touchEvent(target, device, False)
+            result = {'next_input': choice, 'held_after_menu_ms': 750,
+                      'explicit_window_target': True, 'opened': 0}
+            routes.append(result)
+
+            def popup(context_position):
+                result['opened'] += 1
+                viewer.stop_live()  # The main window does this before menu.exec.
+                menu = QMenu(viewer)
+                action = menu.addAction('选择测试项')
+                triggered = QSignalSpy(action.triggered)
+                release_timer = QTimer(menu)
+                release_timer.setSingleShot(True)
+                deadline = QTimer(menu)
+                deadline.setSingleShot(True)
+
+                def release_contact():
+                    try:
+                        for offset in (4, 8, 12, 16):
+                            sequence.move(0, position + QPoint(offset, 0), target).commit()
+                        result['visible_while_held'] = menu.isVisible()
+                        sequence.release(0, position + QPoint(16, 0), target).commit()
+                        QCoreApplication.processEvents()
+                        result['visible_after_release'] = menu.isVisible()
+                        result['accidental_choices'] = triggered.count()
+                        assert menu.isVisible(), f'Opening touch dismissed its menu: {result}'
+                        assert triggered.count() == 0, f'Opening touch selected an item: {result}'
+                        screenshot = f'blank-touch-menu-{choice}.png'
+                        assert menu.grab().save(str(report_dir / screenshot))
+                        result['screenshot'] = screenshot
+                        item_point = menu.actionGeometry(action).center()
+                        if choice == 'touch':
+                            menu_target = menu.windowHandle()
+                            assert menu_target is not None
+                            tap = QTest.touchEvent(menu_target, device, False)
+                            tap.press(0, item_point, menu_target).commit()
+                            tap.release(0, item_point, menu_target).commit()
+                        else:
+                            # QMenu ignores a click exactly at its saved cursor
+                            # origin. The previous touch route can leave that
+                            # origin at the same row's center, so choose another
+                            # real point inside the row on this second route.
+                            item_point.setX(menu.actionGeometry(action).right() - 8)
+                            QTest.mouseMove(menu, item_point)
+                            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=item_point)
+                        QCoreApplication.processEvents()
+                        result['deliberate_choices'] = triggered.count()
+                    except Exception:
+                        result['callback_error'] = traceback.format_exc()
+                        menu.close()
+
+                def timed_out():
+                    result['timed_out'] = True
+                    menu.close()
+
+                release_timer.timeout.connect(release_contact)
+                deadline.timeout.connect(timed_out)
+                release_timer.start(750)
+                deadline.start(3000)
+                try:
+                    menu.exec(viewer.viewport().mapToGlobal(context_position))
+                    result['menu_returned'] = True
+                finally:
+                    release_timer.stop()
+                    deadline.stop()
+                    menu.close()
+                    menu.deleteLater()
+
+            viewer.customContextMenuRequested.connect(popup)
+            try:
+                QCoreApplication.processEvents()
+                # Keep QMenu's saved cursor origin away from the later choice,
+                # including when the preceding route ended with a touch tap.
+                QTest.mouseMove(target, viewer.viewport().mapTo(
+                    window, QPoint(viewer.viewport().width() - 15, 15)))
+                sequence.press(0, position, target).commit()
+                assert viewer._blank_hold_timer.isActive(), 'Blank long press did not start its timer'
+                _wait(lambda: result.get('menu_returned'), 6)
+                assert 'callback_error' not in result, result.get('callback_error')
+                assert not result.get('timed_out'), f'Menu did not accept deliberate {choice}: {result}'
+                assert result['opened'] == 1 and result.get('visible_while_held'), result
+                assert result.get('visible_after_release') and result.get('accidental_choices') == 0, result
+                assert result.get('deliberate_choices') == 1, result
+                assert not viewer._play_requested and not viewer._click_timer.isActive()
+            finally:
+                viewer.customContextMenuRequested.disconnect(popup)
+                QApplication.sendEvent(target, QTouchEvent(QEvent.Type.TouchCancel, device))
+                viewer.stop_live()
+                QCoreApplication.processEvents()
+        return {'routes': routes, 'physical_touch_hardware': False,
+                'original_release_keeps_menu': True, 'no_accidental_choices': True,
+                'next_touch_and_mouse_choose_once': True}
+    finally:
+        viewer.setContextMenuPolicy(original_policy)
+        (report_dir / 'blank-touch-menu-diagnostics.json').write_text(
+            json.dumps(routes, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 def _check_windows_native_horizontal_wheel(viewer: ViewerCanvas):
     """Verify the Windows-message-to-Qt direction bridge on the real HWND."""
     import ctypes
@@ -678,9 +929,37 @@ def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
                 'copy_and_overwrite': True, 'video_bytes_unchanged': True}
 
 
+@contextmanager
+def _separate_export_test_directory(folder):
+    directory = folder / '另一个导出目录 with spaces'
+    directory.mkdir()
+    attributes = None
+    kernel = None
+    if sys.platform == 'win32':
+        import ctypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
+        kernel.GetFileAttributesW.restype = ctypes.c_uint32
+        kernel.SetFileAttributesW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        kernel.SetFileAttributesW.restype = ctypes.c_int
+        attributes = kernel.GetFileAttributesW(str(directory))
+        assert attributes != 0xffffffff
+        assert kernel.SetFileAttributesW(str(directory), attributes | 0x1)
+    try:
+        if kernel is not None:
+            proof = directory / 'write-proof.tmp'
+            proof.write_bytes(b'Actual write permission despite Windows folder READONLY')
+            proof.unlink()
+        yield directory
+        if kernel is not None:
+            assert kernel.GetFileAttributesW(str(directory)) & 0x1, 'Export changed the folder attribute'
+    finally:
+        if kernel is not None:
+            kernel.SetFileAttributesW(str(directory), attributes)
+
+
 def _check_editor_preview_export(dialog, folder: Path, still: Path, video: Path, report_dir: Path):
-    from PySide6.QtCore import QMetaObject
-    from PySide6.QtWidgets import QFileDialog, QMenu
+    from PySide6.QtWidgets import QFileDialog, QMenu, QDialogButtonBox
 
     preview = dialog.preview
     assert isinstance(preview, ViewerCanvas)
@@ -723,72 +1002,82 @@ def _check_editor_preview_export(dialog, folder: Path, still: Path, video: Path,
     dialog.grab().save(str(report_dir / 'editor-preview-zoom.png'))
     preview.fit_image()
 
-    target = folder / '导出静帧.png'
-    errors, choices = [], []
-    attempts = [0]
-    def choose_file():
-        prompt = QApplication.activeModalWidget()
-        if not isinstance(prompt, QFileDialog):
-            attempts[0] += 1
-            if attempts[0] < 200:
-                QTimer.singleShot(25, choose_file)
+    with _separate_export_test_directory(folder) as export_directory:
+        target = export_directory / '导出静帧.png'
+        errors, choices = [], []
+        attempts = [0]
+        def choose_file():
+            prompt = QApplication.activeModalWidget()
+            if not isinstance(prompt, QFileDialog):
+                attempts[0] += 1
+                if attempts[0] < 200:
+                    QTimer.singleShot(25, choose_file)
+                    return
+                errors.append(AssertionError('导出静帧画面 did not open a SaveAs dialog'))
+                if prompt is not None:
+                    prompt.reject()
                 return
-            errors.append(AssertionError('导出静帧画面 did not open a SaveAs dialog'))
-            if prompt is not None:
+            try:
+                assert prompt.acceptMode() == QFileDialog.AcceptMode.AcceptSave
+                prompt.setDirectory(str(export_directory))
+                png_filter = next(value for value in prompt.nameFilters() if '*.png' in value.lower())
+                prompt.selectNameFilter(png_filter)
+                prompt.selectFile(str(target))
+                choices.append(str(target))
+                buttons = prompt.findChild(QDialogButtonBox)
+                save = buttons.button(QDialogButtonBox.StandardButton.Save)
+                assert save is not None and save.isEnabled(), 'Real SaveAs Save button is disabled'
+                QTest.mouseClick(save, Qt.MouseButton.LeftButton)
+            except Exception as error:
+                errors.append(error)
                 prompt.reject()
-            return
-        try:
-            assert prompt.acceptMode() == QFileDialog.AcceptMode.AcceptSave
-            prompt.setDirectory(str(folder))
-            png_filter = next(value for value in prompt.nameFilters() if '*.png' in value.lower())
-            prompt.selectNameFilter(png_filter)
-            prompt.selectFile(str(target))
-            choices.append(str(target))
-            QMetaObject.invokeMethod(prompt, 'accept', Qt.ConnectionType.QueuedConnection)
-        except Exception as error:
-            errors.append(error)
-            prompt.reject()
 
-    def choose_export():
-        menu = QApplication.activePopupWidget()
-        try:
-            assert isinstance(menu, QMenu), 'Editor preview context menu did not open'
-            action = next(action for action in menu.actions() if action.text().startswith('导出静帧画面'))
-            assert action.isEnabled()
-            menu.grab().save(str(report_dir / 'editor-frame-export-menu.png'))
-            QTimer.singleShot(0, choose_file)
-            QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center())
-        except Exception as error:
-            errors.append(error)
-            if menu is not None:
-                menu.hide()
+        def choose_export():
+            menu = QApplication.activePopupWidget()
+            try:
+                assert isinstance(menu, QMenu), 'Editor preview context menu did not open'
+                action = next(action for action in menu.actions() if action.text().startswith('导出静帧画面'))
+                assert action.isEnabled()
+                menu.grab().save(str(report_dir / 'editor-frame-export-menu.png'))
+                QTimer.singleShot(0, choose_file)
+                QTest.mouseClick(menu, Qt.MouseButton.LeftButton, pos=menu.actionGeometry(action).center())
+            except Exception as error:
+                errors.append(error)
+                if menu is not None:
+                    menu.hide()
 
-    previous_native = QApplication.testAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs)
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
-    try:
-        QTimer.singleShot(0, choose_export)
-        dialog._preview_menu(center)
-        _wait(lambda: bool(errors or choices), 6)
-    finally:
-        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, previous_native)
-    if errors:
-        raise errors[0]
-    assert choices == [str(target)]
-    _wait(lambda: dialog.last_export_path == target and not dialog._export_busy, 25)
-    _wait(lambda: dialog._export_thread is None or not dialog._export_thread.is_alive(), 5)
-    assert target.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
-    image = load_image(target, None)
-    assert image.size == (320, 240), 'Frame export used the scaled or zoomed preview resolution'
-    expected = (207, 66, 194)
-    assert max(abs(a - b) for a, b in zip(image.getpixel((160, 120)), expected)) < 10
-    assert _file_digest(still) == before_image and _file_digest(video) == before_video
-    assert {path.name for path in folder.iterdir() if path.suffix.casefold() == '.mov'} == movies_before
-    assert dialog.saved_result is None and dialog.selected_frame_index == selected
-    assert dialog.save_button.isEnabled() and dialog.timeline.isEnabled()
-    return {'wheel_pinch_and_pan': True, 'context_menu_label': '导出静帧画面',
-            'save_as_dialog_exercised': True, 'exported_frame_index': 4, 'full_size': [320, 240],
-            'original_media_unchanged': True, 'no_video_copy': True, 'cover_save_not_triggered': True,
-            'file_dialog_automation': 'Qt SaveAs dialog'}
+        previous_native = QApplication.testAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs)
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
+        try:
+            QTimer.singleShot(0, choose_export)
+            dialog._preview_menu(center)
+            _wait(lambda: bool(errors or choices), 6)
+        finally:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, previous_native)
+        if errors:
+            raise errors[0]
+        assert choices == [str(target)]
+        _wait(lambda: dialog.last_export_path == target and not dialog._export_busy, 25)
+        _wait(lambda: dialog._export_thread is None or not dialog._export_thread.is_alive(), 5)
+        assert target.read_bytes().startswith(b'\x89PNG\r\n\x1a\n')
+        image = load_image(target, None)
+        assert image.size == (320, 240), 'Frame export used the scaled or zoomed preview resolution'
+        expected = (207, 66, 194)
+        assert max(abs(a - b) for a, b in zip(image.getpixel((160, 120)), expected)) < 10
+        assert _file_digest(still) == before_image and _file_digest(video) == before_video
+        assert {path.name for path in folder.iterdir() if path.suffix.casefold() == '.mov'} == movies_before
+        assert dialog.saved_result is None and dialog.selected_frame_index == selected
+        assert dialog.save_button.isEnabled() and dialog.timeline.isEnabled()
+        from .settings import Preferences
+        assert Preferences.load().last_export_directory == str(export_directory)
+        assert dialog._export_directory == export_directory
+        return {'wheel_pinch_and_pan': True, 'context_menu_label': '导出静帧画面',
+                'save_as_dialog_exercised': True, 'exported_frame_index': 4, 'full_size': [320, 240],
+                'original_media_unchanged': True, 'no_video_copy': True, 'cover_save_not_triggered': True,
+                'file_dialog_automation': 'Qt SaveAs actual Save button',
+                'real_save_button_clicked': True, 'other_directory_export': True,
+                'windows_readonly_directory_accepted': sys.platform == 'win32',
+                'remembered_directory_persisted': True}
 
 
 def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
@@ -800,7 +1089,8 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
         shutil.copy2(fixtures / 'VFR_PAIR.MOV', video)
         item = MediaItem('vfr-editor', still, video)
         before_image, before_video = _file_digest(still), _file_digest(video)
-        dialog = EditorDialog(item, parent)
+        dialog = EditorDialog(item, parent, initial_export_directory=parent.preferences.last_export_directory)
+        dialog.frame_exported.connect(parent._remember_frame_export)
         dialog.setModal(True)
         dialog.show()
         try:
@@ -1158,6 +1448,133 @@ def _check_application_theme(window, report_dir: Path):
         window._toggle_grid(original_grid_mode)
 
 
+def _check_multiple_folder_collection(fixtures: Path, report_dir: Path):
+    from PIL import Image
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QTreeWidgetItemIterator
+    from .app import MainWindow
+    from .settings import Preferences
+
+    previous_data = os.environ.get('LIVEGALLERY_DATA_DIR')
+    window = None
+    with tempfile.TemporaryDirectory(prefix='multi-import-', dir=report_dir) as directory:
+        base = Path(directory).resolve()
+        first, second = base / 'A 照片', base / 'B photos'
+        child = first / '子目录'
+        child.mkdir(parents=True)
+        second.mkdir()
+        for folder in (first, second):
+            shutil.copy2(fixtures / 'VFR_PAIR.jpg', folder / 'shared.jpg')
+            shutil.copy2(fixtures / 'VFR_PAIR.MOV', folder / 'shared.MOV')
+        Image.new('RGB', (180, 140), '#247596').save(child / 'child.png')
+        Image.new('RGB', (180, 140), '#934a62').save(second / 'other.png')
+        roots = (first, second, child)
+        os.environ['LIVEGALLERY_DATA_DIR'] = str(base / 'settings')
+        try:
+            window = MainWindow()
+            window.resize(1280, 850)
+            window.show()
+            window.preferences.cache_location = 'library'
+            window.load_folders((*roots, first))
+            _wait(lambda: not window._scan_pending and len(window._primary_items) == 4, 25)
+            assert window.folders == roots and len(window.model.items) == 4
+            assert len({str(item.image_path) for item in window._primary_items}) == 4
+            assert len(window.cache.actual_paths) == 3
+            for root in roots:
+                assert (root / 'LiveViewer Cache').is_dir()
+            source = next(item for item in window._primary_items if item.image_path.parent == first)
+            sibling = next(item for item in window._primary_items if item.image_path == second / 'shared.jpg')
+            window.cache.set_override(source, source.image_path)
+            assert window.cache.get_override(sibling) is None
+            for item in window._primary_items:
+                owner = child if item.image_path.is_relative_to(child) else first if item.image_path.is_relative_to(first) else second
+                thumbnail = window.cache.get_thumbnail(item.image_path)
+                assert thumbnail.is_relative_to(owner / 'LiveViewer Cache')
+
+            def node(path):
+                iterator = QTreeWidgetItemIterator(window.tree)
+                while iterator.value() is not None:
+                    item = iterator.value()
+                    if item.data(0, Qt.ItemDataRole.UserRole) == str(path):
+                        return item
+                    iterator += 1
+                raise AssertionError('Imported folder is missing from the sidebar')
+
+            def click(path, *, checkbox=False, modifiers=Qt.KeyboardModifier.NoModifier):
+                item = node(path)
+                rect = window.tree.visualItemRect(item)
+                if checkbox:
+                    option = QStyleOptionViewItem()
+                    window.tree.itemDelegate().initStyleOption(option, window.tree.indexFromItem(item))
+                    option.rect = rect
+                    point = window.tree.style().subElementRect(
+                        QStyle.SubElement.SE_ItemViewItemCheckIndicator, option, window.tree.viewport()).center()
+                else:
+                    point = QPoint(rect.left() + 100, rect.center().y())
+                QTest.mouseClick(window.tree.viewport(), Qt.MouseButton.LeftButton, modifiers, point)
+                QCoreApplication.processEvents()
+
+            click(first)
+            assert len(window.model.items) == 1 and window.model.items[0].image_path.parent == first
+            click(second, modifiers=Qt.KeyboardModifier.ShiftModifier)
+            assert window.tree.checked_directories == set(roots) and len(window.model.items) == 4
+            click(child, checkbox=True)
+            assert window.tree.checked_directories == {first, second} and len(window.model.items) == 3
+            window.tree.setFocus()
+            QTest.keyClick(window.tree, Qt.Key.Key_A, Qt.KeyboardModifier.ControlModifier)
+            assert window.tree.checked_directories == set(roots) and len(window.model.items) == 4
+            click(first)
+            assert [window.search_scope.itemText(i) for i in range(window.search_scope.count())] == ['已选文件夹', '全局']
+            window.search_scope.setCurrentIndex(window.search_scope.findData('current'))
+            window.search.setText('shared')
+            assert len(window.model.items) == 1
+            window.search_scope.setCurrentIndex(window.search_scope.findData('all'))
+            assert len(window.model.items) == 2
+            window.search.clear()
+            assert len(window.model.items) == 1
+            window._toggle_grid(True)
+            window.grab().save(str(report_dir / 'multiple-folders-selected-overview.png'))
+
+            for location in ('user', 'program', 'library'):
+                window.preferences.cache_location = location
+                window.load_folders(roots, preserve_view=True)
+                _wait(lambda: not window._scan_pending and len(window._primary_items) == 4
+                      and window._cache_key[0] == location, 25)
+                assert len(window.model.items) == 1 and window.tree.checked_directories == {first}
+                assert window.cache.get_override(source) == source.image_path
+                assert window.cache.get_override(sibling) is None
+                if location == 'library':
+                    assert not window.cache.has_fallbacks, 'The app mistook its previous cache writer for another process'
+            saved = Preferences.load()
+            assert saved.last_folders == [str(root) for root in roots]
+            assert saved.selected_folders == [str(first)] and saved.search_scope == 'all'
+            window.close()
+            assert window.wait_for_shutdown(15)
+            window.deleteLater()
+            QCoreApplication.processEvents()
+            window = MainWindow()
+            window.show()
+            window.load_folders(window.preferences.last_folders)
+            _wait(lambda: not window._scan_pending and len(window._primary_items) == 4, 25)
+            assert window.tree.checked_directories == {first} and len(window.model.items) == 1
+            assert window.search_scope.currentData() == 'all'
+            return {'imported_roots': 3, 'items': 4, 'overlapping_roots_and_items_deduplicated': True,
+                    'checkboxes_control_exact_directories': True, 'shift_range_and_ctrl_a': True,
+                    'search_labels': ['已选文件夹', '全局'], 'selected_and_global_search': True,
+                    'clearing_search_restores_selected_folders': True,
+                    'three_cache_modes_and_writer_handoff': True, 'root_choices_isolated': True,
+                    'folders_checks_and_search_scope_survive_restart': True}
+        finally:
+            if window is not None:
+                window.close()
+                assert window.wait_for_shutdown(15)
+                window.deleteLater()
+                QCoreApplication.processEvents()
+            if previous_data is None:
+                os.environ.pop('LIVEGALLERY_DATA_DIR', None)
+            else:
+                os.environ['LIVEGALLERY_DATA_DIR'] = previous_data
+
+
 def _check_library_cache(fixtures: Path, report_dir: Path):
     """Exercise real cache files without writing next to shipped test media."""
     from PIL import Image
@@ -1342,6 +1759,9 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         library_cache = _check_library_cache(fixtures, report_dir)
         report['checks'].append({'check': 'cache_locations_portable_library_reuse_and_validation',
                                  **library_cache, 'status': 'passed'})
+        collection = _check_multiple_folder_collection(fixtures, report_dir)
+        report['checks'].append({'check': 'multiple_folders_checkboxes_and_search_scope',
+                                 **collection, 'status': 'passed'})
         exact_frames = _check_exact_frame_reader(fixtures, report_dir)
         report['checks'].append({'check': 'exact_frame_index_export_h264_hevc_rotated_and_vfr',
                                  'videos': exact_frames, 'status': 'passed'})
@@ -1444,6 +1864,15 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         interactions = _check_canvas_touch_and_wheel(viewer, fixtures)
         report['checks'].append({'check': 'blank_letterbox_swipe_and_horizontal_wheel',
                                  **interactions, 'status': 'passed'})
+        navigator = _check_zoom_navigation_overview(viewer, fixtures, report_dir)
+        report['checks'].append({'check': 'zoom_navigation_thumbnail_and_viewport_rectangle',
+                                 **navigator, 'status': 'passed'})
+        double_drag = _check_zoomed_double_tap_drag(viewer, fixtures)
+        report['checks'].append({'check': 'zoomed_double_tap_drag_does_not_play_live',
+                                 **double_drag, 'status': 'passed'})
+        touch_menu = _check_blank_touch_context_menu(viewer, report_dir)
+        report['checks'].append({'check': 'blank_touch_context_menu_survives_release',
+                                 **touch_menu, 'status': 'passed'})
         if sys.platform == 'win32' and app.platformName() == 'windows':
             viewer.set_photo(_qimage(fixtures / 'Portrait_HEVC.jpg'))
             QCoreApplication.processEvents()
@@ -1574,6 +2003,10 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         QCoreApplication.processEvents()
         assert window._fullscreen_active and not window.film.isVisible()
         assert window.fullscreen_live_badge.isVisible(), 'Fullscreen LIVE item has no overlay badge'
+        badge = window.fullscreen_live_badge
+        assert badge.width() >= badge.sizeHint().width() and badge.height() >= badge.sizeHint().height(), 'LIVE badge clips styled contents'
+        assert badge.contentsRect().width() >= badge.fontMetrics().horizontalAdvance(badge.text()), 'LIVE badge clips its text'
+        badge.grab().save(str(report_dir / 'fullscreen-live-badge.png'))
         badge_position = window.fullscreen_live_badge.pos()
         window.viewer.zoom_in()
         window.viewer._pan_by(QPointF(30, -20))
@@ -1634,7 +2067,8 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         assert window._grid_mode and window.content.currentWidget() is window.grid
         assert not window.fullscreen_live_badge.isVisible()
         report['checks'].append({'check': 'live_overlay_visibility_fixed_corner_and_escape_to_overview',
-                                 'live_only': True, 'two_escape_sequence': True, 'status': 'passed'})
+                                 'live_only': True, 'two_escape_sequence': True, 'badge_fits_styled_text': True,
+                                 'badge_size': [badge.width(), badge.height()], 'status': 'passed'})
 
         if sys.platform == 'win32':
             import ctypes

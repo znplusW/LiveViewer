@@ -1,5 +1,6 @@
 """Portable library reuse, ownership, incremental invalidation and migration."""
 import json
+from contextlib import nullcontext
 import multiprocessing
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import uuid
 from PIL import Image
 
 from livegallery.cache import CacheFormatError, CacheStore, file_version
+from livegallery import cache_locations
 from livegallery.cache_locations import (CACHE_DIRECTORY, MANIFEST_NAME, PRODUCT,
                                          SCHEMA_VERSION, OWNERSHIP_SENTINEL, is_managed_cache_directory, open_cache)
 from livegallery.library import scan_folder
@@ -138,7 +140,17 @@ class LibraryCacheTests(unittest.TestCase):
         original = (folder / MANIFEST_NAME).read_bytes()
         folder.chmod(0o555)
         try:
-            binding = self.open()
+            # Windows chmod on a directory sets its customization R marker,
+            # not an ACL denial. Simulate an actual denied writer-lock create
+            # there; POSIX continues to exercise real directory mode bits.
+            real_lock = cache_locations.DirectoryWriterLock
+            def denied_lock(path):
+                if Path(path).parent == folder:
+                    raise PermissionError('ACL denies creating a writer lock')
+                return real_lock(path)
+            context = patch.object(cache_locations, 'DirectoryWriterLock', side_effect=denied_lock) if os.name == 'nt' else nullcontext()
+            with context:
+                binding = self.open()
             self.assertTrue(binding.fallback)
             self.assertEqual((folder / MANIFEST_NAME).read_bytes(), original)
             self.assertFalse((folder / 'library.sqlite3').exists())
@@ -255,7 +267,14 @@ class LibraryCacheTests(unittest.TestCase):
         self.program.mkdir()
         self.program.chmod(0o555)
         try:
-            binding=self.open('program')
+            real_store = cache_locations.CacheStore
+            def denied_index(base, *args, **kwargs):
+                if Path(base) == self.program / 'cache':
+                    raise PermissionError('ACL denies creating the cache index')
+                return real_store(base, *args, **kwargs)
+            context = patch.object(cache_locations, 'CacheStore', side_effect=denied_index) if os.name == 'nt' else nullcontext()
+            with context:
+                binding=self.open('program')
             self.assertTrue(binding.fallback)
             self.assertEqual(binding.location,'user')
             self.assertEqual(binding.cache.base,self.user/'cache')

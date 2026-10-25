@@ -53,6 +53,18 @@ jobs:
           Get-Content 'reports/preflight-touch-filmstrip.stdout.log', 'reports/preflight-touch-filmstrip.stderr.log' | Tee-Object -FilePath 'reports/preflight-touch-filmstrip.log'
           if (-not $finished) { throw 'Filmstrip interaction preflight timed out' }
           if ($testExitCode -ne 0) { throw "Filmstrip interaction preflight failed with exit code $testExitCode" }
+      - name: Preflight viewer long-touch context menu ownership
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_viewer.py', '-v' -PassThru -RedirectStandardOutput 'reports/preflight-viewer.stdout.log' -RedirectStandardError 'reports/preflight-viewer.stderr.log'
+          $finished = $process.WaitForExit(150000)
+          if (-not $finished) { Stop-Process -Id $process.Id -Force }
+          $testExitCode = if ($finished) { $process.ExitCode } else { -1 }
+          Get-Content 'reports/preflight-viewer.stdout.log', 'reports/preflight-viewer.stderr.log' | Tee-Object -FilePath 'reports/preflight-viewer.log'
+          if (-not $finished) { throw 'Viewer touch menu preflight timed out' }
+          if ($testExitCode -ne 0) { throw "Viewer touch menu preflight failed with exit code $testExitCode" }
       - name: Preflight Windows cover editor lifecycle and interactions
         shell: pwsh
         timeout-minutes: 3
@@ -101,7 +113,7 @@ jobs:
         timeout-minutes: 3
         run: |
           $env:QT_QPA_PLATFORM = 'windows'
-          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'tests.windows_export_probe', '--report', 'reports/native-export.json' -PassThru -RedirectStandardOutput 'reports/preflight-native-export.stdout.log' -RedirectStandardError 'reports/preflight-native-export.stderr.log'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'tests.windows_export_probe', '--readonly-directory', '--report', 'reports/native-export.json' -PassThru -RedirectStandardOutput 'reports/preflight-native-export.stdout.log' -RedirectStandardError 'reports/preflight-native-export.stderr.log'
           $finished = $process.WaitForExit(150000)
           if (-not $finished) { Stop-Process -Id $process.Id -Force }
           $testExitCode = if ($finished) { $process.ExitCode } else { -1 }

@@ -170,7 +170,13 @@ class CacheBinding:
 
 
 def _writable(path):
-    if not Path(path).stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
+    status = Path(path).stat()
+    # Windows directory READONLY is a customization marker, not an ACL denial.
+    # Creation of the writer lock, SQLite index and thumbnail stage tests the
+    # actual directory permissions; readonly files/POSIX keep their bit guard.
+    if os.name == 'nt' and stat.S_ISDIR(status.st_mode):
+        return
+    if not status.st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH):
         raise PermissionError('照片目录为只读。')
 
 
