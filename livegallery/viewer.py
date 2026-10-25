@@ -108,6 +108,7 @@ class ViewerCanvas(QGraphicsView):
         self._player.setAudioOutput(self._audio)
         self._video_sink = QVideoSink(self)
         self._player.setVideoSink(self._video_sink)
+        self._video_sink_detached = False
         self._player.mediaStatusChanged.connect(self._media_status_changed)
         self._player.errorOccurred.connect(self._media_error)
         self._last_presented_frame = QVideoFrame()
@@ -456,6 +457,9 @@ class ViewerCanvas(QGraphicsView):
         # being presented as the first frame of the new request.
         self._video_sink.setVideoFrame(QVideoFrame())
         self._last_presented_frame = QVideoFrame()
+        if self._video_sink_detached:
+            self._player.setVideoSink(self._video_sink)
+            self._video_sink_detached = False
         self._player.setLoops(
             QMediaPlayer.Loops.Infinite if self._loop and not play_once else QMediaPlayer.Loops.Once
         )
@@ -498,6 +502,18 @@ class ViewerCanvas(QGraphicsView):
         self._stop_playback()
         self._release_capture()
         self.viewport().unsetCursor()
+
+    def release_media_for_edit(self) -> None:
+        """Release MOV ownership while retaining the photo, pairing and view."""
+        self.stop_live()
+        # stop() leaves the source loaded and may retain a Windows file handle.
+        # Empty the source and drop decoder/sink frames before an editor opens;
+        # the next playback reconnects the same sink and reloads _video_path.
+        self._player.setSource(QUrl())
+        self._player.setVideoSink(None)
+        self._video_sink_detached = True
+        self._video_sink.setVideoFrame(QVideoFrame())
+        self._last_presented_frame = QVideoFrame()
 
     def _stop_playback(self) -> None:
         self._generation += 1

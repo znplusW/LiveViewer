@@ -1986,6 +1986,53 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(refresh.call_count, 1)
             self.assertIs(refresh.call_args.args[1], dialog.saved_result)
 
+    def test_cover_editor_releases_real_player_and_cancel_allows_replay(self):
+        item = self.show_live_item()
+        item.video_path.write_bytes((Path(__file__).parent / 'fixtures' / 'JPEG_PAIR.mov').read_bytes())
+        original_photo, original_video = item.image_path.read_bytes(), item.video_path.read_bytes()
+        viewer = self.window.viewer
+        viewer.set_options(loop=True)
+        viewer.zoom_in()
+        photo_key = viewer._photo.pixmap().cacheKey()
+        for detached in (False, True):
+            with self.subTest(detached=detached):
+                if detached:
+                    self.window._detach_preview()
+                transform, center = viewer.transform(), viewer._scene_center()
+                viewer.start_live()
+                self.wait_until(lambda: viewer._live_visible, stage='real playback before cover editor')
+                self.assertFalse(viewer._player.source().isEmpty())
+                dialog = MagicMock()
+                dialog.exec.return_value = QDialog.DialogCode.Rejected
+                dialog.saved_result = None
+                def editor(*args, **kwargs):
+                    # The worker may open immediately in the constructor, so
+                    # media must be released before even constructing it.
+                    self.assertTrue(viewer._player.source().isEmpty())
+                    self.assertIsNone(viewer._player.videoSink())
+                    self.assertFalse(viewer._video_sink.videoFrame().isValid())
+                    self.assertFalse(viewer._last_presented_frame.isValid())
+                    probe = item.video_path.with_suffix('.unlocked')
+                    os.replace(item.video_path, probe)
+                    os.replace(probe, item.video_path)
+                    return dialog
+                with patch('livegallery.cover_editor.EditorDialog', side_effect=editor), \
+                        patch.object(self.window, '_apply_cover_result') as refresh:
+                    self.window._open_cover_editor(item)
+                    refresh.assert_not_called()
+                self.assertEqual(viewer._video_path, item.video_path)
+                self.assertEqual(viewer._photo.pixmap().cacheKey(), photo_key)
+                self.assertEqual(viewer.transform(), transform)
+                self.assertLess((viewer._scene_center() - center).manhattanLength(), 2)
+                self.assertTrue(viewer._photo.isVisible())
+                self.assertEqual(item.image_path.read_bytes(), original_photo)
+                self.assertEqual(item.video_path.read_bytes(), original_video)
+                viewer.start_live()
+                self.wait_until(lambda: viewer._live_visible, stage='real replay after cancelled cover editor')
+                self.assertIs(viewer._player.videoSink(), viewer._video_sink)
+                self.assertEqual(viewer._player.source().toLocalFile(), str(item.video_path.resolve()))
+                viewer.stop_live()
+
     def test_committed_frame_export_remembers_directory_even_when_cover_editor_is_cancelled(self):
         live = self.show_live_item()
         self.catalog([live])

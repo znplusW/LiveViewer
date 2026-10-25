@@ -2489,7 +2489,7 @@ class MainWindow(QMainWindow):
             return
         self._navigation_timer.stop()
         self._navigation_target_id = None
-        self.viewer.stop_live()
+        self.viewer.release_media_for_edit()
         self._autoplay_armed = False
         self._keyboard_live_pressed = False
         versions = tuple(file_version(path) for path in (item.candidates or (item.image_path,)))
