@@ -1922,6 +1922,38 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
     clicked = QSignalSpy(window.grid.clicked)
     requests = QSignalSpy(gesture.escapeRequested)
     routes = []
+    native_checks = []
+
+    def native_snapshot(target_window, stage, hwnd=None, cookie=None, *, read_value=True):
+        record = native._tracked.get(id(target_window))
+        snapshot = {'stage': stage, 'target': 'main' if target_window is window else 'preview',
+                    'hwnd': hwnd, 'cookie': cookie, 'policy': native.report(),
+                    'visible': target_window.isVisible(), 'fullscreen': target_window.isFullScreen(),
+                    'active': target_window.isActiveWindow(),
+                    'record': {key: record.get(key) for key in ('hwnd', 'cookie', 'set')} if record else None}
+        native_checks.append(snapshot)
+        if native.supported and hwnd and native._backend is not None:
+            try:
+                snapshot['own_window'] = bool(native._backend.is_own_window(hwnd))
+                snapshot['cookie_matches'] = bool(native._backend.matches(hwnd, cookie)) if cookie else False
+                snapshot['actual_cookie'] = native._backend.user.GetPropW(
+                    hwnd, 'LiveViewer.FullscreenEdgeGesture.Owner')
+                if read_value:
+                    snapshot['actual'] = native._backend.read(hwnd)
+            except Exception as error:
+                snapshot['read_error'] = f'{type(error).__name__}: {error}'
+        return snapshot
+
+    def save_native_diagnostics():
+        (report_dir / 'fullscreen-edge-native-diagnostics.json').write_text(
+            json.dumps({'checks': native_checks, 'routes': routes, 'policy': native.report()},
+                       ensure_ascii=False, indent=2), encoding='utf-8')
+
+    def require_native_value(target_window, stage, hwnd, expected, cookie=None):
+        snapshot = native_snapshot(target_window, stage, hwnd, cookie)
+        save_native_diagnostics()
+        assert snapshot.get('actual') == expected, json.dumps(snapshot, ensure_ascii=False)
+        return snapshot
 
     def swipe(target_window, edge, *, corner=False):
         nonlocal native_verified, native_cleanup
@@ -1932,10 +1964,14 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
         hwnd, cookie = None, None
         if native.supported:
             hwnd = int(target_window.winId())
-            record = native._tracked[id(target_window)]
+            record = native._tracked.get(id(target_window))
+            snapshot = native_snapshot(target_window, 'before_swipe_record', hwnd, read_value=False)
+            save_native_diagnostics()
+            assert record is not None, json.dumps(snapshot, ensure_ascii=False)
             cookie = record['cookie']
-            assert record['hwnd'] == hwnd and native._backend.matches(hwnd, cookie)
-            assert native._backend.read(hwnd) == {'vt': 11, 'value': True}
+            snapshot = require_native_value(target_window, 'before_swipe_true', hwnd,
+                                            {'vt': 11, 'value': True}, cookie)
+            assert record['hwnd'] == hwnd and snapshot['cookie_matches'], json.dumps(snapshot, ensure_ascii=False)
             native_verified = True
         starts = {'top': QPoint(target_window.width() // 2, 4),
                   'left': QPoint(4, target_window.height() // 2),
@@ -1950,8 +1986,9 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
         _wait(lambda: not target_window.isFullScreen(), 5)
         native.sync_now()
         if native.supported:
-            assert native._backend.read(hwnd) == {'vt': 0, 'value': None}
-            assert not native._backend.matches(hwnd, cookie)
+            snapshot = require_native_value(target_window, 'after_escape_empty', hwnd,
+                                            {'vt': 0, 'value': None}, cookie)
+            assert not snapshot['cookie_matches'], json.dumps(snapshot, ensure_ascii=False)
             native_cleanup = True
         sequence.release(0, start + delta, target).commit()
         QCoreApplication.processEvents()
@@ -1994,7 +2031,8 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
             assert preview.isFullScreen() and requests.count() == count
             native.sync_now()
             if native.supported:
-                assert native._backend.read(int(preview.winId())) == {'vt': 0, 'value': None}
+                require_native_value(preview, 'explicit_empty', int(preview.winId()),
+                                     {'vt': 0, 'value': None})
 
             gesture.set_enabled_edges({'left'})
             point = QPoint(4, preview.height() // 2)
@@ -2020,6 +2058,7 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
                 'touch_target': 'QWindow', 'physical_touch_hardware': False,
                 'os_reserved_gesture_delivery_verified': False}
     finally:
+        save_native_diagnostics()  # Preserve the failing native state before cleanup changes it.
         gesture.set_enabled_edges(original_edges)
         if window._fullscreen_active:
             window._exit_fullscreen()
