@@ -265,21 +265,21 @@ class LibraryCacheTests(unittest.TestCase):
 
     def test_program_directory_unwritable_falls_back_to_user(self):
         self.program.mkdir()
-        self.program.chmod(0o555)
-        try:
-            real_store = cache_locations.CacheStore
-            def denied_index(base, *args, **kwargs):
-                if Path(base) == self.program / 'cache':
-                    raise PermissionError('ACL denies creating the cache index')
-                return real_store(base, *args, **kwargs)
-            context = patch.object(cache_locations, 'CacheStore', side_effect=denied_index) if os.name == 'nt' else nullcontext()
-            with context:
-                binding=self.open('program')
-            self.assertTrue(binding.fallback)
-            self.assertEqual(binding.location,'user')
-            self.assertEqual(binding.cache.base,self.user/'cache')
-        finally:
-            self.program.chmod(0o755)
+        real_init = CacheStore.__init__
+        attempts = []
+        def denied_index(store, base, *args, **kwargs):
+            attempts.append(Path(base))
+            if Path(base) == self.program / 'cache':
+                raise PermissionError('ACL denies creating the cache index')
+            real_init(store, base, *args, **kwargs)
+        # Keep CacheStore a real class: source de-duplication uses isinstance.
+        # Exercise the same actual index-create denial on every platform.
+        with patch.object(CacheStore, '__init__', new=denied_index):
+            binding=self.open('program')
+        self.assertEqual(attempts, [self.program / 'cache', self.user / 'cache'])
+        self.assertTrue(binding.fallback)
+        self.assertEqual(binding.location,'user')
+        self.assertEqual(binding.cache.base,self.user/'cache')
 
     def test_global_choices_survive_index_recovery_and_program_user_switch(self):
         item=self.pair()
