@@ -35,9 +35,8 @@ class FilmstripPanel(QFrame):
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(5)
         buttons.addStretch()
-        self.hide_button = self._button('隐藏胶片条')
+        self.hide_button = self._button('隐藏胶片条', font_size=21)
         self.hide_button.setObjectName('filmCollapse')
-        self.hide_button.setStyleSheet('padding:0;min-height:0;border-radius:5px;font-size:21px;')
         self.hide_button.clicked.connect(self.hideRequested)
         buttons.addWidget(self.hide_button)
         self.orientation_button = self._button('切换胶片条方向')
@@ -79,10 +78,15 @@ class FilmstripPanel(QFrame):
         self._configure()
 
     @staticmethod
-    def _button(name):
+    def _button(name, font_size=13):
         button = QPushButton()
         button.setFixedSize(38, 34)
-        button.setStyleSheet('padding:0;min-height:0;border-radius:5px;font-size:13px;')
+        # QSS dimensions are the content box. Keep its 1px border explicit:
+        # a smaller min-height overrides setFixedSize again on style polish.
+        button.setStyleSheet(
+            'padding:0;min-width:36px;max-width:36px;min-height:32px;max-height:32px;'
+            'border-width:1px;border-style:solid;border-radius:5px;'
+            f'font-size:{font_size}px;')
         button.setAccessibleName(name)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return button

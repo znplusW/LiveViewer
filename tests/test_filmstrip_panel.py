@@ -8,7 +8,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QImage, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QGridLayout, QWidget
+from PySide6.QtWidgets import QApplication, QGridLayout, QStyleFactory, QWidget
 
 from livegallery.catalog_model import CatalogModel
 from livegallery.filmstrip_panel import FilmstripPanel
@@ -279,6 +279,33 @@ class FilmstripPanelTests(unittest.TestCase):
         self.panel.set_top_inset(0)
         self.settle()
         self.assertLess(self.panel.hide_button.mapTo(self.panel, QPoint()).y(), 20)
+
+    def test_compact_font_repolish_and_hide_show_keep_exact_touch_button_geometry(self):
+        original_style = self.app.style().objectName()
+        styles = list(dict.fromkeys((original_style, 'Windows', 'Fusion')))
+        try:
+            for style in styles:
+                self.assertIsNotNone(QStyleFactory.create(style))
+                self.app.setStyle(style)
+                for theme in ('light', 'dark'):
+                    self.window.setStyleSheet(stylesheet_for(theme) + '\nQWidget {font-family:Arial;}')
+                    for orientation, side in (('horizontal', 'right'), ('vertical', 'right'), ('vertical', 'left')):
+                        self.dock(orientation, side)
+                        self.panel.set_info_visible(False)
+                        self.panel.hide()
+                        self.panel.show()
+                        for button in (self.panel.hide_button, self.panel.orientation_button, self.panel.side_button):
+                            button.style().unpolish(button)
+                            button.style().polish(button)
+                            button.ensurePolished()
+                        self.settle()
+                        for button in (self.panel.hide_button, self.panel.orientation_button, self.panel.side_button):
+                            if button.isVisible():
+                                self.assertEqual(button.size().toTuple(), (38, 34),
+                                                 (style, theme, orientation, side, button.text(),
+                                                  button.minimumSize().toTuple(), button.sizeHint().toTuple()))
+        finally:
+            self.app.setStyle(original_style)
 
 
 if __name__ == '__main__':
