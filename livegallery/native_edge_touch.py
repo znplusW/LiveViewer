@@ -13,7 +13,7 @@ import sys
 import time
 import weakref
 
-from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QPointF
+from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QPointF, Qt
 from PySide6.QtWidgets import QApplication
 from shiboken6 import isValid
 
@@ -131,6 +131,8 @@ class NativeEdgeTouch(QAbstractNativeEventFilter):
         owner = self.owner()
         if self.closed or owner is None or owner._closed:
             return False
+        if not self.ids and not owner.enabled_edges:
+            return False
         owned = pointer in self.ids
         if kind == CAPTURE_CHANGED:
             if owned:
@@ -151,7 +153,8 @@ class NativeEdgeTouch(QAbstractNativeEventFilter):
             return owned
         target = self.target()
         root = self.backend.root(hwnd)
-        window = next((w for w in owner._windows() if int(w.winId()) == root), None)
+        window = next((w for w in owner._windows()
+                       if w.testAttribute(Qt.WidgetAttribute.WA_WState_Created) and int(w.winId()) == root), None)
         if target is not None and kind == DOWN and not owned and window is not None:
             self.ids.add(pointer)
             self.cancel()
@@ -159,7 +162,7 @@ class NativeEdgeTouch(QAbstractNativeEventFilter):
         if not self.ids:
             # Never steal an UPDATE from an ordinary swipe already handled by
             # Qt. NEW ENTER can precede DOWN at the exact screen boundary.
-            if (window is None or owner._target is not None or
+            if (window is None or not window.isFullScreen() or not window.isVisible() or owner._target is not None or
                     not (kind == DOWN or kind == ENTER and info.pointerFlags & NEW and info.pointerFlags & INCONTACT)
                     or info.pointerFlags & CANCELED or self.backend.contacts(pointer) != 1):
                 return False
@@ -216,6 +219,10 @@ class NativeEdgeTouch(QAbstractNativeEventFilter):
 def install_native_edge_touch(owner):
     if sys.platform != 'win32' or QApplication.instance().platformName() != 'windows':
         return None
-    result = NativeEdgeTouch(owner)
+    try:
+        result = NativeEdgeTouch(owner)
+    except (OSError, AttributeError):
+        # Preserve the existing Qt path if native APIs are unavailable.
+        return None
     QApplication.instance().installNativeEventFilter(result)
     return result

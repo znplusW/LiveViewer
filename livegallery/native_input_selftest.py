@@ -56,12 +56,13 @@ def check_native_bezel_input():
     contact.pointerInfo.pointerId = 8
     contact.touchMask = 7
     contact.orientation = 90
-    contact.pressure = 32000
+    contact.pressure = 512  # POINTER_TOUCH_INFO pressure range is 0..1024.
 
     def inject(x, y, flags):
         contact.pointerInfo.ptPixelLocation = _Point(x, y)
         contact.pointerInfo.pointerFlags = flags
-        contact.rcContact = Rect(x - 2, y - 2, x + 2, y + 2)
+        contact.rcContact = Rect(max(origin.x, x - 2), max(origin.y, y - 2),
+                                 min(origin.x + area.right, x + 2), min(origin.y + area.bottom, y + 2))
         QTest.qWait(12)
         if not user.InjectTouchInput(1, ctypes.byref(contact)):
             raise ctypes.WinError(ctypes.get_last_error())
@@ -87,15 +88,18 @@ def check_native_bezel_input():
             dx, dy = ((length, 0) if edge == 'left' else (-length, 0) if edge == 'right' else (0, length))
             before = escape.count()
             claims = gesture.native_touch.claims
+            pressed = False
             try:
                 inject(x, y, 0x10000 | 0x2 | 0x4)
+                pressed = True
                 for step in range(1, 6):
                     inject(x + dx * step // 5, y + dy * step // 5, 0x20000 | 0x2 | 0x4)
             finally:
                 # UP must use the last UPDATE coordinates. On an assertion
                 # failure above the final release is still attempted.
-                last = contact.pointerInfo.ptPixelLocation
-                inject(last.x, last.y, 0x40000)
+                if pressed:
+                    last = contact.pointerInfo.ptPixelLocation
+                    inject(last.x, last.y, 0x40000)
             assert escape.count() == before + 1, f'{edge}: native edge did not emit one Escape'
             assert not target.isFullScreen(), f'{edge}: did not exit fullscreen'
             assert gesture.native_touch.claims == claims + 1, f'{edge}: raw pointer route was not exercised'
