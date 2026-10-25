@@ -199,6 +199,38 @@ class CoverSaveTests(unittest.TestCase):
         self.assert_originals()
         self.assert_no_pending_files()
 
+    def test_interrupt_after_either_exclusive_publication_leaves_no_orphan_copy(self):
+        publish = cover_save._publish_no_replace
+        for interruption in (KeyboardInterrupt, SystemExit):
+            for stop_after in (1, 2):
+                with self.subTest(interruption=interruption.__name__, stop_after=stop_after):
+                    calls = []
+                    def interrupt_after_publication(staged, target):
+                        publish(staged, target)
+                        calls.append(target)
+                        if len(calls) == stop_after:
+                            raise interruption('interrupted immediately after exclusive publication')
+                    with patch.object(cover_save, '_publish_no_replace', side_effect=interrupt_after_publication):
+                        with self.assertRaises(interruption):
+                            save_cover(self.source, self.frame)
+                    self.assertFalse(list(self.folder.glob('Holiday v*.*')))
+                    self.assert_originals()
+                    self.assert_no_pending_files()
+
+    def test_concurrent_video_creator_survives_second_publication_collision(self):
+        publish = cover_save._publish_no_replace
+        def create_before_movie(staged, target):
+            if Path(target).suffix == '.MOV':
+                Path(target).write_bytes(b'video from concurrent creator')
+            publish(staged, target)
+        with patch.object(cover_save, '_publish_no_replace', side_effect=create_before_movie):
+            with self.assertRaises(FileExistsError):
+                save_cover(self.source, self.frame)
+        self.assertEqual((self.folder / 'Holiday v1.MOV').read_bytes(), b'video from concurrent creator')
+        self.assertFalse((self.folder / 'Holiday v1.JPEG').exists())
+        self.assert_originals()
+        self.assert_no_pending_files()
+
     def test_disk_full_or_encoder_failure_cleans_staging(self):
         def fail(image, target, *_args):
             Path(target).write_bytes(b"partial image")

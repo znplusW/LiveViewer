@@ -369,18 +369,28 @@ def save_cover(source: CoverSource, image: Image.Image, mode: str = "copy", *,
         source.validate_identity()
         if _same_stem_files(parent, target_image.stem):
             raise FileExistsError("副本文件名已被其他程序使用，请重新保存。")
-        # Prepare ownership records before publication; no fallible filesystem
-        # read may sit between a successful publication and rollback tracking.
-        _publish_no_replace(staged_image, target_image)
+        # Register intent first, including the interrupt window immediately
+        # after the OS operation. Rollback removes only the staged inode/hash.
         published.append(FileFingerprint(target_image, image_identity.stat_key, image_identity.sha256))
+        try:
+            _publish_no_replace(staged_image, target_image)
+        except FileExistsError:
+            # Exclusive creation proves this operation did not publish ours.
+            # Preserve the competing file and the original collision error.
+            published.pop()
+            raise
         _cancelled(cancel_event)
         # Also catch a creator using a different extension for the same pair.
         conflicts = [path for path in _same_stem_files(parent, target_image.stem)
                      if path != target_image]
         if conflicts:
             raise FileExistsError("副本文件名已被其他程序使用，请重新保存。")
-        _publish_no_replace(staged_video, target_video)
         published.append(FileFingerprint(target_video, video_identity.stat_key, video_identity.sha256))
+        try:
+            _publish_no_replace(staged_video, target_video)
+        except FileExistsError:
+            published.pop()
+            raise
         return SaveResult(target_image, target_video, mode, None,
                           source.image.path, source.video.path)
     except BaseException:
