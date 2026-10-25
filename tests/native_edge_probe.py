@@ -44,6 +44,64 @@ def apartment_snapshot():
             'type': kind.value, 'qualifier': qualifier.value}
 
 
+def observe_native_close(window, windows, policy, diagnostic):
+    """Measure the real clear/release while the HWND still exists, then Close."""
+    backend = policy._backend
+    hwnd = int(window.winId())
+    cookie = policy._tracked[id(window)]['cookie']
+    original_write, original_release = backend.write, backend.release
+    writes, releases = [], []
+    diagnostic.update(original_hwnd=hwnd, cookie=cookie, writes=writes, releases=releases,
+                      source='actual_clear_before_destroy')
+
+    def write(target, enabled):
+        if target != hwnd or enabled is not None:
+            return original_write(target, enabled)
+        record = {'owned_before': backend.is_own_window(hwnd),
+                  'cookie_present_before': backend.matches(hwnd, cookie)}
+        writes.append(record)
+        record['actual'] = original_write(target, enabled)
+        record['readback'] = dict(backend.last_readback)
+        record['owned_after'] = backend.is_own_window(hwnd)
+        return record['actual']
+
+    def release(target, value):
+        result = original_release(target, value)
+        if target == hwnd and value == cookie:
+            releases.append({'owned_after': backend.is_own_window(hwnd),
+                             'cookie_matches_after': backend.matches(hwnd, cookie)})
+        return result
+
+    with patch.object(backend, 'write', side_effect=write), patch.object(backend, 'release', side_effect=release):
+        windows.clear()
+        window.close()
+        QCoreApplication.processEvents()
+    diagnostic.update(old_hwnd_destroyed=not backend.is_own_window(hwnd),
+                      untracked=id(window) not in policy._tracked, policy=policy.report())
+    assert len(writes) == 1, diagnostic
+    actual = writes[0]
+    assert actual['owned_before'] and actual['owned_after'] and actual['cookie_present_before'], diagnostic
+    assert actual['actual'] == {'vt': api.VT_EMPTY, 'value': None}, diagnostic
+    assert actual['readback']['raw_vt'] == api.VT_EMPTY and actual['readback']['canonical_vt'] == api.VT_EMPTY, diagnostic
+    assert actual['readback']['value'] is None, diagnostic
+    assert releases == [{'owned_after': True, 'cookie_matches_after': False}], diagnostic
+    assert diagnostic['untracked'] and not backend.matches(hwnd, cookie), diagnostic
+    diagnostic.update(cleanup_observed_before_destroy=True, actual=actual['actual'],
+                      readback=dict(actual['readback']), native_dead_handle_rejected=False)
+    if diagnostic['old_hwnd_destroyed']:
+        try:
+            backend.read(hwnd)
+        except OSError as error:
+            diagnostic.update(native_dead_handle_rejected=True, dead_handle_error=str(error))
+        else:
+            raise AssertionError(f'Destroyed HWND accepted a read: {diagnostic}')
+    else:
+        diagnostic['post_close_fresh_read'] = backend.read(hwnd)
+        assert diagnostic['post_close_fresh_read'] == {'vt': api.VT_EMPTY, 'value': None}, diagnostic
+        assert backend.last_readback['raw_vt'] == api.VT_EMPTY, diagnostic
+    return diagnostic['actual']
+
+
 @contextmanager
 def trace_property_calls(report, current):
     """Observe the real ABI calls, preserving store ownership and return values."""
@@ -103,13 +161,13 @@ def run_probe(app, report):
                 'record': {key: record.get(key) for key in ('hwnd', 'cookie', 'set')} if record else None,
                 'policy': policy.report() if policy else None}
 
-    def check(stage, window, function, expected, policy=None):
+    def check(stage, window, function, expected, policy=None, *, readback=None):
         current[0] = stage
         row = {'stage': stage, 'expected': expected, 'before': snapshot(window, policy)}
         report['checks'].append(row)
         try:
             row['actual'] = function()
-            row['readback'] = dict(native.last_readback)
+            row['readback'] = dict(readback() if readback is not None else native.last_readback)
             assert row['actual'] == expected, f'{stage}: {row["actual"]!r} != {expected!r}'
             if expected['vt'] == api.VT_BOOL:
                 assert row['readback']['raw_vt'] in (api.VT_BOOL, api.VT_LPWSTR), row
@@ -121,7 +179,7 @@ def run_probe(app, report):
         except Exception as error:
             row.update(status='failed', error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
         finally:
-            row['readback'] = dict(native.last_readback)
+            row['readback'] = dict(readback() if readback is not None else native.last_readback)
             row['after'] = snapshot(window, policy)
         return row
 
@@ -216,14 +274,11 @@ def run_probe(app, report):
             check('policy_before_forgot_provider_true', simple, lambda: native.read(hwnd), true, policy)
             record = policy._tracked.get(id(simple))
             cookie = record['cookie'] if record else None
-            windows.clear()
-            simple.close()
-            app.processEvents()
-            check('policy_forgot_provider_close_empty', simple, lambda: native.read(hwnd), empty, policy)
-            report['forgot_provider_close'] = {'original_hwnd': hwnd,
-                'original_hwnd_owned': native.is_own_window(hwnd),
-                'cookie_matches': native.matches(hwnd, cookie) if cookie else None,
-                'policy': policy.report()}
+            close_observation = report['forgot_provider_close'] = {}
+            row = check('policy_forgot_provider_close_empty', simple,
+                        lambda: observe_native_close(simple, windows, policy, close_observation), empty, policy,
+                        readback=lambda: close_observation.get('readback', {}))
+            row['source'] = 'actual_clear_before_destroy'
             windows.append(simple)
             simple.showFullScreen()
             app.processEvents()

@@ -3,16 +3,17 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, Qt
+from PySide6.QtGui import QColor, QImage, QPalette
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QTreeWidgetItemIterator
+from PySide6.QtWidgets import QApplication, QTreeWidgetItemIterator, QVBoxLayout, QWidget
 
 from livegallery.folder_tree import FolderTree
-from livegallery.theme import DARK_STYLE, stylesheet_for, theme_tokens
+from livegallery.theme import DARK_STYLE, stylesheet_for, theme_palette, theme_tokens
 
 
 class FolderTreeTests(unittest.TestCase):
@@ -58,6 +59,69 @@ class FolderTreeTests(unittest.TestCase):
             position = QPoint(rect.left() + 140, rect.center().y())
         QTest.mouseClick(self.tree.viewport(), Qt.MouseButton.LeftButton, modifiers, position)
         self.app.processEvents()
+
+    def test_parent_stylesheet_queues_selection_palette_once_outside_repolish_with_latest_theme(self):
+        class Parent(QWidget):
+            style_depth = 0
+
+            def setStyleSheet(self, value):
+                self.style_depth += 1
+                try:
+                    return super().setStyleSheet(value)
+                finally:
+                    self.style_depth -= 1
+
+        parent = Parent()
+        QVBoxLayout(parent).addWidget(self.tree)
+        self.tree.setStyleSheet('')
+        parent.show()
+        self.app.processEvents()
+        try:
+            # Application palettes use blue Highlight; the sidebar's selected
+            # rows use separate theme tokens. Recreate that actual mismatch.
+            with patch.object(self.tree, '_applying_selection_palette', True):
+                self.tree.setPalette(theme_palette('dark'))
+            writes = []
+            original = self.tree.setPalette
+
+            def set_palette(value):
+                writes.append(parent.style_depth)
+                return original(value)
+
+            with patch.object(self.tree, 'setPalette', side_effect=set_palette):
+                for scheme in ('dark', 'light', 'dark', 'light'):
+                    parent.setProperty('liveviewerTheme', scheme)
+                    parent.setStyleSheet(stylesheet_for(scheme))
+                self.assertEqual(writes, [], 'Palette was mutated inside parent QSS repolish')
+                self.app.processEvents()
+                self.assertEqual(writes, [0], 'Repeated style notifications were not coalesced')
+                colors = theme_tokens('light')
+                self.assertEqual(self.tree.palette().color(QPalette.ColorRole.Highlight).name(), colors['selected'])
+                self.assertEqual(self.tree.palette().color(QPalette.ColorRole.HighlightedText).name(), colors['selected_text'])
+                for _ in range(4):
+                    QCoreApplication.sendEvent(self.tree, QEvent(QEvent.Type.PaletteChange))
+                self.app.processEvents()
+                self.assertEqual(writes, [0], 'Unchanged colors caused another native palette write')
+        finally:
+            self.tree.setParent(None)
+            parent.close()
+            parent.deleteLater()
+            self.app.processEvents()
+
+    def test_pending_selection_palette_update_dies_with_tree(self):
+        from shiboken6 import isValid
+        errors = []
+        tree = FolderTree()
+        timer = tree._selection_palette_timer
+        with patch('sys.excepthook', side_effect=lambda *error: errors.append(error)):
+            QCoreApplication.sendEvent(tree, QEvent(QEvent.Type.StyleChange))
+            self.assertTrue(timer.isActive())
+            tree.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.app.processEvents()
+        self.assertFalse(isValid(tree))
+        self.assertFalse(isValid(timer))
+        self.assertEqual(errors, [])
 
     def test_import_defaults_all_and_nested_roots_have_one_node_with_direct_counts(self):
         self.assertEqual(self.tree.known_directories, set(self.counts))
@@ -197,7 +261,7 @@ class FolderTreeTests(unittest.TestCase):
 
     def test_press_is_cancelled_by_structure_scroll_font_collapse_or_focus_and_release_never_toggles_another_row(self):
         counts = {self.root / f'folder-{row:03d}': 1 for row in range(50)}
-        for route in ('rebuild', 'scroll', 'font', 'collapse', 'focus'):
+        for route in ('rebuild', 'scroll', 'font', 'style', 'collapse', 'focus'):
             with self.subTest(route=route):
                 self.tree.set_directories((self.root,), counts, ())
                 self.tree._nodes[self.root].setExpanded(True)
@@ -215,6 +279,10 @@ class FolderTreeTests(unittest.TestCase):
                     self.tree.verticalScrollBar().setValue(4)
                 elif route == 'font':
                     font = self.tree.font(); font.setPixelSize(max(12, font.pixelSize()) + 2); self.tree.setFont(font)
+                elif route == 'style':
+                    QApplication.sendEvent(self.tree, QEvent(QEvent.Type.StyleChange))
+                    self.assertIsNone(self.tree._pointer, 'Gesture cancellation was deferred with the palette')
+                    self.assertTrue(self.tree._selection_palette_timer.isActive())
                 elif route == 'collapse':
                     self.tree._nodes[self.root].setExpanded(False)
                 else:

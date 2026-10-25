@@ -335,6 +335,50 @@ class WindowPolicyTests(unittest.TestCase):
         records = [entry for entry in self.policy.report()['diagnostics'] if entry['action'] == 'set']
         self.assertEqual(records[-1]['readback']['raw_value'], 'true')
 
+    def test_close_observer_verifies_real_clear_before_dead_or_surviving_handle(self):
+        from tests.native_edge_probe import observe_native_close
+
+        class ObservedBackend(FakeBackend):
+            alive = True
+
+            def is_own_window(self, hwnd):
+                return self.alive
+
+            def write(self, hwnd, value):
+                actual = super().write(hwnd, value)
+                self.last_readback = {'raw_vt': actual['vt'], 'canonical_vt': actual['vt'],
+                                      'value': actual['value']}
+                return actual
+
+            def read(self, hwnd):
+                if not self.alive:
+                    raise OSError('Native window is no longer owned')
+                self.last_readback = {'raw_vt': self.values[hwnd]['vt']}
+                return self.values[hwnd]
+
+        for destroyed in (False, True):
+            with self.subTest(old_hwnd_destroyed=destroyed):
+                self.backend = ObservedBackend()
+                self.policy._backend = self.backend
+                self.windows[:] = [self.window]
+                self.fullscreen()
+                original_close = self.window.close
+
+                def close():
+                    result = original_close()  # Real Qt Close dispatches the policy cleanup.
+                    self.backend.alive = not destroyed
+                    return result
+
+                diagnostic = {}
+                with patch.object(self.window, 'close', side_effect=close):
+                    actual = observe_native_close(self.window, self.windows, self.policy, diagnostic)
+                self.assertEqual(actual, {'vt': VT_EMPTY, 'value': None})
+                self.assertTrue(diagnostic['cleanup_observed_before_destroy'])
+                self.assertEqual(diagnostic['old_hwnd_destroyed'], destroyed)
+                self.assertEqual(diagnostic['native_dead_handle_rejected'], destroyed)
+                self.assertTrue(diagnostic['writes'][0]['owned_before'])
+                self.assertEqual(diagnostic['releases'], [{'owned_after': True, 'cookie_matches_after': False}])
+
     def test_unsupported_platform_does_not_load_native_api_or_create_hwnd(self):
         hidden = QWidget()
         policy = WindowEdgeGesturePolicy(lambda: [hidden], supported=False)
@@ -361,6 +405,7 @@ class NativeReadbackTests(unittest.TestCase):
             from PySide6.QtWidgets import QApplication, QWidget
             from livegallery.fullscreen_edge_gesture import FullscreenEdgeGesture
             from livegallery.native_fullscreen_gesture import NativeWindowGestureStore, VT_BOOL, VT_EMPTY
+            from tests.native_edge_probe import observe_native_close
             app=QApplication([])
             assert app.platformName()=='windows'
             errors=[]
@@ -393,8 +438,9 @@ class NativeReadbackTests(unittest.TestCase):
                 require_true(hwnd)
                 record=edge.native_policy._tracked[id(window)];cookie=record['cookie']
                 phase='provider_forgot_window_then_close'
-                windows.clear(); window.close(); app.processEvents()
-                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None},native.last_readback
+                close_observation={}
+                assert observe_native_close(window,windows,edge.native_policy,close_observation)=={'vt':VT_EMPTY,'value':None},close_observation
+                assert close_observation['cleanup_observed_before_destroy'] is True,close_observation
                 assert not native.matches(hwnd,cookie),edge.native_policy.report()
                 phase='reopen_after_close'
                 windows.append(window); window.showFullScreen(); app.processEvents();edge.native_policy.sync_now()
@@ -404,10 +450,11 @@ class NativeReadbackTests(unittest.TestCase):
                 assert native.read(int(window.winId()))=={'vt':VT_EMPTY,'value':None},native.last_readback
                 assert not edge.native_policy.report()['failures']
                 assert not errors, errors
-                print(json.dumps({'native':True,'set_get_empty_verified':True,'cookie_removed':True,'hardware':False,'raw_readbacks':raw}))
+                print(json.dumps({'native':True,'set_get_empty_verified':True,'cookie_removed':True,'hardware':False,
+                    'raw_readbacks':raw,'close_observation':close_observation}))
             except BaseException:
                 print(json.dumps({'status':'failed','phase':phase,'policy':edge.native_policy.report(),
-                    'last_readback':native.last_readback,'qt_errors':errors,
+                    'last_readback':native.last_readback,'qt_errors':errors,'close_observation':locals().get('close_observation'),
                     'current_hwnd':int(window.winId()) if window.testAttribute(Qt.WidgetAttribute.WA_WState_Created) else None,
                     'original_hwnd':locals().get('hwnd'),
                     'original_hwnd_owned':native.is_own_window(locals().get('hwnd')),

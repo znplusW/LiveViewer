@@ -1,7 +1,7 @@
 """Independent folder checkboxes with batched mouse and keyboard selection."""
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, QSignalBlocker, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPainterPath, QPalette, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QRubberBand, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTreeWidget, QTreeWidgetItem)
@@ -75,6 +75,9 @@ class FolderTree(QTreeWidget):
         self._suppress_release = False
         self._generation = 0
         self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        self._selection_palette_timer = QTimer(self)
+        self._selection_palette_timer.setSingleShot(True)
+        self._selection_palette_timer.timeout.connect(self._apply_selection_palette)
         self._apply_selection_palette()
         self.itemChanged.connect(self._item_changed)
         self.itemExpanded.connect(self.cancel_gesture)
@@ -105,6 +108,14 @@ class FolderTree(QTreeWidget):
         self._pointer = None
         self._rubber_band.hide()
 
+    def _queue_selection_palette(self):
+        # Parent QSS repolish is still traversing widgets during these events.
+        # Let that stack return before changing a child's native palette.
+        if (not getattr(self, '_applying_selection_palette', False)
+                and not self._selection_palette_timer.isActive()):
+            self._selection_palette_timer.start(0)
+
+    @Slot()
     def _apply_selection_palette(self):
         if getattr(self, '_applying_selection_palette', False):
             return
@@ -379,9 +390,9 @@ class FolderTree(QTreeWidget):
         event.accept()
 
     def event(self, event):
-        if hasattr(self, '_rubber_band') and event.type() in (
+        if hasattr(self, '_selection_palette_timer') and event.type() in (
                 QEvent.Type.PaletteChange, QEvent.Type.ApplicationPaletteChange, QEvent.Type.StyleChange):
-            self._apply_selection_palette()
+            self._queue_selection_palette()
         if hasattr(self, '_rubber_band') and event.type() in (
                 QEvent.Type.WindowDeactivate, QEvent.Type.Hide, QEvent.Type.FontChange,
                 QEvent.Type.StyleChange, QEvent.Type.DevicePixelRatioChange, QEvent.Type.ScreenChangeInternal):
