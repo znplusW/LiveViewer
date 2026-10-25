@@ -1674,6 +1674,7 @@ def _check_reference_touch_map(window, fixtures: Path, report_dir: Path):
     player = viewer._player
     row = next(row for row, item in enumerate(window.model.items) if item.image_path.stem == 'Portrait_HEVC')
     portrait_id = window.model.items[row].id
+    pinch_diagnostics = []
 
     def select_portrait():
         current_row = next(row for row, item in enumerate(window.model.items) if item.id == portrait_id)
@@ -1701,6 +1702,62 @@ def _check_reference_touch_map(window, fixtures: Path, report_dir: Path):
         def point(position):
             return surface.mapTo(surface.window(), surface.map_from_viewer(QPointF(position)).toPoint())
 
+        def view_geometry():
+            displayed = viewer.viewportTransform().mapRect(viewer._image_rect)
+            return {'viewport': [viewer.viewport().width(), viewer.viewport().height()],
+                    'image_scene': list(viewer._image_rect.getRect()),
+                    'displayed_image': list(displayed.getRect()),
+                    'scale': viewer.transform().m11(), 'fit_scale': viewer._fit_scale,
+                    'zoom': viewer.zoom_factor()}
+
+        def pinch_case(name, anchor_in_viewport, *, require_two_axes):
+            anchor = point(anchor_in_viewport)
+            mapped = surface.map_to_viewer(QPointF(surface.mapFrom(surface.window(), anchor)))
+            subject = viewer.mapToScene(mapped.toPoint())
+            before = view_geometry()
+            diagnostic = {'case': name, 'qpa': QApplication.platformName(),
+                          'source_name': window._displayed_item.image_path.name,
+                          'map_rect': list(surface.mapped_rect().getRect()),
+                          'anchor_in_window': [anchor.x(), anchor.y()],
+                          'mapped_anchor': [mapped.x(), mapped.y()],
+                          'scene_before': [subject.x(), subject.y()], 'before': before}
+            pinch_diagnostics.append(diagnostic)
+            first, second = anchor - QPoint(20, 0), anchor + QPoint(20, 0)
+            sequence.press(0, first, target).commit()
+            sequence.stationary(0).press(1, second, target).commit()
+            try:
+                sequence.move(0, first - QPoint(20, 0), target).move(1, second + QPoint(20, 0), target).commit()
+                after = view_geometry()
+                actual = viewer.mapToScene(mapped.toPoint())
+                delta = actual - subject
+                displayed = viewer.viewportTransform().mapRect(viewer._image_rect)
+                fitted = [axis for axis, size, available in (
+                    ('x', displayed.width(), viewer.viewport().width()),
+                    ('y', displayed.height(), viewer.viewport().height())) if size <= available]
+                diagnostic.update(after=after, scene_after=[actual.x(), actual.y()],
+                                  scene_error=[delta.x(), delta.y()], fitted_axes=fitted)
+                assert abs(after['zoom'] - before['zoom'] * 2) < .05, diagnostic
+                if require_two_axes:
+                    assert not fitted, diagnostic
+                    assert before['displayed_image'][2] > before['viewport'][0], diagnostic
+                    assert before['displayed_image'][3] > before['viewport'][1], diagnostic
+                    assert abs(mapped.x() - viewer._viewport_center().x()) > before['viewport'][0] * .05, diagnostic
+                    assert abs(mapped.y() - viewer._viewport_center().y()) > before['viewport'][1] * .05, diagnostic
+                    assert delta.manhattanLength() < 8, diagnostic
+                else:
+                    # QGraphicsView centers an axis whose entire image fits.
+                    # Only a scrollable axis can keep an off-center subject.
+                    if 'x' in fitted:
+                        assert abs(displayed.center().x() - viewer.viewport().width() / 2) < 2, diagnostic
+                    else:
+                        assert abs(delta.x()) < 8, diagnostic
+                    if 'y' in fitted:
+                        assert abs(displayed.center().y() - viewer.viewport().height() / 2) < 2, diagnostic
+                    else:
+                        assert abs(delta.y()) < 8, diagnostic
+            finally:
+                sequence.release(0, first - QPoint(20, 0), target).release(1, second + QPoint(20, 0), target).commit()
+
         center = point(viewer.viewport().rect().center())
         area = surface.mapped_rect()
         assert abs(area.width() / area.height() - viewer.viewport().width() / viewer.viewport().height()) < 1e-6
@@ -1724,16 +1781,16 @@ def _check_reference_touch_map(window, fixtures: Path, report_dir: Path):
             select_portrait()
             viewer.fit_image()
             center = point(viewer.viewport().rect().center())
-            anchor = center + QPoint(8, -5)
-            mapped = surface.map_to_viewer(QPointF(surface.mapFrom(surface.window(), anchor)))
-            subject = viewer.mapToScene(mapped.toPoint())
-            first, second = anchor - QPoint(20, 0), anchor + QPoint(20, 0)
-            sequence.press(0, first, target).commit()
-            sequence.stationary(0).press(1, second, target).commit()
-            sequence.move(0, first - QPoint(20, 0), target).move(1, second + QPoint(20, 0), target).commit()
-            assert abs(viewer.zoom_factor() - 2) < .05
-            assert (viewer.mapToScene(mapped.toPoint()) - subject).manhattanLength() < 8
-            sequence.release(0, first - QPoint(20, 0), target).release(1, second + QPoint(20, 0), target).commit()
+            viewport = viewer.viewport().size()
+            pinch_case('fit_to_two_with_axis_clamping', viewer._viewport_center() + QPointF(
+                viewport.width() * .05, -viewport.height() * .05), require_two_axes=False)
+            viewer.fit_image()
+            fill_scale = max(viewport.width() / viewer._image_rect.width(),
+                             viewport.height() / viewer._image_rect.height())
+            base_zoom = max(1.5, fill_scale * 1.25 / viewer._fit_scale)
+            viewer._zoom_at(base_zoom, viewer._viewport_center())
+            pinch_case('noncentral_two_axis_anchor', viewer._viewport_center() + QPointF(
+                viewport.width() * .1, -viewport.height() * .1), require_two_axes=True)
             viewer.stop_live()
             scale, before = viewer.transform().m11(), viewer._scene_center()
             sequence.press(0, center, target).commit()
@@ -1825,6 +1882,7 @@ def _check_reference_touch_map(window, fixtures: Path, report_dir: Path):
                 'cache_reused_without_io': True, 'hold_release_live': True,
                 'map_does_not_activate_preview': True, 'fit_swipe_and_zoom_pan': True,
                 'pinch_anchor': True, 'second_contact_no_live': True,
+                'pinch_geometry_cases': pinch_diagnostics,
                 'added_finger_cancels_hold': True,
                 'second_contact_pause_ms': original_hold + 80, 'hold_delay_ms': original_hold,
                 'blank_menu_at_map_finger': True, 'menu_release_keeps_popup': True,
@@ -1832,6 +1890,8 @@ def _check_reference_touch_map(window, fixtures: Path, report_dir: Path):
                 'source_change_discards_late_release': True, 'touch_target': 'QWindow',
                 'physical_touch_hardware': False}
     finally:
+        (report_dir / 'reference-map-pinch-diagnostics.json').write_text(
+            json.dumps(pinch_diagnostics, ensure_ascii=False, indent=2), encoding='utf-8')
         viewer.cancel_interaction()
         viewer.set_options(window.preferences.loop, window.preferences.muted,
                            preserve_zoom=window.preferences.preserve_zoom, hold_ms=original_hold,
