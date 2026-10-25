@@ -474,7 +474,8 @@ def _check_zoom_navigation_overview(viewer: ViewerCanvas, fixtures: Path, report
             'physical_touch_hardware': False}
 
 
-def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path, *, diagnostics=None, align_cursor=False):
+def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path, *, diagnostics=None,
+                                align_cursor=True, diagnostics_path: Path | None = None):
     from unittest.mock import patch
     from PySide6.QtCore import QEvent, QObject
     from PySide6.QtGui import QCursor, QInputDevice, QMouseEvent, QPointingDevice
@@ -589,9 +590,18 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path, *, diagn
                 position = center
                 device = known_pad if route == 'known-touchpad-drift' else QPointingDevice.primaryPointingDevice()
                 if align_cursor:
+                    # Explicit QMouseEvent injection does not move the native
+                    # cursor. Establish a consistent real-window input target;
+                    # this is a test precondition, not a product gesture fix.
                     QTest.mouseMove(viewer.viewport(), center)
                     QCoreApplication.processEvents()
                 snapshot('route-ready')
+                if align_cursor:
+                    ready = trace['snapshots'][-1]
+                    assert ready['cursor_inside'] and ready['cursor_local'] == ready['injected_local'], \
+                        f'{route}: native cursor does not match the injected starting point'
+                    assert ready['window_active'] and ready['window_exposed'], \
+                        f'{route}: input window is not active and exposed'
                 before_scale, before_center = viewer.transform().m11(), viewer._scene_center()
                 hints = QApplication.styleHints()
                 mouse_distance = 4 if route == 'known-touchpad-drift' else hints.mouseDoubleClickDistance()
@@ -627,6 +637,7 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path, *, diagn
                 assert not viewer.is_zoom_animating() and not viewer._click_timer.isActive()
                 results.append({'route': route, 'pause_before_drag_ms': hold + 80,
                                 'play_calls': playback.call_count, 'zoom_preserved': True, 'panned': True,
+                                'native_cursor_aligned': align_cursor,
                                 'input_timestamps_ms': [1000, 1020, 1100] if route != 'native-without-history' else [1100],
                                 'input_device': 'explicit touchpad fixture' if device is known_pad else 'primary pointer'})
             center = viewer.viewport().rect().center()
@@ -671,15 +682,20 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path, *, diagn
                 'native_history_independent': True, 'same_device_input_timestamps': True,
                 'known_touchpad_drift_guard': True, 'raw_second_contact_no_hold': True,
                 'raw_touch_qwindow_injection': True, 'raw_pause_before_drag_ms': original_hold + 80,
+                'native_cursor_aligned': align_cursor,
                 'mouse_guard_hold_delay_ms': hold, 'raw_hold_delay_ms': original_hold,
                 'independent_mouse_and_touch_hold_play': True, 'independent_hold_delay_ms': original_hold,
                 'hold_setting_unchanged': True, 'physical_touchpad_hardware': False}
-    except Exception:
+    except Exception as error:
         snapshot('failed')
+        trace.update(error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
         print('GESTURE_DIAGNOSTICS ' + json.dumps(trace, ensure_ascii=True), flush=True)
         raise
     finally:
         QApplication.instance().removeEventFilter(observer)
+        if diagnostics_path is not None:
+            diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+            diagnostics_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding='utf-8')
         viewer.stop_live()
         viewer.set_options(hold_ms=original_hold)
         viewer.fit_image()
@@ -2361,7 +2377,8 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         navigator = _check_zoom_navigation_overview(viewer, fixtures, report_dir)
         report['checks'].append({'check': 'zoom_navigation_thumbnail_and_viewport_rectangle',
                                  **navigator, 'status': 'passed'})
-        double_drag = _check_zoomed_double_tap_drag(viewer, fixtures)
+        double_drag = _check_zoomed_double_tap_drag(
+            viewer, fixtures, diagnostics_path=report_dir / 'zoomed-double-tap-drag-diagnostics.json')
         report['checks'].append({'check': 'zoomed_double_tap_drag_does_not_play_live',
                                  **double_drag, 'status': 'passed'})
         touch_menu = _check_blank_touch_context_menu(viewer, report_dir)
