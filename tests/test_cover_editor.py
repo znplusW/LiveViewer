@@ -95,7 +95,7 @@ class CoverEditorTests(unittest.TestCase):
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
-        self.folder = Path(self.temporary.name)
+        self.folder = Path(self.temporary.name).resolve()
         self.photo = self.folder / "Holiday.jpg"
         self.video = self.folder / "Holiday.MOV"
         Image.new("RGB", (200, 150), "blue").save(self.photo, "JPEG")
