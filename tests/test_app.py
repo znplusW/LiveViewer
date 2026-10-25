@@ -687,7 +687,7 @@ class WindowTests(unittest.TestCase):
         first, second, third = (self.picture(f'{name}/same.jpg') for name in ('A', 'B', 'C'))
         self.choose_cache('library')
         self.wait_until(lambda: self.window._cache_key == ('library', None))
-        entered, release = threading.Event(), threading.Event()
+        entered, release, left_gate = threading.Event(), threading.Event(), threading.Event()
         blocked = [False]
         stale = []
         def slow_scan(folder, **arguments):
@@ -697,12 +697,16 @@ class WindowTests(unittest.TestCase):
                     stale.extend(cache for cache in self.window._cache_stores.values()
                                  if getattr(cache, 'roots', ()) == (first.parent, second.parent))
                 entered.set()
-                release.wait(4)
+                release.wait()
+                left_gate.set()
             return scan_folder(folder, **arguments)
         try:
             with patch('livegallery.app.scan_folder', side_effect=slow_scan):
                 self.window.load_folders([first.parent, second.parent])
-                self.assertTrue(entered.wait(1))
+                # Entry follows real per-root cache/SQLite preparation, which
+                # has no one-second disk latency contract. Pump Qt events and
+                # retain bounded thread/cache diagnostics if preparation stalls.
+                self.wait_until(entered.is_set, timeout=15, stage='prepared multi-root scan entry')
                 before = time.monotonic()
                 self.window.load_folders([first.parent, third.parent])
                 self.assertLess(time.monotonic() - before, .3)
@@ -711,6 +715,7 @@ class WindowTests(unittest.TestCase):
                 self.assertEqual(set(self.window.cache.writer_roots), {first.parent, third.parent})
                 self.assertTrue(stale and stale[0]._closed)
                 self.assertFalse(self.window.cache.has_fallbacks)
+                self.assertFalse(left_gate.is_set(), 'Old scan must stay blocked until the overlapping load completes')
                 release.set()
                 self.wait_until(lambda: all(not thread.is_alive() for thread in self.window._load_threads))
                 self.assertEqual(self.window.folders, (first.parent, third.parent))
