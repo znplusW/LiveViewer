@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.detached_windows import FloatingMapWindow, PreviewWindow, accessible_geometry
-from livegallery.selftest import _wait
+from livegallery.selftest import _check_detached_preview_windows, _wait
 from livegallery.settings import Preferences
 
 
@@ -388,6 +388,22 @@ class DetachedWindowTests(unittest.TestCase):
         self.settle()
         self.assertLess(panel.height(), 640)
         self.assertEqual(self.window.preferences.map_bottom_height, 640)
+
+    def test_source_window_helper_proves_clamp_and_restore_when_native_size_is_capped(self):
+        fixtures = Path(__file__).parent / 'fixtures'
+        self.window.setMaximumSize(1028, 749)
+        self.window.load_folder(fixtures)
+        _wait(lambda: not self.window._scan_pending and self.window._shown_image_path is not None, 25)
+        result = _check_detached_preview_windows(self.window, fixtures, self.base / 'reports')
+        preferred = result['map_restore_preferred_height']
+        self.assertLess(result['clamped_map_height'], preferred)
+        self.assertEqual(result['map_large_restored_height'], preferred)
+        self.assertLess(preferred, 640)
+        for state in result['map_resize_actual_geometries'].values():
+            self.assertLessEqual(state['window'][0], 1028)
+            self.assertLessEqual(state['window'][1], 749)
+            self.assertEqual(state['preferred_height'], preferred)
+            self.assertGreaterEqual(state['overview'][1], 160)
 
     def test_qwindow_top_edge_swipe_exits_only_corresponding_fullscreen_and_keeps_overview_or_preview(self):
         self.window.fullscreen_edge_gesture.set_enabled_edges({'top'})

@@ -120,7 +120,7 @@ jobs:
         timeout-minutes: 3
         run: |
           $env:QT_QPA_PLATFORM = 'windows'
-          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-m', 'tests.settings_native_probe', '--source-context', '--expect-platform', 'windows', '--report', 'reports/native-settings-source-context.json' -PassThru -RedirectStandardOutput 'reports/preflight-settings-source-context.stdout.log' -RedirectStandardError 'reports/preflight-settings-source-context.stderr.log'
+          $process = Start-Process -FilePath (Get-Command python).Source -WorkingDirectory $PWD.Path -ArgumentList '-X', 'faulthandler', '-m', 'tests.settings_native_probe', '--source-context', '--expect-platform', 'windows', '--report', 'reports/native-settings-source-context.json' -PassThru -RedirectStandardOutput 'reports/preflight-settings-source-context.stdout.log' -RedirectStandardError 'reports/preflight-settings-source-context.stderr.log'
           $finished = $process.WaitForExit(150000)
           if (-not $finished) { Stop-Process -Id $process.Id -Force }
           $testExitCode = if ($finished) { $process.ExitCode } else { -1 }

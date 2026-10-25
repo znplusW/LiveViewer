@@ -3416,15 +3416,40 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
             assert window.viewer is viewer and viewer._player is player and window.model is model
             assert window._current_id == original_live_id and not viewer._play_requested
             window.grab().save(str(report_dir / f'reference-map-dock-{edge}.png'))
-        window.preferences.map_bottom_height = 640
+        def map_geometry():
+            return {'window': list(window.size().toTuple()), 'host': list(window._content_host.size().toTuple()),
+                    'overview': list(window.content.size().toTuple()), 'panel_height': panel.height(),
+                    'preferred_height': window.preferences.map_bottom_height}
+
+        # Native window managers can limit a requested large window to the
+        # monitor. Select a preference that actually fits its measured client
+        # area, while still requiring the smaller window to clamp that value.
+        window.resize(1500, 1120)
+        settle()
+        large_window_size = window.size()
+        large_geometry = map_geometry()
+        minimum_height = max(220, panel.minimumSizeHint().height())
+        overview_minimum = max(160, window.content.minimumSizeHint().height())
+        restore_target = min(640, max(minimum_height, window._content_host.height() - overview_minimum))
         window.resize(940, 650)
+        settle()
+        small_capacity = max(minimum_height, window._content_host.height() - 160)
+        assert restore_target > small_capacity, {'large': large_geometry, 'small': map_geometry(),
+                                                 'restore_target': restore_target, 'small_capacity': small_capacity}
+        window.preferences.map_bottom_height = restore_target
         window._clamp_touch_map()
         settle()
         clamped_height = panel.height()
-        assert clamped_height < 640 and window.preferences.map_bottom_height == 640
-        window.resize(1500, 1120)
+        small_geometry = map_geometry()
+        assert clamped_height < restore_target and window.preferences.map_bottom_height == restore_target, small_geometry
+        assert window.content.height() >= 160, small_geometry
+        window.resize(large_window_size)
         settle()
-        assert panel.height() == 640 and window.preferences.map_bottom_height == 640
+        restored_height = panel.height()
+        restored_geometry = map_geometry()
+        assert restored_height == restore_target and window.preferences.map_bottom_height == restore_target, {
+            'small': small_geometry, 'large': restored_geometry, 'restore_target': restore_target}
+        assert window.content.height() >= 160, restored_geometry
         window.preferences.map_bottom_height = original['map_bottom_height']
         window._dock_touch_map('left')
         panel.location.showPopup()
@@ -3499,6 +3524,9 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
                 'pure_preview_client_and_fullscreen_live': True, 'virtual_touchpad_button_label': '虚拟触控板',
                 'map_docks_left_right_bottom_and_floats': True, 'mouse_and_qwindow_touch_resize_overview': True,
                 'independent_preferred_dimensions_and_temporary_clamp': True, 'clamped_map_height': clamped_height,
+                'map_restore_preferred_height': restore_target,
+                'map_large_restored_height': restored_height,
+                'map_resize_actual_geometries': {'small': small_geometry, 'large': restored_geometry},
                 'map_close_hides_only_and_redock_keeps_last_edge': True,
                 'preview_return_and_close_restore_single_and_hide_map': True, 'main_close_removes_auxiliary_windows': True,
                 'geometry_restored_and_startup_stays_normal': True, 'offscreen_and_screen_gap_recovery': True,
