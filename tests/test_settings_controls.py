@@ -255,6 +255,35 @@ class SettingsControlTests(unittest.TestCase):
         QTest.keyClick(self.dialog.live_key, Qt.Key.Key_J)
         self.assertEqual(self.dialog.live_key.keySequence(), QKeySequence('J'))
 
+    def test_routed_touch_uses_page_children_when_desktop_hit_test_is_unavailable(self):
+        # On Windows, native QWindow touch delivery can be valid while the
+        # desktop-wide widgetAt lookup returns None (e.g. after Explorer use).
+        # The receiver is already known; a second desktop lookup must not lose
+        # taps or redirect them to a different window at the same coordinates.
+        unrelated = QWidget()
+        try:
+            for desktop_target in (None, unrelated):
+                with self.subTest(desktop_target=desktop_target), \
+                        patch.object(QApplication, 'widgetAt', return_value=desktop_target):
+                    before = self.dialog.autoplay.isChecked()
+                    changed = QSignalSpy(self.dialog.autoplay.toggled)
+                    clicked = QSignalSpy(self.dialog.autoplay.clicked)
+                    self.page_touch(self.dialog.autoplay)
+                    self.assertEqual(self.dialog.autoplay.isChecked(), not before)
+                    self.assertEqual((changed.count(), clicked.count()), (1, 1))
+                    self.page_touch(self.dialog.theme_mode)
+                    self.assertTrue(self.dialog.theme_mode.view().isVisible())
+                    self.dialog.theme_mode.hidePopup()
+                    self.page_touch(self.dialog.hold.lineEdit())
+                    self.assertTrue(self.dialog.hold.lineEdit().hasFocus())
+                    before = self.dialog.autoplay.isChecked()
+                    start = self.bar.value()
+                    self.page_touch(self.dialog.hold.lineEdit(), delta=QPoint(0, -90))
+                    self.assertEqual(self.bar.value(), start + 90)
+                    self.assertEqual(self.dialog.autoplay.isChecked(), before)
+        finally:
+            unrelated.deleteLater()
+
     def test_cancelled_settings_contact_does_not_toggle_and_mouse_remains_usable(self):
         before = self.dialog.autoplay.isChecked()
         self.page_touch(self.dialog.autoplay, cancel=True)

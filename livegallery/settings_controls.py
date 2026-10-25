@@ -196,7 +196,13 @@ class SettingsScrollArea(QScrollArea):
                 self._touch_device = event.pointingDevice()
                 self._touch_id = points[0].id()
                 self._touch_start = QPointF(points[0].globalPosition())
-                target = QApplication.widgetAt(self._touch_start.toPoint())
+                viewport = self.viewport()
+                local = viewport.mapFromGlobal(self._touch_start.toPoint())
+                # Qt already routed this contact to our page. Windows desktop
+                # hit testing can return no widget after another native window
+                # was used, even while our visible viewport receives the touch.
+                # Resolve within this receiver, including nested spin editors.
+                target = viewport.childAt(local) if viewport.rect().contains(local) else None
                 # Keep the Python wrapper alive until release. Internal Qt
                 # editors otherwise may have no Python owner between events.
                 self._touch_target = target if self._belongs_to_page(target) else None
