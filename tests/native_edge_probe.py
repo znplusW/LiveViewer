@@ -18,7 +18,7 @@ import tempfile
 import traceback
 from unittest.mock import patch
 
-from PySide6.QtCore import QCoreApplication, QEvent
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QWidget
 
 from livegallery import native_fullscreen_gesture as api
@@ -94,10 +94,10 @@ def run_probe(app, report):
     true, empty = {'vt': api.VT_BOOL, 'value': True}, {'vt': api.VT_EMPTY, 'value': None}
 
     def snapshot(window, policy=None):
-        hwnd = int(window.winId())
+        hwnd = int(window.winId()) if window.testAttribute(Qt.WidgetAttribute.WA_WState_Created) else 0
         record = policy._tracked.get(id(window)) if policy else None
         return {'hwnd': hwnd, 'own_window': native.is_own_window(hwnd),
-                'cookie': native.user.GetPropW(hwnd, api.COOKIE_NAME),
+                'cookie': native.user.GetPropW(hwnd, api.COOKIE_NAME) if hwnd else None,
                 'visible': window.isVisible(), 'fullscreen': window.isFullScreen(),
                 'active': window.isActiveWindow(),
                 'record': {key: record.get(key) for key in ('hwnd', 'cookie', 'set')} if record else None,
@@ -190,7 +190,8 @@ def run_probe(app, report):
 
         simple = QWidget()
         simple.setObjectName('native-edge-probe-policy')
-        edge = FullscreenEdgeGesture(lambda: [simple])
+        windows = [simple]
+        edge = FullscreenEdgeGesture(lambda: windows)
         try:
             simple.showFullScreen()
             app.processEvents()
@@ -208,6 +209,28 @@ def run_probe(app, report):
             app.processEvents()
             policy.sync_now()
             check('policy_exit_empty', simple, lambda: native.read(hwnd), empty, policy)
+            simple.showFullScreen()
+            app.processEvents()
+            policy.sync_now()
+            hwnd = int(simple.winId())
+            check('policy_before_forgot_provider_true', simple, lambda: native.read(hwnd), true, policy)
+            record = policy._tracked.get(id(simple))
+            cookie = record['cookie'] if record else None
+            windows.clear()
+            simple.close()
+            app.processEvents()
+            check('policy_forgot_provider_close_empty', simple, lambda: native.read(hwnd), empty, policy)
+            report['forgot_provider_close'] = {'original_hwnd': hwnd,
+                'original_hwnd_owned': native.is_own_window(hwnd),
+                'cookie_matches': native.matches(hwnd, cookie) if cookie else None,
+                'policy': policy.report()}
+            windows.append(simple)
+            simple.showFullScreen()
+            app.processEvents()
+            policy.sync_now()
+            check('policy_reopen_after_close_true', simple, lambda: native.read(int(simple.winId())), true, policy)
+            edge.close()
+            check('policy_shutdown_empty', simple, lambda: native.read(int(simple.winId())), empty, policy)
             report['standalone_policy'] = policy.report()
         finally:
             report['standalone_policy_before_cleanup'] = edge.native_policy.report()

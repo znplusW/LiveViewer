@@ -48,6 +48,8 @@ jobs:
           New-Item -ItemType Directory -Force 'reports' | Out-Null
           python -X faulthandler -m tests.native_edge_probe --report reports/native-edge-probe.json --expect-platform windows
           if ($LASTEXITCODE -ne 0) { throw 'Native fullscreen window property readback failed' }
+          python -X faulthandler -m unittest tests.test_native_fullscreen_gesture.NativeReadbackTests -v
+          if ($LASTEXITCODE -ne 0) { throw 'Native fullscreen window property lifecycle failed' }
       - name: Diagnose native gesture cursor ownership
         if: ${{ inputs.preflight_only }}
         shell: pwsh

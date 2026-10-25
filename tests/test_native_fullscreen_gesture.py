@@ -356,18 +356,23 @@ class WindowPolicyTests(unittest.TestCase):
 class NativeReadbackTests(unittest.TestCase):
     def test_actual_hwnd_set_get_bool_true_and_vt_empty_cleanup(self):
         script = textwrap.dedent('''
-            import json, os, sys
+            import json, os, sys, traceback
+            from PySide6.QtCore import Qt
             from PySide6.QtWidgets import QApplication, QWidget
             from livegallery.fullscreen_edge_gesture import FullscreenEdgeGesture
             from livegallery.native_fullscreen_gesture import NativeWindowGestureStore, VT_BOOL, VT_EMPTY
             app=QApplication([])
             assert app.platformName()=='windows'
             errors=[]
-            sys.excepthook=lambda kind,value,tb:errors.append(f'{kind.__name__}: {value}')
+            def report_error(kind,value,tb):
+                errors.append(f'{kind.__name__}: {value}')
+                traceback.print_exception(kind,value,tb)
+            sys.excepthook=report_error
             window=QWidget(); windows=[window]
             edge=FullscreenEdgeGesture(lambda:windows)
             native=NativeWindowGestureStore()
             raw=[]
+            phase='created'
             def require_true(hwnd):
                 assert native.read(hwnd)=={'vt':VT_BOOL,'value':True}, native.last_readback
                 record=dict(native.last_readback);raw.append(record)
@@ -375,25 +380,39 @@ class NativeReadbackTests(unittest.TestCase):
                 assert record['conversion_succeeded'] is True,record
                 assert record['canonical_vt']==11 and record['value'] is True,record
             try:
+                phase='initial_fullscreen'
                 window.showFullScreen(); app.processEvents(); edge.native_policy.sync_now()
                 hwnd=int(window.winId())
                 require_true(hwnd)
                 assert edge.native_policy.report()['native_api_used']
+                phase='explicit_empty'
                 edge.set_enabled_edges([])
-                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None}
+                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None},native.last_readback
+                phase='reenabled_fullscreen'
                 edge.set_enabled_edges(['left']); app.processEvents(); edge.native_policy.sync_now()
                 require_true(hwnd)
                 record=edge.native_policy._tracked[id(window)];cookie=record['cookie']
+                phase='provider_forgot_window_then_close'
                 windows.clear(); window.close(); app.processEvents()
-                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None}
-                assert not native.matches(hwnd,cookie)
+                assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None},native.last_readback
+                assert not native.matches(hwnd,cookie),edge.native_policy.report()
+                phase='reopen_after_close'
                 windows.append(window); window.showFullScreen(); app.processEvents();edge.native_policy.sync_now()
                 require_true(int(window.winId()))
+                phase='edge_shutdown'
                 edge.close()
-                assert native.read(int(window.winId()))=={'vt':VT_EMPTY,'value':None}
+                assert native.read(int(window.winId()))=={'vt':VT_EMPTY,'value':None},native.last_readback
                 assert not edge.native_policy.report()['failures']
                 assert not errors, errors
                 print(json.dumps({'native':True,'set_get_empty_verified':True,'cookie_removed':True,'hardware':False,'raw_readbacks':raw}))
+            except BaseException:
+                print(json.dumps({'status':'failed','phase':phase,'policy':edge.native_policy.report(),
+                    'last_readback':native.last_readback,'qt_errors':errors,
+                    'current_hwnd':int(window.winId()) if window.testAttribute(Qt.WidgetAttribute.WA_WState_Created) else None,
+                    'original_hwnd':locals().get('hwnd'),
+                    'original_hwnd_owned':native.is_own_window(locals().get('hwnd')),
+                    'visible':window.isVisible(),'fullscreen':window.isFullScreen()}),flush=True)
+                raise
             finally:
                 edge.close();window.close();window.deleteLater();app.processEvents()
         ''')
