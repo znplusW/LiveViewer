@@ -12,7 +12,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel, QWidget
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.detached_windows import FloatingMapWindow, PreviewWindow, accessible_geometry
@@ -90,12 +90,127 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertIn(expected.name, preview.windowTitle())
         self.assertFalse(window.film.isVisible())
 
+    def test_each_detach_starts_native_maximized_ignoring_saved_window_state_and_keeps_normal_rect(self):
+        for state in ('first', 'normal', 'maximized', 'fullscreen', 'minimized'):
+            with self.subTest(saved_state=state):
+                donor = QWidget()
+                try:
+                    donor.setGeometry(60, 70, 520, 360)
+                    donor.show()
+                    self.settle()
+                    normal = QRect(donor.geometry())
+                    if state == 'maximized':
+                        donor.showMaximized()
+                    elif state == 'fullscreen':
+                        donor.showFullScreen()
+                    elif state == 'minimized':
+                        donor.showMinimized()
+                    self.settle()
+                    self.window.preferences.preview_geometry = '' if state == 'first' else bytes(donor.saveGeometry().toHex()).decode('ascii')
+                    self.window.preferences.preview_screen = donor.screen().name()
+                finally:
+                    donor.close()
+                    donor.deleteLater()
+                    self.settle()
+                preview = self.detach()
+                self.assertTrue(preview.isMaximized())
+                self.assertFalse(preview.isFullScreen() or preview.isMinimized())
+                self.assertFalse(preview.windowFlags() & Qt.WindowType.FramelessWindowHint)
+                self.assertEqual(preview.screen().name(), self.window.preferences.preview_screen)
+                preview.showNormal()
+                self.settle()
+                if state != 'first':
+                    self.assertEqual(preview.geometry(), normal)
+                preview.close()
+                self.settle()
+
+    def test_actual_main_fullscreen_button_and_escape_f11_restore_preview_entering_state(self):
+        preview = self.detach()
+        self.assertTrue(preview.isMaximized() and not preview.isFullScreen())
+        for maximized, key in ((True, Qt.Key.Key_Escape), (True, Qt.Key.Key_F11), (False, Qt.Key.Key_Escape)):
+            with self.subTest(maximized=maximized, exit_key=key):
+                if not maximized:
+                    preview.showNormal()
+                    preview.setGeometry(60, 70, 520, 360)
+                    self.settle()
+                before = QRect(preview.normalGeometry())
+                self.window.activateWindow()
+                self.window.raise_()
+                self.settle()
+                button = self.window.fullscreen_button
+                target = self.window.windowHandle()
+                QTest.mouseClick(target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                                 button.mapTo(self.window, button.rect().center()))
+                self.settle()
+                self.assertTrue(preview.isFullScreen())
+                self.assertFalse(self.window._fullscreen_active)
+                preview.activateWindow()
+                self.window.viewer.setFocus()
+                self.settle()
+                QTest.keyClick(preview.windowHandle(), key)
+                self.settle()
+                self.assertFalse(preview.isFullScreen())
+                self.assertEqual(preview.isMaximized(), maximized)
+                self.assertEqual(preview.normalGeometry(), before)
+                if not maximized:
+                    self.assertEqual(preview.geometry(), before)
+
+    def test_maximized_preview_screen_recovery_does_not_rewrite_restore_geometry(self):
+        preview = self.detach()
+        preview.showNormal()
+        self.settle()
+        preview.setGeometry(60, 70, 520, 360)
+        self.settle()
+        preview.showMaximized()
+        self.settle()
+        normal = QRect(preview.normalGeometry())
+        with patch.object(preview, 'geometry', return_value=QRect(-30000, -20000, 1200, 900)), \
+                patch.object(preview, 'setGeometry', wraps=preview.setGeometry) as set_geometry:
+            self.window._recover_auxiliary_windows()
+            self.settle()
+            set_geometry.assert_not_called()
+        self.assertTrue(preview.isMaximized() and not preview.isFullScreen())
+        self.assertEqual(preview.normalGeometry(), normal)
+        preview.showNormal()
+        self.settle()
+        self.assertEqual(preview.geometry(), normal)
+
+    def test_initial_presented_geometry_signal_is_once_and_pending_redock_is_cancelled(self):
+        auxiliary = PreviewWindow()
+        ready = QSignalSpy(auxiliary.initialGeometryReady)
+        try:
+            auxiliary.show_initial_maximized()
+            self.settle()
+            self.assertEqual(ready.count(), 1)
+            for _ in range(4):
+                auxiliary.update()
+                self.settle()
+            self.assertEqual(ready.count(), 1)
+        finally:
+            auxiliary.shutdown()
+            auxiliary.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            self.settle()
+        self.window._detach_preview()
+        preview = self.window.preview_window
+        cancelled = QSignalSpy(preview.initialGeometryReady)
+        preview._initial_geometry_timer.start(0)
+        self.window._redock_preview()
+        self.settle()
+        self.assertEqual(cancelled.count(), 0)
+        self.assertFalse(self.window._detached)
+        self.assertIs(self.window.content.currentWidget(), self.window.viewer)
+
     def test_reparent_preserves_real_transform_and_center_without_autoplay(self):
         window = self.window
-        window.viewer._zoom_at(2.5, window.viewer._viewport_center())
+        viewer = window.viewer
+        available = window.screen().availableGeometry().size()
+        fill_scale = max(available.width() / viewer._image_rect.width(),
+                         available.height() / viewer._image_rect.height())
+        viewer._zoom_at(max(2.5, fill_scale * 1.2 / viewer._fit_scale), viewer._viewport_center())
         before = window.viewer.transform(), window.viewer._scene_center()
         with patch.object(window.viewer, 'play_live_once') as play:
-            for _ in range(2):
+            for _ in range(4):
                 self.detach()
                 self.assertEqual(window.viewer.transform(), before[0])
                 self.assertLess((window.viewer._scene_center() - before[1]).manhattanLength(), 5)
@@ -105,6 +220,33 @@ class DetachedWindowTests(unittest.TestCase):
                 self.assertLess((window.viewer._scene_center() - before[1]).manhattanLength(), 5)
                 self.assertIs(window.content.currentWidget(), window.viewer)
             play.assert_not_called()
+
+    def test_maximized_reparent_preserves_scrollable_axis_and_keeps_fitted_axis_centered(self):
+        viewer = self.window.viewer
+        available = self.window.screen().availableGeometry().size()
+        width_scale = available.width() / viewer._image_rect.width()
+        height_scale = available.height() / viewer._image_rect.height()
+        # This landscape fixture is wider than the maximized viewport's aspect:
+        # choose an actual scale where X can pan and Y must remain centered.
+        self.assertLess(width_scale, height_scale)
+        scale = (width_scale + height_scale) / 2
+        viewer._zoom_at(scale / viewer._fit_scale, viewer._viewport_center())
+        viewer._pan_by(QPoint(0, -55))
+        expected_x = viewer._scene_center().x()
+        transform = viewer.transform()
+        for _ in range(3):
+            self.detach()
+            image = viewer.viewportTransform().mapRect(viewer._image_rect)
+            self.assertEqual(viewer.transform(), transform)
+            self.assertGreater(image.width(), viewer.viewport().width())
+            self.assertLess(image.height(), viewer.viewport().height())
+            self.assertLess(abs(viewer._scene_center().x() - expected_x), 2)
+            self.assertLess(abs(image.center().y() - viewer.viewport().height() / 2), 1)
+            self.assertGreaterEqual(image.top(), 0)
+            self.assertLessEqual(image.bottom(), viewer.viewport().height())
+            self.assertEqual(viewer.verticalScrollBar().minimum(), viewer.verticalScrollBar().maximum())
+            self.window._redock_preview()
+            self.settle()
 
     def test_detach_mid_zoom_applies_deferred_high_resolution_before_capturing_view(self):
         viewer = self.window.viewer
@@ -191,6 +333,8 @@ class DetachedWindowTests(unittest.TestCase):
 
     def test_preview_close_redocks_and_startup_restores_geometry_without_opening_auxiliary_windows(self):
         preview = self.detach()
+        preview.showNormal()
+        self.settle()
         preview.resize(740, 530)
         self.settle()
         preview._remember_geometry()
@@ -235,6 +379,8 @@ class DetachedWindowTests(unittest.TestCase):
 
     def test_display_recovery_uses_real_available_screen_and_preserves_live_window(self):
         preview = self.detach()
+        preview.showNormal()
+        self.settle()
         preview.move(-30000, -20000)
         self.window._recover_auxiliary_windows()
         self.settle()

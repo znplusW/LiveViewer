@@ -933,6 +933,12 @@ class MainWindow(QMainWindow):
             else:
                 self.viewer.setTransform(transform)
                 self.viewer.centerOn(center)
+                # centerOn uses the view's half-pixel geometric center while
+                # our saved point is the integer viewport center. Correct the
+                # scroll pixels once so repeated reparenting cannot drift.
+                offset = self.viewer.mapFromScene(center) - self.viewer.viewport().rect().center()
+                self.viewer.horizontalScrollBar().setValue(self.viewer.horizontalScrollBar().value() + offset.x())
+                self.viewer.verticalScrollBar().setValue(self.viewer.verticalScrollBar().value() + offset.y())
                 self.viewer._fit_mode = False
                 self.viewer.zoom_changed.emit(self.viewer.zoom_factor())
 
@@ -953,6 +959,8 @@ class MainWindow(QMainWindow):
         self._detached_generation += 1
         generation = self._detached_generation
         preview = self.preview_window = PreviewWindow()
+        preview.initialGeometryReady.connect(
+            lambda: self._restore_view_after_move(transform, center, fitted, generation, identity))
         preview.returnRequested.connect(self._redock_preview)
         preview.geometryRemembered.connect(lambda geometry, screen: self._remember_auxiliary_geometry('preview', geometry, screen))
         preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -968,7 +976,7 @@ class MainWindow(QMainWindow):
         self.map_button.setVisible(True)
         self.map_button.setChecked(False)
         self._update_window_group()
-        preview.show()
+        preview.show_initial_maximized(self.preferences.preview_screen)
         self._sync_preview_state()
         QTimer.singleShot(0, lambda: self._restore_view_after_move(transform, center, fitted, generation, identity))
 

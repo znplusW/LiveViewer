@@ -1,7 +1,7 @@
 """Native auxiliary windows and dock chrome; media stays in the one viewer."""
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 from shiboken6 import isValid
@@ -64,6 +64,10 @@ class AuxiliaryWindow(QWidget):
             if screen is not None:
                 self.setGeometry(screen.geometry())
             return
+        if self.isMaximized():
+            # The window manager owns its maximized geometry. Applying a
+            # screen-sized rect here would overwrite the normal restore rect.
+            return
         target = accessible_geometry(self.geometry(), [s.availableGeometry() for s in QApplication.screens()])
         if target.isValid() and target != self.geometry():
             self.setGeometry(target)
@@ -99,12 +103,17 @@ class AuxiliaryWindow(QWidget):
 
 class PreviewWindow(AuxiliaryWindow):
     returnRequested = Signal()
+    initialGeometryReady = Signal()
 
     def __init__(self):
         super().__init__('LiveViewer · 独立预览窗')
         self.setMinimumSize(320, 240)
-        self._fullscreen_geometry = None
+        self._fullscreen_normal_geometry = None
         self._fullscreen_maximized = False
+        self._initial_show_pending = False
+        self._initial_geometry_timer = QTimer(self)
+        self._initial_geometry_timer.setSingleShot(True)
+        self._initial_geometry_timer.timeout.connect(self._initial_geometry_ready)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.content = QStackedWidget()
@@ -142,6 +151,31 @@ class PreviewWindow(AuxiliaryWindow):
         self.content.setCurrentWidget(viewer)
         viewer.show()
 
+    def show_initial_maximized(self, preferred_screen=''):
+        """Every explicit detach starts framed and maximized, never pure mode."""
+        self._initial_show_pending = True
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        screen = next((screen for screen in QApplication.screens() if screen.name() == preferred_screen), None)
+        if screen is not None:
+            self.setScreen(screen)
+            self.setGeometry(accessible_geometry(self.geometry(), [screen.availableGeometry()]))
+        else:
+            self.recover_to_screens()
+        self.showMaximized()
+
+    @Slot()
+    def _initial_geometry_ready(self):
+        if not self._shutdown and isValid(self):
+            self.initialGeometryReady.emit()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._initial_show_pending:
+            self._initial_show_pending = False
+            # Native maximization can resize the viewport after the initial
+            # show's zero timer. Restore the photo once at its presented size.
+            self._initial_geometry_timer.start(0)
+
     def take_viewer(self):
         viewer, self.viewer = self.viewer, None
         if viewer is not None:
@@ -161,13 +195,18 @@ class PreviewWindow(AuxiliaryWindow):
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
-            self.showNormal()
-            if self._fullscreen_geometry:
-                self.restoreGeometry(self._fullscreen_geometry)
             if self._fullscreen_maximized:
+                # Avoid a transient normal state: its asynchronous native
+                # resize can replace the remembered restore rect with the
+                # maximized size after the next state change.
                 self.showMaximized()
+            else:
+                self.showNormal()
+                if self._fullscreen_normal_geometry is not None:
+                    self.setGeometry(accessible_geometry(self._fullscreen_normal_geometry,
+                        [screen.availableGeometry() for screen in QApplication.screens()]))
         else:
-            self._fullscreen_geometry = self.saveGeometry()
+            self._fullscreen_normal_geometry = self.normalGeometry()
             self._fullscreen_maximized = self.isMaximized()
             self.showFullScreen()
 

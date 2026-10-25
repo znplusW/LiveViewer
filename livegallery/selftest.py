@@ -3484,6 +3484,7 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
         settle()
         preview = window.preview_window
         assert window._detached and preview.isWindow() and preview.windowHandle().isExposed()
+        assert preview.isMaximized() and not preview.isFullScreen() and not preview.isMinimized()
         preview_frame_verified = native_frame(preview)
         assert window.viewer is viewer and viewer._player is player and window.model is model
         assert preview.content.currentWidget() is viewer and window.content.currentWidget() is window.grid
@@ -3578,12 +3579,30 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
         settle()
         assert panel.isVisible() and panel.edge == 'left' and not floating.isVisible()
         assert not window.preferences.map_floating
-        window._toggle_fullscreen()
+        normal_before_fullscreen = QRect(preview.normalGeometry())
+        for exit_key in (Qt.Key.Key_Escape, Qt.Key.Key_F11):
+            window.activateWindow()
+            window.raise_()
+            settle()
+            button = window.fullscreen_button
+            QTest.mouseClick(window.windowHandle(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                             button.mapTo(window, button.rect().center()))
+            settle()
+            assert preview.isFullScreen() and not preview.isAncestorOf(panel) and not preview.isAncestorOf(window.film)
+            assert not window._fullscreen_active
+            assert preview.live_badge.isVisible() and preview.live_badge.width() >= preview.live_badge.sizeHint().width()
+            preview.grab().save(str(report_dir / 'detached-preview-fullscreen.png'))
+            preview.activateWindow()
+            viewer.setFocus()
+            settle()
+            QTest.keyClick(preview.windowHandle(), exit_key)
+            settle()
+            assert preview.isMaximized() and not preview.isFullScreen() and not preview.isMinimized()
+            assert preview.normalGeometry() == normal_before_fullscreen, {
+                'before': normal_before_fullscreen.getRect(), 'after': preview.normalGeometry().getRect()}
+        preview.showNormal()
         settle()
-        assert preview.isFullScreen() and not preview.isAncestorOf(panel) and not preview.isAncestorOf(window.film)
-        assert preview.live_badge.isVisible() and preview.live_badge.width() >= preview.live_badge.sizeHint().width()
-        preview.grab().save(str(report_dir / 'detached-preview-fullscreen.png'))
-        window._toggle_fullscreen()
+        preview.resize(620, 440)
         settle()
         preview.move(-30000, -20000)
         window._recover_auxiliary_windows()
@@ -3591,8 +3610,16 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
         assert any(screen.availableGeometry().intersects(preview.geometry()) for screen in QApplication.screens())
         assert QRect(0, 0, 800, 600).contains(accessible_geometry(QRect(1000, 0, 300, 300),
                                         [QRect(0, 0, 800, 600), QRect(1600, 0, 800, 600)]))
+        # Store an ordinary, reachable normal rect. A native restore is allowed
+        # to move a window at the extreme top edge to make its title bar usable.
+        available = preview.screen().availableGeometry()
+        preview.move(available.topLeft() + QPoint(40, 60))
+        settle()
         preview._remember_geometry()
-        remembered_size = preview.size()
+        remembered_normal_geometry = QRect(preview.geometry())
+        preview.showMaximized()
+        settle()
+        preview._remember_geometry()
         window._save_preferences()
         saved = Preferences.load()
         assert saved.preview_geometry and saved.map_dock_edge == 'left'
@@ -3602,8 +3629,13 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
         assert not panel.isVisible() and window.content.currentWidget() is viewer and not window._grid_mode
         window._detach_preview()
         settle()
-        assert window.preview_window.size() == remembered_size, {
-            'saved_size': remembered_size.toTuple(), 'restored_size': window.preview_window.size().toTuple()}
+        assert window.preview_window.isMaximized() and not window.preview_window.isFullScreen()
+        assert not window.preview_window.isMinimized()
+        window.preview_window.showNormal()
+        settle()
+        assert window.preview_window.geometry() == remembered_normal_geometry, {
+            'saved_normal_rect': remembered_normal_geometry.getRect(),
+            'restored_normal_rect': window.preview_window.geometry().getRect()}
         window.preview_window.close()
         settle()
         assert not window._detached and window.content.currentWidget() is viewer
@@ -3625,6 +3657,10 @@ def _check_detached_preview_windows(window, fixtures: Path, report_dir: Path):
         assert shutdown_probe.preview_window is None and shutdown_probe.touch_map_window is None
         return {'same_viewer_player_and_catalog': True, 'native_preview_and_floating_windows': True,
                 'windows_native_titlebar_and_resize_frame': preview_frame_verified and floating_frame_verified,
+                'preview_initially_maximized_not_fullscreen': True,
+                'preview_fullscreen_button_escape_f11_restore_maximized': True,
+                'preview_saved_normal_geometry_restored': True,
+                'preview_normal_restore_rect': list(remembered_normal_geometry.getRect()),
                 'sidebar_action_beside_folder_label_and_dynamic_text': True,
                 'long_folder_path_elided_without_hiding_action': True,
                 'sidebar_visibility_survives_fullscreen': True,
