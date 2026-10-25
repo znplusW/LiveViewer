@@ -1942,6 +1942,9 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
                     snapshot['actual'] = native._backend.read(hwnd)
             except Exception as error:
                 snapshot['read_error'] = f'{type(error).__name__}: {error}'
+            finally:
+                if read_value:
+                    snapshot['readback'] = dict(getattr(native._backend, 'last_readback', None) or {})
         return snapshot
 
     def save_native_diagnostics():
@@ -1953,6 +1956,12 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
         snapshot = native_snapshot(target_window, stage, hwnd, cookie)
         save_native_diagnostics()
         assert snapshot.get('actual') == expected, json.dumps(snapshot, ensure_ascii=False)
+        readback = snapshot['readback']
+        if expected['vt'] == 11:
+            assert readback.get('raw_vt') in (11, 31) and readback.get('conversion_succeeded') is True, snapshot
+            assert readback.get('canonical_vt') == 11 and readback.get('value') is expected['value'], snapshot
+        else:
+            assert readback.get('raw_vt') == 0 and readback.get('value') is None, snapshot
         return snapshot
 
     def swipe(target_window, edge, *, corner=False):
@@ -2055,6 +2064,7 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
                 'native_window_edge_policy': native.report(),
                 'native_window_property_verified': native_verified,
                 'native_window_cleanup_verified': native_cleanup,
+                'native_window_boolean_readback_verified': native_verified,
                 'touch_target': 'QWindow', 'physical_touch_hardware': False,
                 'os_reserved_gesture_delivery_verified': False}
     finally:

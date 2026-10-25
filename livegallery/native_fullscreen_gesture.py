@@ -21,7 +21,7 @@ from shiboken6 import isValid
 from .system_open import GUID, _ComPtr, _HRESULT, _hresult
 
 
-VT_EMPTY, VT_BOOL, VARIANT_TRUE = 0, 11, -1
+VT_EMPTY, VT_BOOL, VT_LPWSTR, VARIANT_TRUE = 0, 11, 31, -1
 COOKIE_NAME = 'LiveViewer.FullscreenEdgeGesture.Owner'
 PROPERTY_GUID = '32CE38B2-2C9A-41B1-9BC5-B3784394AA44'
 IID_IPROPERTYSTORE = GUID.parse('886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99')
@@ -47,6 +47,17 @@ class PROPVARIANT(ctypes.Structure):
 
 EDGE_PROPERTY = PROPERTYKEY(GUID.parse(PROPERTY_GUID), 2)
 _cookies = count(1)
+
+
+def _variant_to_boolean(value):
+    """Use the Windows property helper; a nonempty string is not a truth value."""
+    propsys = ctypes.WinDLL('propsys.dll', winmode=0x800)
+    convert = propsys.PropVariantToBoolean
+    convert.argtypes = [ctypes.POINTER(PROPVARIANT), ctypes.POINTER(ctypes.c_int32)]
+    convert.restype = _HRESULT
+    result = ctypes.c_int32()
+    status = int(convert(ctypes.byref(value), ctypes.byref(result))) & 0xffffffff
+    return status, bool(result.value)
 
 
 @contextmanager
@@ -83,6 +94,7 @@ class NativeWindowGestureStore:
     """GUI-thread native calls. Every call verifies this process owns the HWND."""
 
     def __init__(self):
+        self.last_readback = {}
         self.user = ctypes.WinDLL('user32.dll', use_last_error=True, winmode=0x800)
         for name, arguments, result in (
             ('IsWindow', [ctypes.c_void_p], ctypes.c_int),
@@ -114,12 +126,31 @@ class NativeWindowGestureStore:
                 raise OSError('Cannot remove fullscreen window identity marker')
 
     @staticmethod
-    def _read(store, ole):
+    def _read(store, ole, diagnostics=None):
         value = PROPVARIANT()
+        diagnostic = diagnostics if diagnostics is not None else {}
+        diagnostic.clear()
         try:
-            _hresult(store.call(5, [ctypes.POINTER(PROPERTYKEY), ctypes.POINTER(PROPVARIANT)],
-                                 ctypes.byref(EDGE_PROPERTY), ctypes.byref(value)), 'Cannot read fullscreen edge policy')
-            return {'vt': value.vt, 'value': bool(value.boolVal) if value.vt == VT_BOOL else None}
+            status = store.call(5, [ctypes.POINTER(PROPERTYKEY), ctypes.POINTER(PROPVARIANT)],
+                                ctypes.byref(EDGE_PROPERTY), ctypes.byref(value))
+            diagnostic.update(get_hresult=f'0x{int(status) & 0xffffffff:08X}', raw_vt=int(value.vt),
+                              conversion_succeeded=False, conversion_hresult=None)
+            _hresult(status, 'Cannot read fullscreen edge policy')
+            if value.vt == VT_EMPTY:
+                diagnostic.update(raw_value=None, canonical_vt=VT_EMPTY, value=None)
+                return {'vt': VT_EMPTY, 'value': None}
+            if value.vt == VT_BOOL:
+                boolean = bool(value.boolVal)
+                diagnostic['raw_value'] = boolean
+            elif value.vt == VT_LPWSTR:
+                diagnostic['raw_value'] = ctypes.wstring_at(value.pointer) if value.pointer else None
+                status, boolean = _variant_to_boolean(value)
+                diagnostic['conversion_hresult'] = f'0x{status:08X}'
+                _hresult(status, 'Cannot convert fullscreen edge property to Boolean')
+            else:
+                raise OSError(f'Unexpected fullscreen edge property type: {value.vt}')
+            diagnostic.update(conversion_succeeded=True, canonical_vt=VT_BOOL, value=boolean)
+            return {'vt': VT_BOOL, 'value': boolean}
         finally:
             ole.PropVariantClear(ctypes.byref(value))
 
@@ -127,7 +158,8 @@ class NativeWindowGestureStore:
         if not self.is_own_window(hwnd):
             raise OSError('Native window is no longer owned by LiveViewer')
         with _property_store(hwnd) as (store, ole):
-            return self._read(store, ole)
+            self.last_readback = {}
+            return self._read(store, ole, self.last_readback)
 
     def write(self, hwnd, enabled):
         if not self.is_own_window(hwnd):
@@ -139,7 +171,8 @@ class NativeWindowGestureStore:
             _hresult(store.call(6, [ctypes.POINTER(PROPERTYKEY), ctypes.POINTER(PROPVARIANT)],
                                  ctypes.byref(EDGE_PROPERTY), ctypes.byref(value)), 'Cannot set fullscreen edge policy')
             # SHGetPropertyStoreForWindow stores SetValue immediately; no Commit.
-            actual = self._read(store, ole)
+            self.last_readback = {}
+            actual = self._read(store, ole, self.last_readback)
         expected = {'vt': VT_EMPTY, 'value': None} if enabled is None else {'vt': VT_BOOL, 'value': bool(enabled)}
         if actual != expected:
             raise OSError(f'Fullscreen edge property readback mismatch: {actual}')
@@ -174,7 +207,8 @@ class WindowEdgeGesturePolicy(QObject):
         message = f'{action}: {type(error).__name__}: {error}'
         self._failures.append(message)
         self._failures = self._failures[-16:]
-        self._record(action, hwnd, ok=False, error=message)
+        self._record(action, hwnd, ok=False, error=message,
+                     readback=dict(getattr(self._backend, 'last_readback', None) or {}))
 
     def set_enabled(self, enabled):
         self._enabled = bool(enabled)
@@ -202,7 +236,8 @@ class WindowEdgeGesturePolicy(QObject):
                 self._backend.write(hwnd, None)
                 self._clears += 1
                 self._backend.release(hwnd, cookie)
-                self._record('clear', hwnd, ok=True, vt=VT_EMPTY)
+                self._record('clear', hwnd, ok=True, vt=VT_EMPTY,
+                             readback=dict(getattr(self._backend, 'last_readback', None) or {}))
             else:
                 self._record('stale_handle_skipped', hwnd, ok=True)
             window = record['window']()
@@ -249,7 +284,8 @@ class WindowEdgeGesturePolicy(QObject):
                 self._backend.write(hwnd, True)
                 record['set'] = True
                 self._sets += 1
-                self._record('set', hwnd, ok=True, vt=VT_BOOL, value=True)
+                self._record('set', hwnd, ok=True, vt=VT_BOOL, value=True,
+                             readback=dict(getattr(self._backend, 'last_readback', None) or {}))
         except (OSError, ValueError, RuntimeError, AttributeError) as error:
             self._failure('sync', 0, error)
 

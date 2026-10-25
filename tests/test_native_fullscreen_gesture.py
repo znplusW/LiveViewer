@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from livegallery.fullscreen_edge_gesture import FullscreenEdgeGesture
 from livegallery.native_fullscreen_gesture import (COOKIE_NAME, EDGE_PROPERTY, PROPERTY_GUID,
     IID_IPROPERTYSTORE, NativeWindowGestureStore, PROPVARIANT, PROPERTYKEY,
-    VT_BOOL, VT_EMPTY, VARIANT_TRUE, WindowEdgeGesturePolicy)
+    VT_BOOL, VT_EMPTY, VT_LPWSTR, VARIANT_TRUE, WindowEdgeGesturePolicy)
 
 
 class FakeBackend:
@@ -117,6 +117,114 @@ class PropertyStoreAbiTests(unittest.TestCase):
         with patch.object(native, 'matches', return_value=True):
             with self.assertRaises(OSError): native.release(123, 999)
         native.user.RemovePropW.assert_called_once_with(123, COOKIE_NAME)
+
+    def read_string(self, text, conversion):
+        buffer = ctypes.create_unicode_buffer(text)
+        cleared, diagnostic = [], {}
+
+        class Store:
+            def call(self, slot, argument_types, key, pointer):
+                self_outer.assertEqual(slot, 5)
+                value = ctypes.cast(pointer, ctypes.POINTER(PROPVARIANT)).contents
+                value.vt, value.pointer = VT_LPWSTR, ctypes.cast(buffer, ctypes.c_void_p).value
+                return 1  # Successful GetValue canonicalization, observed on Windows.
+
+        class Ole:
+            def PropVariantClear(self, pointer):
+                cleared.append(ctypes.cast(pointer, ctypes.POINTER(PROPVARIANT)).contents.vt)
+                ctypes.memset(pointer, 0, ctypes.sizeof(PROPVARIANT))
+
+        self_outer = self
+        with patch('livegallery.native_fullscreen_gesture._variant_to_boolean', return_value=conversion) as convert:
+            try:
+                actual = NativeWindowGestureStore._read(Store(), Ole(), diagnostic)
+            finally:
+                self.assertEqual(cleared, [VT_LPWSTR])
+                convert.assert_called_once()
+        return actual, diagnostic
+
+    def test_canonical_string_true_uses_successful_windows_conversion_and_records_raw_value(self):
+        actual, diagnostic = self.read_string('true', (0, True))
+        self.assertEqual(actual, {'vt': VT_BOOL, 'value': True})
+        self.assertEqual(diagnostic, {'get_hresult': '0x00000001', 'raw_vt': VT_LPWSTR,
+            'raw_value': 'true', 'conversion_hresult': '0x00000000', 'conversion_succeeded': True,
+            'canonical_vt': VT_BOOL, 'value': True})
+
+    def test_nonempty_string_false_is_false_and_never_python_truthiness(self):
+        actual, diagnostic = self.read_string('false', (0, False))
+        self.assertEqual(actual, {'vt': VT_BOOL, 'value': False})
+        self.assertEqual(diagnostic['raw_value'], 'false')
+        self.assertTrue(diagnostic['conversion_succeeded'])
+
+    def test_invalid_string_conversion_fails_and_still_clears_native_resource(self):
+        with self.assertRaisesRegex(OSError, '0x80070057'):
+            self.read_string('invalid Boolean', (0x80070057, False))
+
+    def test_false_canonical_string_cannot_pass_write_true_verification(self):
+        buffer = ctypes.create_unicode_buffer('false')
+        clears = []
+
+        class Store:
+            def call(self, slot, argument_types, key, pointer):
+                if slot == 5:
+                    value = ctypes.cast(pointer, ctypes.POINTER(PROPVARIANT)).contents
+                    value.vt, value.pointer = VT_LPWSTR, ctypes.cast(buffer, ctypes.c_void_p).value
+                return 0
+
+        class Ole:
+            def PropVariantClear(self, pointer):
+                clears.append(True)
+
+        @contextmanager
+        def opened(hwnd):
+            yield Store(), Ole()
+
+        native = object.__new__(NativeWindowGestureStore)
+        with patch.object(native, 'is_own_window', return_value=True), \
+                patch('livegallery.native_fullscreen_gesture._property_store', opened), \
+                patch('livegallery.native_fullscreen_gesture._variant_to_boolean', return_value=(0, False)):
+            with self.assertRaisesRegex(OSError, 'readback mismatch'):
+                native.write(123, True)
+        self.assertEqual(clears, [True])
+        self.assertIs(native.last_readback['value'], False)
+
+    def test_propsys_conversion_uses_32_bit_bool_and_checks_raw_hresult(self):
+        from livegallery.native_fullscreen_gesture import _variant_to_boolean
+        value = PROPVARIANT()
+        value.vt = VT_LPWSTR
+
+        def called(pointer, output):
+            self.assertEqual(ctypes.cast(pointer, ctypes.POINTER(PROPVARIANT)).contents.vt, VT_LPWSTR)
+            ctypes.cast(output, ctypes.POINTER(ctypes.c_int32)).contents.value = 1
+            return 0
+
+        function = Mock(side_effect=called)
+        with patch('livegallery.native_fullscreen_gesture.ctypes.WinDLL', create=True,
+                   return_value=SimpleNamespace(PropVariantToBoolean=function)) as opened:
+            self.assertEqual(_variant_to_boolean(value), (0, True))
+        opened.assert_called_once_with('propsys.dll', winmode=0x800)
+        self.assertEqual(function.argtypes, [ctypes.POINTER(PROPVARIANT), ctypes.POINTER(ctypes.c_int32)])
+        self.assertEqual(function.restype, ctypes.c_int32)
+
+    def test_other_property_types_are_rejected_and_cleared(self):
+        clears = []
+
+        class Store:
+            def call(self, slot, argument_types, key, pointer):
+                ctypes.cast(pointer, ctypes.POINTER(PROPVARIANT)).contents.vt = 3
+                return 0
+
+        class Ole:
+            def PropVariantClear(self, pointer):
+                clears.append(True)
+
+        diagnostic = {}
+        with patch('livegallery.native_fullscreen_gesture._variant_to_boolean') as convert:
+            with self.assertRaisesRegex(OSError, 'Unexpected.*type: 3'):
+                NativeWindowGestureStore._read(Store(), Ole(), diagnostic)
+            convert.assert_not_called()
+        self.assertEqual(clears, [True])
+        self.assertFalse(diagnostic['conversion_succeeded'])
 
 
 class WindowPolicyTests(unittest.TestCase):
@@ -220,6 +328,13 @@ class WindowPolicyTests(unittest.TestCase):
         self.assertNotIn(hwnd, self.backend.cookies)
         self.policy.close()
 
+    def test_policy_readback_history_copies_the_raw_diagnostic(self):
+        self.backend.last_readback = {'raw_vt': VT_LPWSTR, 'raw_value': 'true', 'value': True}
+        self.fullscreen()
+        self.backend.last_readback['raw_value'] = 'changed after read'
+        records = [entry for entry in self.policy.report()['diagnostics'] if entry['action'] == 'set']
+        self.assertEqual(records[-1]['readback']['raw_value'], 'true')
+
     def test_unsupported_platform_does_not_load_native_api_or_create_hwnd(self):
         hidden = QWidget()
         policy = WindowEdgeGesturePolicy(lambda: [hidden], supported=False)
@@ -252,26 +367,33 @@ class NativeReadbackTests(unittest.TestCase):
             window=QWidget(); windows=[window]
             edge=FullscreenEdgeGesture(lambda:windows)
             native=NativeWindowGestureStore()
+            raw=[]
+            def require_true(hwnd):
+                assert native.read(hwnd)=={'vt':VT_BOOL,'value':True}, native.last_readback
+                record=dict(native.last_readback);raw.append(record)
+                assert record['raw_vt'] in (11,31),record
+                assert record['conversion_succeeded'] is True,record
+                assert record['canonical_vt']==11 and record['value'] is True,record
             try:
                 window.showFullScreen(); app.processEvents(); edge.native_policy.sync_now()
                 hwnd=int(window.winId())
-                assert native.read(hwnd)=={'vt':VT_BOOL,'value':True}
+                require_true(hwnd)
                 assert edge.native_policy.report()['native_api_used']
                 edge.set_enabled_edges([])
                 assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None}
                 edge.set_enabled_edges(['left']); app.processEvents(); edge.native_policy.sync_now()
-                assert native.read(hwnd)=={'vt':VT_BOOL,'value':True}
+                require_true(hwnd)
                 record=edge.native_policy._tracked[id(window)];cookie=record['cookie']
                 windows.clear(); window.close(); app.processEvents()
                 assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None}
                 assert not native.matches(hwnd,cookie)
                 windows.append(window); window.showFullScreen(); app.processEvents();edge.native_policy.sync_now()
-                assert native.read(int(window.winId()))=={'vt':VT_BOOL,'value':True}
+                require_true(int(window.winId()))
                 edge.close()
                 assert native.read(int(window.winId()))=={'vt':VT_EMPTY,'value':None}
                 assert not edge.native_policy.report()['failures']
                 assert not errors, errors
-                print(json.dumps({'native':True,'set_get_empty_verified':True,'cookie_removed':True,'hardware':False}))
+                print(json.dumps({'native':True,'set_get_empty_verified':True,'cookie_removed':True,'hardware':False,'raw_readbacks':raw}))
             finally:
                 edge.close();window.close();window.deleteLater();app.processEvents()
         ''')

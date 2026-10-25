@@ -27,8 +27,10 @@ from livegallery.fullscreen_edge_gesture import FullscreenEdgeGesture
 
 def variant_snapshot(pointer):
     value = ctypes.cast(pointer, ctypes.POINTER(api.PROPVARIANT)).contents
-    return {'vt': int(value.vt), 'boolVal': int(value.boolVal),
-            'bytes': bytes(value).hex()}
+    result = {'vt': int(value.vt), 'boolVal': int(value.boolVal), 'bytes': bytes(value).hex()}
+    if value.vt == api.VT_LPWSTR:
+        result['string'] = ctypes.wstring_at(value.pointer) if value.pointer else None
+    return result
 
 
 def apartment_snapshot():
@@ -107,11 +109,19 @@ def run_probe(app, report):
         report['checks'].append(row)
         try:
             row['actual'] = function()
+            row['readback'] = dict(native.last_readback)
             assert row['actual'] == expected, f'{stage}: {row["actual"]!r} != {expected!r}'
+            if expected['vt'] == api.VT_BOOL:
+                assert row['readback']['raw_vt'] in (api.VT_BOOL, api.VT_LPWSTR), row
+                assert row['readback']['conversion_succeeded'] is True, row
+                assert row['readback']['canonical_vt'] == api.VT_BOOL and row['readback']['value'] is expected['value'], row
+            else:
+                assert row['readback']['raw_vt'] == api.VT_EMPTY and row['readback']['value'] is None, row
             row['status'] = 'passed'
         except Exception as error:
             row.update(status='failed', error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
         finally:
+            row['readback'] = dict(native.last_readback)
             row['after'] = snapshot(window, policy)
         return row
 
@@ -128,7 +138,12 @@ def run_probe(app, report):
                 value.vt, value.boolVal = api.VT_BOOL, api.VARIANT_TRUE
                 api._hresult(store.call(6, [ctypes.POINTER(api.PROPERTYKEY), ctypes.POINTER(api.PROPVARIANT)],
                                        ctypes.byref(api.EDGE_PROPERTY), ctypes.byref(value)), 'Probe SetValue failed')
-                return native._read(store, ole)
+                native.last_readback = {}
+                return native._read(store, ole, native.last_readback)
+
+            def read_with_store(store, ole):
+                native.last_readback = {}
+                return native._read(store, ole, native.last_readback)
 
             def same_store():
                 with api._property_store(hwnd) as (store, ole):
@@ -140,7 +155,7 @@ def run_probe(app, report):
             check('direct_native_fresh_read', direct, lambda: native.read(hwnd), true)
             with api._property_store(hwnd) as (held, ole):
                 check('direct_held_store_set_get', direct, lambda: set_with_store(held, ole), true)
-                check('direct_held_store_read', direct, lambda: native._read(held, ole), true)
+                check('direct_held_store_read', direct, lambda: read_with_store(held, ole), true)
                 check('direct_fresh_while_other_held', direct, lambda: native.read(hwnd), true)
 
             ole = ctypes.WinDLL('ole32.dll', winmode=0x800)
