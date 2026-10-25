@@ -40,6 +40,13 @@ jobs:
           python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
       - name: Fetch and validate pinned LGPL frame tools
         run: python scripts/fetch_frame_tools.py
+      - name: Preflight native pointer input at physical screen boundaries
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          $env:QT_QPA_PLATFORM = 'windows'
+          python -X faulthandler -m tests.native_bezel_probe
+          if ($LASTEXITCODE -ne 0) { throw 'Native bezel pointer injection failed' }
       - name: Preflight native fullscreen window property readback
         shell: pwsh
         timeout-minutes: 2
