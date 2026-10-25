@@ -40,6 +40,15 @@ jobs:
           python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
       - name: Fetch and validate pinned LGPL frame tools
         run: python scripts/fetch_frame_tools.py
+      - name: Diagnose native gesture cursor ownership
+        if: ${{ inputs.preflight_only }}
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $env:QT_QPA_PLATFORM = 'windows'
+          New-Item -ItemType Directory -Force 'reports' | Out-Null
+          python -m tests.gesture_native_probe --source-context --expect-platform windows --report reports/gesture-native-source-context.json
+          if ($LASTEXITCODE -ne 0) { throw 'Native gesture cursor ownership diagnostic failed' }
       - name: Preflight Windows filmstrip touch interactions
         shell: pwsh
         timeout-minutes: 3

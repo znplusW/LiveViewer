@@ -474,10 +474,10 @@ def _check_zoom_navigation_overview(viewer: ViewerCanvas, fixtures: Path, report
             'physical_touch_hardware': False}
 
 
-def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
+def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path, *, diagnostics=None, align_cursor=False):
     from unittest.mock import patch
-    from PySide6.QtCore import QEvent
-    from PySide6.QtGui import QInputDevice, QMouseEvent, QPointingDevice
+    from PySide6.QtCore import QEvent, QObject
+    from PySide6.QtGui import QCursor, QInputDevice, QMouseEvent, QPointingDevice
 
     original_hold = viewer._hold_ms
     results = []
@@ -487,6 +487,71 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
     viewer.activateWindow()
     viewer.setFocus()
     QCoreApplication.processEvents()
+    trace = diagnostics if diagnostics is not None else {}
+    trace.update(align_cursor=align_cursor, qt_platform=QApplication.platformName(), events=[], snapshots=[])
+    route, device, position = 'initial', None, viewer.viewport().rect().center()
+
+    def identity(widget):
+        return None if widget is None else {'class': type(widget).__name__, 'name': widget.objectName()}
+
+    def device_identity(pointer):
+        return None if pointer is None else {'name': pointer.name(), 'id': pointer.systemId(), 'type': str(pointer.type())}
+
+    def state(phase):
+        cursor = QCursor.pos()
+        local = viewer.viewport().mapFromGlobal(cursor)
+        return {'phase': phase, 'route': route, 'time': time.monotonic(),
+                'last_time': viewer._last_mouse_click_time, 'last_timestamp': viewer._last_mouse_click_timestamp,
+                'last_device': device_identity(viewer._last_mouse_click_device),
+                'route_device': device_identity(device),
+                'same_device': device is not None and viewer._last_mouse_click_device == device,
+                'mouse_down': viewer._mouse_down, 'mouse_moved': viewer._mouse_moved,
+                'double_drag': viewer._mouse_double_drag, 'hold_consumed': viewer._hold_consumed,
+                'hold_timer': viewer._hold_timer.isActive(), 'play_requested': viewer._play_requested,
+                'cursor_global': [cursor.x(), cursor.y()], 'cursor_local': [local.x(), local.y()],
+                'cursor_inside': viewer.viewport().rect().contains(local),
+                'injected_local': [position.x(), position.y()],
+                'focus': identity(QApplication.focusWidget()), 'active_window': identity(QApplication.activeWindow()),
+                'mouse_grabber': identity(viewer.mouseGrabber()), 'window_active': target.isActive(),
+                'window_exposed': target.isExposed()}
+
+    def snapshot(phase, event=None):
+        value = state(phase)
+        if event is not None:
+            value['input'] = {'type': event.type().name, 'timestamp': event.timestamp(),
+                              'source': event.source().name,
+                              'device': device_identity(event.pointingDevice()),
+                              'local': [event.position().x(), event.position().y()],
+                              'global': [event.globalPosition().x(), event.globalPosition().y()]}
+        trace['snapshots'].append(value)
+
+    class InputTrace(QObject):
+        def eventFilter(self, watched, event):
+            if len(trace['events']) < 500 and watched in (viewer, viewer.viewport(), target) and event.type() in (
+                    QEvent.Type.Enter, QEvent.Type.Leave, QEvent.Type.FocusIn, QEvent.Type.FocusOut,
+                    QEvent.Type.WindowActivate, QEvent.Type.WindowDeactivate, QEvent.Type.GrabMouse, QEvent.Type.UngrabMouse,
+                    QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick,
+                    QEvent.Type.MouseMove):
+                value = state(event.type().name)
+                value['receiver'] = identity(watched)
+                if isinstance(event, QMouseEvent):
+                    value['input'] = {'timestamp': event.timestamp(), 'source': event.source().name,
+                                      'device': device_identity(event.pointingDevice()),
+                                      'local': [event.position().x(), event.position().y()],
+                                      'global': [event.globalPosition().x(), event.globalPosition().y()]}
+                trace['events'].append(value)
+            return False
+
+    observer = InputTrace()
+    QApplication.instance().installEventFilter(observer)
+    original_stop = viewer.stop_live
+
+    def traced_stop():
+        if len(trace['events']) < 500:
+            value = state('stop_live')
+            value['stack'] = [f'{frame.name}:{frame.lineno}' for frame in traceback.extract_stack(limit=7)]
+            trace['events'].append(value)
+        return original_stop()
 
     def mouse(event_type, position, *, timestamp=0, device=None,
               source=Qt.MouseEventSource.MouseEventNotSynthesized):
@@ -502,11 +567,15 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
                             Qt.KeyboardModifier.NoModifier, source,
                             device or QPointingDevice.primaryPointingDevice())
         event.setTimestamp(timestamp)
+        snapshot(f'before-send-{event_type.name}-{timestamp}', event)
         QApplication.sendEvent(viewer.viewport(), event)
+        snapshot(f'after-send-{event_type.name}-{timestamp}', event)
         QCoreApplication.processEvents()
+        snapshot(f'after-process-{event_type.name}-{timestamp}', event)
 
     try:
-        with patch.object(viewer._player, 'play', wraps=viewer._player.play) as playback:
+        with patch.object(viewer, 'stop_live', side_effect=traced_stop), \
+                patch.object(viewer._player, 'play', wraps=viewer._player.play) as playback:
             known_pad = QPointingDevice('self-test touchpad', 71010, QInputDevice.DeviceType.TouchPad,
                                          QPointingDevice.PointerType.Generic,
                                          QInputDevice.Capability.Position, 1, 3)
@@ -518,8 +587,12 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
                 center = viewer.viewport().rect().center()
                 viewer._zoom_at(2.0, QPointF(center))
                 position = center
-                before_scale, before_center = viewer.transform().m11(), viewer._scene_center()
                 device = known_pad if route == 'known-touchpad-drift' else QPointingDevice.primaryPointingDevice()
+                if align_cursor:
+                    QTest.mouseMove(viewer.viewport(), center)
+                    QCoreApplication.processEvents()
+                snapshot('route-ready')
+                before_scale, before_center = viewer.transform().m11(), viewer._scene_center()
                 hints = QApplication.styleHints()
                 mouse_distance = 4 if route == 'known-touchpad-drift' else hints.mouseDoubleClickDistance()
                 touch_distance = 40 if route == 'known-touchpad-drift' else hints.touchDoubleTapDistance()
@@ -531,7 +604,9 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
                         mouse(QEvent.Type.MouseButtonPress, position, timestamp=1000, device=device)
                         mouse(QEvent.Type.MouseButtonRelease, position, timestamp=1020, device=device)
                     if route == 'delayed-input-timestamp':
+                        snapshot('before-delayed-wait')
                         QTest.qWait(QApplication.doubleClickInterval() + 40)
+                        snapshot('after-delayed-wait')
                     if route == 'known-touchpad-drift':
                         position += QPoint(12, 0)
                     if route == 'system-double-click':
@@ -541,6 +616,7 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
                     mouse(second_kind, position, timestamp=1100, device=device, source=source)
                     mouse(QEvent.Type.MouseMove, position + QPoint(1, 0), device=device, source=source)
                     QTest.qWait(hold + 80)
+                    snapshot('after-second-hold-pause')
                     assert playback.call_count == 0 and not viewer._play_requested, f'{route} briefly requested Live playback'
                     assert viewer._photo.isVisible() and not viewer._video.isVisible()
                     mouse(QEvent.Type.MouseMove, position + QPoint(80, 35), device=device, source=source)
@@ -598,7 +674,12 @@ def _check_zoomed_double_tap_drag(viewer: ViewerCanvas, fixtures: Path):
                 'mouse_guard_hold_delay_ms': hold, 'raw_hold_delay_ms': original_hold,
                 'independent_mouse_and_touch_hold_play': True, 'independent_hold_delay_ms': original_hold,
                 'hold_setting_unchanged': True, 'physical_touchpad_hardware': False}
+    except Exception:
+        snapshot('failed')
+        print('GESTURE_DIAGNOSTICS ' + json.dumps(trace, ensure_ascii=True), flush=True)
+        raise
     finally:
+        QApplication.instance().removeEventFilter(observer)
         viewer.stop_live()
         viewer.set_options(hold_ms=original_hold)
         viewer.fit_image()
