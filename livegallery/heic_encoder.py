@@ -23,7 +23,7 @@ def _executable() -> Path:
 
 
 def encode_heic(image: Image.Image, destination: Path, *,
-                cancel_event: threading.Event | None = None) -> None:
+                cancel_event: threading.Event | None = None, exif: bytes = b'') -> None:
     """Write genuine HEIC bytes; caller owns staging and final validation/commit."""
     if cancel_event is not None and cancel_event.is_set():
         raise InterruptedError('已取消 HEIC 保存。')
@@ -31,7 +31,9 @@ def encode_heic(image: Image.Image, destination: Path, *,
         raise ValueError('图片尺寸超出 HEIC 保存范围。')
     rgb = image.convert('RGB')
     executable = _executable()
-    pixels = rgb.tobytes()
+    if len(exif) > 1_048_576:
+        raise ValueError('HEIC 元信息过大。')
+    pixels = rgb.tobytes() + exif
     # stdout goes directly to the private stage, avoiding another encoded-file
     # copy in memory and preventing encoder diagnostics from becoming pixels.
     process = None
@@ -40,7 +42,7 @@ def encode_heic(image: Image.Image, destination: Path, *,
         with Path(destination).open('xb') as target:
             created = True
             flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            process = subprocess.Popen([str(executable), str(rgb.width), str(rgb.height), '95'],
+            process = subprocess.Popen([str(executable), str(rgb.width), str(rgb.height), '95', str(len(exif))],
                                        stdin=subprocess.PIPE, stdout=target, stderr=subprocess.PIPE,
                                        creationflags=flags)
             started = time.monotonic()

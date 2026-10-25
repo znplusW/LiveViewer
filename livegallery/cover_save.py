@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -21,6 +22,7 @@ from typing import Callable
 from PIL import Image
 
 from .models import MediaItem
+from .livephoto_metadata import make_photo_exif, rewrite_movie, validate_pair
 
 WORK_DIRECTORY = ".LiveViewer-work"
 
@@ -167,7 +169,7 @@ def _copy_checked(source: FileFingerprint, target: Path, cancel_event=None) -> N
     shutil.copystat(source.path, target)
 
 
-def _encode_image(image: Image.Image, target: Path, cancel_event=None, heic_encoder=None) -> None:
+def _encode_image(image: Image.Image, target: Path, cancel_event=None, heic_encoder=None, exif=None) -> None:
     _cancelled(cancel_event)
     if target.suffix.casefold() == ".heic":
         if heic_encoder is None:
@@ -176,9 +178,13 @@ def _encode_image(image: Image.Image, target: Path, cancel_event=None, heic_enco
             except ImportError as error:
                 raise CoverSaveError("HEIC 编码组件不可用，未保存或转换任何文件。") from error
             heic_encoder = encode_heic
-        heic_encoder(image, target, cancel_event=cancel_event)
+        options = {'cancel_event': cancel_event}
+        if exif is not None:
+            options['exif'] = exif
+        heic_encoder(image, target, **options)
     else:
-        image.convert("RGB").save(target, format="JPEG", quality=95, subsampling=0)
+        options = {'exif': exif} if exif is not None else {}
+        image.convert("RGB").save(target, format="JPEG", quality=95, subsampling=0, **options)
     _cancelled(cancel_event)
     # Reject mislabeled JPEG/AVIF payloads even if an image decoder can read them.
     with target.open("r+b") as encoded:
@@ -260,14 +266,48 @@ def _rollback_published(published: list[FileFingerprint]) -> None:
         raise CoverSaveError("保存未完成，部分输出被其他程序占用或修改，已保留：" + "、".join(changed))
 
 
+def _rollback_overwritten(replaced: list[tuple[FileFingerprint, FileFingerprint]]) -> None:
+    failed = []
+    for output, original in reversed(replaced):
+        try:
+            current = FileFingerprint.capture(output.path)
+            if current.sha256 == original.sha256:
+                continue  # Replacement never ran, or already restored.
+            if current.stat_key[:2] != output.stat_key[:2] or current.sha256 != output.sha256:
+                raise SourceChangedError("输出已被其他程序修改。")
+            original.validate()
+            os.replace(original.path, output.path)
+        except (OSError, CoverSaveError):
+            failed.append(output.path.name)
+    if failed:
+        raise CoverSaveError("未能恢复以下文件：" + "、".join(failed))
+
+
+def _write_recovery_record(transaction: Path, source: CoverSource,
+                           originals: list[Path], outputs: list[FileFingerprint]) -> None:
+    # Durable intent precedes either replacement. These are temporary rollback
+    # originals, removed after success; interrupted/failed rollback retains them.
+    record = {'schema': 1, 'operation': 'replace-live-photo-pair', 'files': [
+        {'target': str(fingerprint.path.resolve()), 'original': original.name,
+         'original_sha256': fingerprint.sha256, 'replacement_sha256': output.sha256}
+        for fingerprint, original, output in zip((source.image, source.video), originals, outputs)]}
+    with (transaction / 'recovery.json').open('x', encoding='utf-8') as stream:
+        json.dump(record, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def save_cover(source: CoverSource, image: Image.Image, mode: str = "copy", *,
                cancel_event: threading.Event | None = None,
-               heic_encoder: Callable | None = None) -> SaveResult:
+               heic_encoder: Callable | None = None,
+               frame_time_seconds: float = 0.0,
+               frame_duration_seconds: float = 1 / 30) -> SaveResult:
     """Commit a selected, already oriented full-resolution video frame.
 
-    Cancellation before commit leaves originals unchanged. Once the atomic
-    overwrite (or both exclusive copy publications) succeeds, the result is
-    committed and reported as success rather than misreporting a late cancel.
+    Both validated outputs share a new Live Photo ID and selected-frame marker.
+    Overwrite uses per-file atomic replacement with temporary rollback originals
+    because a filesystem cannot atomically replace two separate files together.
+    A late cancellation after both publications is reported as success.
     """
     if mode not in ("copy", "overwrite"):
         raise ValueError("Unknown cover save mode")
@@ -278,25 +318,52 @@ def save_cover(source: CoverSource, image: Image.Image, mode: str = "copy", *,
     _writable(parent)
     if mode == "overwrite":
         _writable(source.image.path)
+        _writable(source.video.path)
     root = _work_root(parent)
     identifier = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex
     transaction = root / identifier
     transaction.mkdir()
     reservation = None
     published: list[FileFingerprint] = []
+    replaced: list[tuple[FileFingerprint, FileFingerprint]] = []
+    retain_recovery = False
     try:
+        content_identifier = str(uuid.uuid4()).upper()
         staged_image = transaction / ("cover" + source.image.path.suffix)
-        _encode_image(image, staged_image, cancel_event, heic_encoder)
+        exif = make_photo_exif(source.image.path, content_identifier, image.size)
+        _encode_image(image, staged_image, cancel_event, heic_encoder, exif)
+        staged_video = transaction / ("video" + source.video.path.suffix)
+        _copy_checked(source.video, staged_video, cancel_event)
+        rewrite_movie(staged_video, content_identifier, frame_time_seconds,
+                      frame_duration_seconds, cancel_event=cancel_event)
+        validate_pair(staged_image, staged_video, content_identifier, frame_time_seconds)
+        image_identity = FileFingerprint.capture(staged_image, cancel_event)
+        video_identity = FileFingerprint.capture(staged_video, cancel_event)
         if mode == "overwrite":
+            original_image = transaction / ("original-image" + source.image.path.suffix)
+            original_video = transaction / ("original-video" + source.video.path.suffix)
+            _copy_checked(source.image, original_image, cancel_event)
+            _copy_checked(source.video, original_video, cancel_event)
+            image_original = FileFingerprint.capture(original_image, cancel_event)
+            video_original = FileFingerprint.capture(original_video, cancel_event)
+            _write_recovery_record(transaction, source, [original_image, original_video],
+                                   [image_identity, video_identity])
             source.validate(cancel_event)
             _cancelled(cancel_event)
             source.validate_identity()
+            # Record intent first: an interrupt may arrive immediately after
+            # the OS replacement, before Python regains control to record it.
+            replaced.append((FileFingerprint(source.image.path, image_identity.stat_key,
+                                              image_identity.sha256), image_original))
             os.replace(staged_image, source.image.path)
+            _cancelled(cancel_event)
+            source.video.validate(cancel_event)
+            replaced.append((FileFingerprint(source.video.path, video_identity.stat_key,
+                                              video_identity.sha256), video_original))
+            os.replace(staged_video, source.video.path)
             return SaveResult(source.image.path, source.video.path, mode, None,
                               source.image.path, source.video.path)
         target_image, target_video, reservation = _reserve_copy(source, root)
-        staged_video = transaction / ("video" + source.video.path.suffix)
-        _copy_checked(source.video, staged_video, cancel_event)
         source.validate(cancel_event)
         _cancelled(cancel_event)
         source.validate_identity()
@@ -304,8 +371,6 @@ def save_cover(source: CoverSource, image: Image.Image, mode: str = "copy", *,
             raise FileExistsError("副本文件名已被其他程序使用，请重新保存。")
         # Prepare ownership records before publication; no fallible filesystem
         # read may sit between a successful publication and rollback tracking.
-        image_identity = FileFingerprint.capture(staged_image, cancel_event)
-        video_identity = FileFingerprint(target_video, _stat_key(staged_video.stat()), source.video.sha256)
         _publish_no_replace(staged_image, target_image)
         published.append(FileFingerprint(target_image, image_identity.stat_key, image_identity.sha256))
         _cancelled(cancel_event)
@@ -315,10 +380,17 @@ def save_cover(source: CoverSource, image: Image.Image, mode: str = "copy", *,
         if conflicts:
             raise FileExistsError("副本文件名已被其他程序使用，请重新保存。")
         _publish_no_replace(staged_video, target_video)
-        published.append(video_identity)
+        published.append(FileFingerprint(target_video, video_identity.stat_key, video_identity.sha256))
         return SaveResult(target_image, target_video, mode, None,
                           source.image.path, source.video.path)
-    except Exception:
+    except BaseException:
+        retain_recovery = bool(replaced)
+        try:
+            _rollback_overwritten(replaced)
+        except BaseException as rollback_error:
+            raise CoverSaveError("保存未完成，恢复原文件时遇到问题。原文件恢复副本已保留在："
+                                 + str(transaction) + "。" + str(rollback_error)) from rollback_error
+        retain_recovery = False
         _rollback_published(published)
         raise
     finally:
@@ -327,4 +399,5 @@ def save_cover(source: CoverSource, image: Image.Image, mode: str = "copy", *,
                 reservation.unlink(missing_ok=True)
             except OSError:
                 pass
-        shutil.rmtree(transaction, ignore_errors=True)
+        if not retain_recovery:
+            shutil.rmtree(transaction, ignore_errors=True)

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QSlider, QSizePolicy, QStyle, QStyleOptionSlider, QVBoxLayout,
 )
 
-from .cover_save import CoverSource, SaveResult, save_cover
+from .cover_save import CoverSaveError, CoverSource, SaveResult, save_cover
 from .frame_reader import FrameCancelled, FrameReader
 from .models import MediaItem
 from .frame_export import export_destination, export_frame
@@ -83,6 +83,7 @@ class _EditorWorker:
         self._save_cancel = threading.Event()
         self._reader = None
         self._preview = None
+        self._retiring_previews = []
         self._pending = None
         self._busy = None
         self._sequence = 0
@@ -152,9 +153,56 @@ class _EditorWorker:
         preview = self._preview
         if preview is not None:
             preview.close()
+        for preview in self._retiring_previews:
+            preview.close()
         with self._condition:
             self._pending = None
             self._condition.notify()
+
+    def _start_preview(self, metadata):
+        if self._preview_factory is None or self._closing.is_set():
+            return
+        options = dict(image_path=self._item.image_path, on_frame=self._cached_frame,
+                       on_position=self.signals.position.emit, on_error=self._preview_failed,
+                       cancel_event=self._closing)
+        if (getattr(self._preview_factory, "supports_reader_fork", False)
+                and callable(getattr(self._reader, "fork", None))):
+            options["reader"] = self._reader
+        self._preview = self._preview_factory(self._item.video_path, metadata, **options)
+        self._preview.start()
+
+    def _release_movie_readers(self):
+        # Windows can deny replacement while FFmpeg still owns the MOV. Closing
+        # alone requests cancellation; waiting confirms every preview reader is
+        # gone before the transaction can replace either member of the pair.
+        if self._preview is not None:
+            preview, self._preview = self._preview, None
+            self._retiring_previews.append(preview)
+            preview.close()
+        for preview in list(self._retiring_previews):
+            wait = getattr(preview, "wait", None)
+            if callable(wait) and not wait(5):
+                # The primary reader remains open. Subsequent navigation uses
+                # its on-demand path, while another save retries this join.
+                raise CoverSaveError("预览视频尚未释放，请稍后重试保存。")
+            self._retiring_previews.remove(preview)
+        self._reader.close()
+
+    def _resume_after_failed_save(self):
+        if self._closing.is_set():
+            return
+        restored = CoverSource.capture(self._item, self._closing)
+        # Rolling back with temporary originals legitimately changes inode/time
+        # identity. Refresh that identity only if both contents are unchanged;
+        # never silently adopt an external edit as this editor's source.
+        if (restored.image.sha256 != self.source.image.sha256
+                or restored.video.sha256 != self.source.video.sha256):
+            raise CoverSaveError("源图片或视频已发生变化，请关闭编辑器后重新打开。")
+        self.source = restored
+        self._reader = self._reader_factory(self._item.video_path, cancel_event=self._closing)
+        metadata = self._reader.open()
+        self._start_preview(metadata)
+        return restored
 
     def _run(self):
         try:
@@ -164,21 +212,8 @@ class _EditorWorker:
             metadata = self._reader.open()
             if self._closing.is_set():
                 return
-            if self._preview_factory is not None:
-                options = dict(image_path=self._item.image_path,
-                               on_frame=self._cached_frame,
-                               on_position=self.signals.position.emit,
-                               on_error=self._preview_failed,
-                               cancel_event=self._closing)
-                if (getattr(self._preview_factory, "supports_reader_fork", False)
-                        and callable(getattr(self._reader, "fork", None))):
-                    # Reuse verified frame metadata, while the session forks an
-                    # independent decoder/process and cancellation lifetime.
-                    options["reader"] = self._reader
-                self._preview = self._preview_factory(self._item.video_path, metadata, **options)
             self.signals.opened.emit(metadata)
-            if self._preview is not None:
-                self._preview.start()
+            self._start_preview(metadata)
             while not self._closing.is_set():
                 with self._condition:
                     while self._pending is None and not self._closing.is_set():
@@ -188,6 +223,8 @@ class _EditorWorker:
                     kind, sequence, index, mode = self._pending
                     self._pending = None
                     self._busy = kind
+                readers_released = False
+                save_completed = False
                 try:
                     if kind == "preview":
                         if self._preview is not None:
@@ -203,8 +240,18 @@ class _EditorWorker:
                     else:
                         if self._save_cancel.is_set():
                             raise InterruptedError("已取消保存。")
+                        if getattr(metadata, 'timestamps_estimated', False):
+                            raise CoverSaveError("无法确认所选帧的准确视频时刻，未更改原文件。")
                         image = self._reader.export(index)
-                        result = self._save_function(source, image, mode, cancel_event=self._save_cancel)
+                        if mode == 'overwrite':
+                            self._release_movie_readers()
+                            readers_released = True
+                        frame = metadata.frames[index]
+                        result = self._save_function(
+                            source, image, mode, cancel_event=self._save_cancel,
+                            frame_time_seconds=frame.pts_seconds + getattr(metadata, 'start_time_seconds', 0.0),
+                            frame_duration_seconds=frame.duration_seconds)
+                        save_completed = True
                         self.signals.saved.emit(result)
                 except (FrameCancelled, InterruptedError):
                     if kind == "save" and not self._closing.is_set():
@@ -213,6 +260,14 @@ class _EditorWorker:
                     if not self._closing.is_set():
                         self.signals.failed.emit(kind, sequence, str(error))
                 finally:
+                    if readers_released and not save_completed:
+                        try:
+                            restored = self._resume_after_failed_save()
+                            if restored is not None:
+                                source = restored
+                        except Exception as error:
+                            if not self._closing.is_set():
+                                self.signals.failed.emit('preview', sequence, str(error))
                     with self._condition:
                         self._busy = None
         except (FrameCancelled, InterruptedError):
@@ -221,9 +276,12 @@ class _EditorWorker:
             if not self._closing.is_set():
                 self.signals.failed.emit("open", 0, str(error))
         finally:
+            previews = list(self._retiring_previews)
             if self._preview is not None:
-                self._preview.close()
-                wait = getattr(self._preview, "wait", None)
+                previews.append(self._preview)
+            for preview in previews:
+                preview.close()
+                wait = getattr(preview, "wait", None)
                 if wait is not None:
                     wait(2)
             if self._reader is not None:
@@ -420,12 +478,12 @@ class SaveModeDialog(QDialog):
     def _update_warning(self):
         if self.overwrite_choice.isChecked():
             self.warning_label.setText(
-                f"新图片校验通过后，永久替换「{self._item.image_path.name}」。不保留备份，保存后无法在 LiveViewer 中撤销；原视频不变。"
+                f"图片和视频配对校验通过后，替换「{self._item.image_path.name}」及对应视频。不保留备份，保存后无法在 LiveViewer 中撤销。视频画面和声音保持不变，并更新 Live Photo 配对与封面时间信息。"
             )
             self.warning_label.setStyleSheet(f"color:{tokens_for(self)['badge_text']}")
         else:
             self.warning_label.setText(
-                "图片与视频一起创建 v1、v2… 副本，使用同一个版本号。图片格式保持不变，视频完整复制，原文件不变。"
+                "图片与视频一起创建 v1、v2… 副本，使用同一个版本号。图片格式、视频画面和声音保持不变，并更新 Live Photo 配对与封面时间信息。原文件不变。"
             )
             self.warning_label.setStyleSheet(f"color:{tokens_for(self)['muted']}")
 

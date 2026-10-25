@@ -14,6 +14,8 @@ from PIL import Image
 from livegallery import cover_save
 from livegallery.cover_save import CoverSaveError, CoverSource, SourceChangedError, WORK_DIRECTORY, save_cover
 from livegallery.models import MediaItem
+from livegallery.livephoto_metadata import photo_identifier, validate_pair
+from tests.movie_helpers import assert_video_media_preserved
 
 
 class CoverSaveTests(unittest.TestCase):
@@ -23,7 +25,7 @@ class CoverSaveTests(unittest.TestCase):
         self.photo = self.folder / "Holiday.JPEG"
         self.video = self.folder / "Holiday.MOV"
         Image.new("RGB", (80, 60), "blue").save(self.photo, "JPEG")
-        self.video.write_bytes(b"original-video-data\x00" * 10_000)
+        self.video.write_bytes((Path(__file__).parent / "fixtures" / "JPEG_PAIR.mov").read_bytes())
         self.original_image = self.photo.read_bytes()
         self.original_video = self.video.read_bytes()
         self.item = MediaItem("photo", self.photo, self.video)
@@ -32,6 +34,7 @@ class CoverSaveTests(unittest.TestCase):
 
     def tearDown(self):
         self.photo.chmod(0o600)
+        self.video.chmod(0o600)
         self.folder.chmod(0o700)
         self.directory.cleanup()
 
@@ -56,7 +59,7 @@ class CoverSaveTests(unittest.TestCase):
             with self.assertRaises(CoverSaveError):
                 cover_save._writable(regular)
 
-    def test_copy_pair_shares_version_preserves_extension_and_video_bytes(self):
+    def test_copy_pair_shares_version_extension_and_live_photo_metadata(self):
         result = save_cover(self.source, self.frame)
         self.assertEqual(result.image_path.name, "Holiday v1.JPEG")
         self.assertEqual(result.video_path.name, "Holiday v1.MOV")
@@ -65,25 +68,28 @@ class CoverSaveTests(unittest.TestCase):
         with Image.open(result.image_path) as image:
             self.assertEqual(image.format, "JPEG")
             self.assertEqual(image.size, self.frame.size)
-        self.assertEqual(result.video_path.read_bytes(), self.original_video)
+        assert_video_media_preserved(self, self.original_video, result.video_path.read_bytes())
+        validate_pair(result.image_path, result.video_path, photo_identifier(result.image_path), 0)
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_overwrite_is_image_only_atomic_and_keeps_no_backup(self):
+    def test_overwrite_replaces_validated_pair_and_keeps_no_backup(self):
         original_replace = cover_save.os.replace
         observations = []
 
         def replace(staged, target):
-            observations.append((self.photo.read_bytes(), Path(staged).read_bytes()[:3]))
+            observations.append((Path(target), self.photo.read_bytes(), Path(staged).read_bytes()[:3]))
             return original_replace(staged, target)
 
         with patch.object(cover_save.os, "replace", side_effect=replace):
             result = save_cover(self.source, self.frame, "overwrite")
-        self.assertEqual(observations, [(self.original_image, b"\xff\xd8\xff")])
+        self.assertEqual([row[0] for row in observations], [self.photo, self.video])
+        self.assertEqual(observations[0][1:], (self.original_image, b"\xff\xd8\xff"))
         self.assertEqual(result.image_path, self.photo)
         self.assertFalse(result.created_copy)
         self.assertIsNone(result.backup_path)
-        self.assertEqual(self.video.read_bytes(), self.original_video)
+        assert_video_media_preserved(self, self.original_video, self.video.read_bytes())
+        validate_pair(self.photo, self.video, photo_identifier(self.photo), 0)
         with Image.open(self.photo) as image:
             self.assertEqual(image.size, self.frame.size)
         self.assert_no_pending_files()
@@ -221,7 +227,8 @@ class CoverSaveTests(unittest.TestCase):
 
     def test_heic_cannot_be_saved_as_disguised_jpeg(self):
         heic = self.folder / "Holiday.HEIC"
-        heic.write_bytes(b"original heic content")
+        heic.write_bytes((Path(__file__).parent / "fixtures" / "Live_H264.heic").read_bytes())
+        original_heic = heic.read_bytes()
         source = CoverSource.capture(MediaItem("heic", heic, self.video))
 
         def fake_heic(image, target, **kwargs):
@@ -230,7 +237,7 @@ class CoverSaveTests(unittest.TestCase):
         for mode in ("copy", "overwrite"):
             with self.assertRaises(CoverSaveError):
                 save_cover(source, self.frame, mode, heic_encoder=fake_heic)
-            self.assertEqual(heic.read_bytes(), b"original heic content")
+            self.assertEqual(heic.read_bytes(), original_heic)
             self.assert_no_pending_files()
         self.assert_originals()
 
@@ -252,7 +259,8 @@ class CoverSaveTests(unittest.TestCase):
         self.assertEqual({result.image_path.stem for result in results}, {"Holiday v1", "Holiday v2"})
         for result in results:
             self.assertEqual(result.video_path.stem, result.image_path.stem)
-            self.assertEqual(result.video_path.read_bytes(), self.original_video)
+            assert_video_media_preserved(self, self.original_video, result.video_path.read_bytes())
+            validate_pair(result.image_path, result.video_path, photo_identifier(result.image_path), 0)
         self.assert_originals()
         self.assert_no_pending_files()
 
@@ -279,6 +287,105 @@ class CoverSaveTests(unittest.TestCase):
         with patch.object(cover_save.os, "replace", side_effect=PermissionError("file in use")):
             with self.assertRaises(PermissionError):
                 save_cover(self.source, self.frame, "overwrite")
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_selected_time_and_fresh_identifier_are_written_into_both_outputs(self):
+        first = save_cover(self.source, self.frame, frame_time_seconds=.4, frame_duration_seconds=.08)
+        first_id = photo_identifier(first.image_path)
+        validate_pair(first.image_path, first.video_path, first_id, .4)
+        second = save_cover(self.source, self.frame, 'overwrite',
+                            frame_time_seconds=.8, frame_duration_seconds=.04)
+        second_id = photo_identifier(second.image_path)
+        self.assertNotEqual(first_id, second_id)
+        validate_pair(second.image_path, second.video_path, second_id, .8)
+        assert_video_media_preserved(self, self.original_video, self.video.read_bytes())
+
+    def test_pair_validation_failure_happens_before_any_publication(self):
+        with patch.object(cover_save, 'validate_pair', side_effect=ValueError('invalid pairing')), \
+                patch.object(cover_save.os, 'replace') as replace, \
+                patch.object(cover_save, '_publish_no_replace') as publish:
+            for mode in ('copy', 'overwrite'):
+                with self.assertRaisesRegex(ValueError, 'invalid pairing'):
+                    save_cover(self.source, self.frame, mode)
+            replace.assert_not_called()
+            publish.assert_not_called()
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_overwrite_second_replace_failure_restores_original_pair(self):
+        replace = cover_save.os.replace
+        def fail_movie(staged, target):
+            if Path(target) == self.video:
+                raise PermissionError('MOV still in use')
+            replace(staged, target)
+        with patch.object(cover_save.os, 'replace', side_effect=fail_movie):
+            with self.assertRaisesRegex(PermissionError, 'MOV still in use'):
+                save_cover(self.source, self.frame, 'overwrite')
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_overwrite_cancellation_between_replacements_restores_original_pair(self):
+        replace, cancel = cover_save.os.replace, threading.Event()
+        def cancel_after_first(staged, target):
+            replace(staged, target)
+            if Path(staged).name.startswith('cover'):
+                cancel.set()
+        with patch.object(cover_save.os, 'replace', side_effect=cancel_after_first):
+            with self.assertRaises(InterruptedError):
+                save_cover(self.source, self.frame, 'overwrite', cancel_event=cancel)
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_interrupt_immediately_after_os_replace_restores_both_originals(self):
+        replace = cover_save.os.replace
+        for interruption in (KeyboardInterrupt, SystemExit):
+            with self.subTest(interruption=interruption.__name__):
+                source = CoverSource.capture(self.item)
+                def interrupt_after_replace(staged, target):
+                    replace(staged, target)
+                    if Path(staged).name.startswith('cover'):
+                        raise interruption('interrupted between replacement and tracking')
+                with patch.object(cover_save.os, 'replace', side_effect=interrupt_after_replace):
+                    with self.assertRaises(interruption):
+                        save_cover(source, self.frame, 'overwrite')
+                self.assert_originals()
+                self.assert_no_pending_files()
+
+    def test_failed_rollback_retains_verified_originals_and_recovery_record(self):
+        replace = cover_save.os.replace
+        def fail_commit_and_restore(staged, target):
+            if Path(target) == self.video or Path(staged).name.startswith('original-'):
+                raise PermissionError('simulated locked destination')
+            replace(staged, target)
+        with patch.object(cover_save.os, 'replace', side_effect=fail_commit_and_restore):
+            with self.assertRaisesRegex(CoverSaveError, '恢复副本已保留'):
+                save_cover(self.source, self.frame, 'overwrite')
+        recovery = list((self.folder / WORK_DIRECTORY).glob('*/recovery.json'))
+        self.assertEqual(len(recovery), 1)
+        transaction = recovery[0].parent
+        self.assertEqual((transaction / 'original-image.JPEG').read_bytes(), self.original_image)
+        self.assertEqual((transaction / 'original-video.MOV').read_bytes(), self.original_video)
+        self.assertEqual(self.video.read_bytes(), self.original_video)
+
+    def test_overwrite_rollback_does_not_replace_concurrently_modified_output(self):
+        replace = cover_save.os.replace
+        def external_edit_then_fail(staged, target):
+            if Path(target) == self.video:
+                self.photo.write_bytes(b'external editor changed image')
+                raise PermissionError('video unavailable')
+            replace(staged, target)
+        with patch.object(cover_save.os, 'replace', side_effect=external_edit_then_fail):
+            with self.assertRaisesRegex(CoverSaveError, '恢复副本已保留'):
+                save_cover(self.source, self.frame, 'overwrite')
+        self.assertEqual(self.photo.read_bytes(), b'external editor changed image')
+        self.assertEqual(self.video.read_bytes(), self.original_video)
+        self.assertEqual(len(list((self.folder / WORK_DIRECTORY).glob('*/original-image.JPEG'))), 1)
+
+    def test_read_only_video_is_not_replaced(self):
+        self.video.chmod(0o444)
+        with self.assertRaises(CoverSaveError):
+            save_cover(self.source, self.frame, 'overwrite')
         self.assert_originals()
         self.assert_no_pending_files()
 
@@ -310,11 +417,11 @@ class CoverSaveTests(unittest.TestCase):
         self.assertEqual(copied.video_path.name, "Portrait v1.MOV")
         self.assertEqual(heic.read_bytes(), original_heic)
         self.assertEqual(movie.read_bytes(), original_movie)
-        self.assertEqual(copied.video_path.read_bytes(), original_movie)
+        assert_video_media_preserved(self, original_movie, copied.video_path.read_bytes())
         overwritten = save_cover(source, selected, "overwrite")
         self.assertEqual(overwritten.image_path, heic)
         self.assertIsNone(overwritten.backup_path)
-        self.assertEqual(movie.read_bytes(), original_movie)
+        assert_video_media_preserved(self, original_movie, movie.read_bytes())
         self.assertNotEqual(heic.read_bytes(), original_heic)
         for path in (copied.image_path, heic):
             header = path.read_bytes()[:128]

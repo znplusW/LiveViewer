@@ -15,6 +15,21 @@
       "license": "BSD-3-Clause"
     }
   },
+  "source_inputs": {
+    "scripts/build_heic_encoder.py": "4ca1d9767f8121f4c965b1dcab58455504b3db7f6659aa44f0e0eda468541d40",
+    "dependencies/heic-encoder.json": "eddd9811a438a1cd0b20ade2279fa3d18592ca02939c5bed72985ef76773cccc",
+    "requirements-build.txt": "7822e21a0e90738766ad0634aaea62489f4560eabb3661d473eba329497d7713",
+    "requirements.txt": "3adec26d8e808decc1ec6ba9a72f266322ba44635663585b3cb338296a634378",
+    "native/heic_encoder/CMakeLists.txt": "d5ac1433493bbac11c40a4e1a2d47da90a25b78502465123822771915f718230",
+    "native/heic_encoder/main.cpp": "d799dc197e9447ff60c8b9a95a3078aa150e77c9514b8890eaac6a12dd4e500b"
+  },
+  "build_platform": {
+    "platform": "darwin",
+    "machine": "arm64",
+    "pointer_bits": 64,
+    "image_os": "",
+    "image_version": ""
+  },
   "helper_license": "MIT",
   "shared_libraries": true,
   "x265": false,
@@ -28,6 +43,11 @@
     "libheif.1.dylib": "9c2bcbe7812f7e8a241b99765bab999873a1d4c6beaedf6d918d59014ee7d6f1",
     "libkvazaar.7.4.0.dylib": "628381e3763906016ec120f1e99f3cf840481d90cd1fa7d61f2e3c7d6964b16e",
     "libkvazaar.7.dylib": "628381e3763906016ec120f1e99f3cf840481d90cd1fa7d61f2e3c7d6964b16e",
-    "LiveViewer.HeicEncoder": "277170597669f7e400ce42176acbec5c7d4c59f06ce4ca2c3282c18cc24adf2d"
+    "LiveViewer.HeicEncoder": "2eab494342c8bff07f6cef85726c1c07ebcb44705f57893e8e1a094214ae602c"
+  },
+  "license_files": {
+    "Kvazaar-LICENSE.txt": "3c1dc3d7f8a3d08c14f4fbe9942f45764d8a21a3296e8d83446f33fd65f21c38",
+    "README.txt": "2ae42007dd2665d2f0d87241b71a713b4817b57298324d96296b23660a4816be",
+    "libheif-COPYING.txt": "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596"
   }
 }

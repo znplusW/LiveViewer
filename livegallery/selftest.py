@@ -1058,8 +1058,33 @@ def _file_digest(path: Path):
         return hashlib.file_digest(source, 'sha256').hexdigest()
 
 
+def _cover_movie_media_signature(path: Path):
+    """Use bundled FFprobe, independent of our metadata parser, to check A/V."""
+    from .frame_tools import resolve_frame_tools
+    entries = ('stream=index,codec_type,codec_name,codec_tag_string,width,height,pix_fmt,time_base,'
+               'start_pts,duration_ts,sample_rate,channels,channel_layout:stream_tags:stream_side_data:'
+               'packet=stream_index,pts,dts,duration,size,data_hash')
+    options = {'creationflags': subprocess.CREATE_NO_WINDOW} if sys.platform == 'win32' else {}
+    process = subprocess.run([str(resolve_frame_tools().ffprobe), '-v', 'error', '-show_streams',
+                              '-show_packets', '-show_data_hash', 'sha256', '-show_entries', entries,
+                              '-of', 'json', str(path)], capture_output=True, timeout=30, check=True, **options)
+    data = json.loads(process.stdout)
+    result = []
+    for stream in data['streams']:
+        if stream.get('codec_type') not in ('video', 'audio'):
+            continue
+        index = stream.pop('index')
+        packets = [{key: value for key, value in packet.items() if key != 'stream_index'}
+                   for packet in data.get('packets', ()) if packet['stream_index'] == index]
+        assert packets and all('data_hash' in packet for packet in packets)
+        result.append((stream, packets))
+    assert result, 'Live Photo fixture has no audio/video packets'
+    return result
+
+
 def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
     from .cover_save import CoverSource, save_cover
+    from .livephoto_metadata import photo_identifier, validate_pair
     with tempfile.TemporaryDirectory(prefix='heic-cover-', dir=report_dir) as temporary:
         folder = Path(temporary)
         still, video = folder / 'Real_HEIC.heic', folder / 'Real_HEIC.MOV'
@@ -1067,14 +1092,24 @@ def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
         shutil.copy2(fixtures / 'Live_H264.MOV', video)
         item = MediaItem('heic-roundtrip', still, video)
         before_image, before_video = _file_digest(still), _file_digest(video)
+        before_media = _cover_movie_media_signature(video)
         with FrameReader(video) as reader:
             selected = reader.export(0)
-        copied = save_cover(CoverSource.capture(item), selected, 'copy')
+            frame = reader.metadata.frames[0]
+            seconds = frame.pts_seconds + reader.metadata.start_time_seconds
+        timing = dict(frame_time_seconds=seconds, frame_duration_seconds=frame.duration_seconds)
+        copied = save_cover(CoverSource.capture(item), selected, 'copy', **timing)
         assert copied.image_path.suffix == '.heic' and copied.image_path.stem == copied.video_path.stem
         assert _file_digest(still) == before_image and _file_digest(video) == before_video
-        assert _file_digest(copied.video_path) == before_video
-        replaced = save_cover(CoverSource.capture(item), selected, 'overwrite')
-        assert replaced.backup_path is None and _file_digest(video) == before_video
+        assert _cover_movie_media_signature(copied.video_path) == before_media
+        copied_id = photo_identifier(copied.image_path)
+        validate_pair(copied.image_path, copied.video_path, copied_id, seconds)
+        replaced = save_cover(CoverSource.capture(item), selected, 'overwrite', **timing)
+        assert replaced.backup_path is None
+        assert _cover_movie_media_signature(video) == before_media
+        replaced_id = photo_identifier(still)
+        validate_pair(still, video, replaced_id, seconds)
+        assert replaced_id != copied_id
         assert _file_digest(still) != before_image
         for path in (copied.image_path, replaced.image_path):
             header = path.read_bytes()[:128]
@@ -1083,7 +1118,8 @@ def _check_heic_cover_roundtrip(fixtures: Path, report_dir: Path):
             assert decoded.size == selected.size, 'HEIC roundtrip changed full-resolution dimensions'
             decoded.load()
         return {'format': 'HEVC HEIC', 'size': list(selected.size),
-                'copy_and_overwrite': True, 'video_bytes_unchanged': True}
+                'copy_and_overwrite': True, 'audio_video_packets_and_tracks_unchanged': True,
+                'live_photo_pair_metadata_validated': True, 'selected_frame_time_seconds': seconds}
 
 
 @contextmanager
@@ -1275,6 +1311,7 @@ def _check_editor_preview_export(dialog, folder: Path, still: Path, video: Path,
 
 def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
     from .cover_editor import EditorDialog, SaveModeDialog
+    from .livephoto_metadata import photo_identifier, validate_pair
     with tempfile.TemporaryDirectory(prefix='editor-vfr-', dir=report_dir) as temporary:
         folder = Path(temporary)
         still, video = folder / 'Editor_VFR.jpg', folder / 'Editor_VFR.MOV'
@@ -1282,6 +1319,7 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
         shutil.copy2(fixtures / 'VFR_PAIR.MOV', video)
         item = MediaItem('vfr-editor', still, video)
         before_image, before_video = _file_digest(still), _file_digest(video)
+        before_media = _cover_movie_media_signature(video)
         dialog = EditorDialog(item, parent, initial_export_directory=parent.preferences.last_export_directory)
         dialog.frame_exported.connect(parent._remember_frame_export)
         dialog.setModal(True)
@@ -1348,7 +1386,8 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
             saved = dialog.saved_result
             assert saved.created_copy and saved.image_path.stem == saved.video_path.stem
             assert _file_digest(still) == before_image and _file_digest(video) == before_video
-            assert _file_digest(saved.video_path) == before_video
+            assert _cover_movie_media_signature(saved.video_path) == before_media
+            validate_pair(saved.image_path, saved.video_path, photo_identifier(saved.image_path), .44)
             decoded = load_image(saved.image_path, None)
             assert decoded.size == (320, 240)
             expected = (207, 66, 194)  # Exact VFR frame 4, not a millisecond/fps approximation.
@@ -1366,7 +1405,8 @@ def _check_real_cover_editor(fixtures: Path, report_dir: Path, parent):
         after_cancel = {path.name: _file_digest(path) for path in folder.iterdir() if path.is_file()}
         assert before_cancel == after_cancel and cancelled.saved_result is None
         return {'vfr_index': 4, 'pts_milliseconds': 440, 'full_size': [320, 240],
-                'copy_preserves_originals_and_video_bytes': True, 'cancel_no_changes': True,
+                'copy_preserves_originals_and_audio_video_packets': True,
+                'live_photo_pair_metadata_validated': True, 'cancel_no_changes': True,
                 'save_mode_prompt_after_save': True, 'maximize_button_available': True,
                 'original_cover_marker_frame': 3,
                 'touch_scrub_updates_before_release': shown_while_pressed,
