@@ -9,7 +9,7 @@ from unittest.mock import patch
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QAccessible, QColor, QImage, QKeySequence, QWheelEvent
+from PySide6.QtGui import QAccessible, QColor, QImage, QKeySequence, QTouchEvent, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSpinBox,
                                QStyle, QStyleOptionComboBox, QStyleOptionSpinBox,
@@ -196,6 +196,71 @@ class SettingsControlTests(unittest.TestCase):
         self.assertFalse((self.base / 'data' / 'settings.json').exists())
         self.dialog.reject()
         self.assertFalse(Preferences.load().autoplay)
+
+    def page_touch(self, control, *, delta=QPoint(), cancel=False):
+        self.dialog.activateWindow()
+        QTest.qWait(20)
+        self.scroll.ensureWidgetVisible(control)
+        self.application.processEvents()
+        target = self.dialog.windowHandle()
+        position = target.mapFromGlobal(control.mapToGlobal(control.rect().center()))
+        device = QTest.createTouchDevice()
+        sequence = QTest.touchEvent(target, device, False)
+        sequence.press(0, position, target).commit()
+        if not delta.isNull():
+            sequence.move(0, position + delta, target).commit()
+        if cancel:
+            QApplication.sendEvent(self.scroll.viewport(), QTouchEvent(QEvent.Type.TouchCancel, device))
+        sequence.release(0, position + delta, target).commit()
+        QTest.qWait(20)
+
+    def test_window_routed_swipes_over_settings_controls_scroll_without_edits(self):
+        controls = (self.dialog.theme_mode, self.dialog.autoplay, self.dialog.hold,
+                    self.dialog.hold.lineEdit(), self.dialog.live_key)
+        for control in controls:
+            with self.subTest(control=type(control).__name__):
+                self.scroll.ensureWidgetVisible(control)
+                self.application.processEvents()
+                before = self.bar.value()
+                values = (self.dialog.theme_mode.currentIndex(), self.dialog.autoplay.isChecked(),
+                          self.dialog.hold.value(), self.dialog.live_key.keySequence())
+                self.page_touch(control, delta=QPoint(3, -90))
+                self.assertEqual(self.bar.value(), before + 90)
+                self.assertIsNone(QApplication.activePopupWidget())
+                self.assertEqual(values, (self.dialog.theme_mode.currentIndex(), self.dialog.autoplay.isChecked(),
+                                         self.dialog.hold.value(), self.dialog.live_key.keySequence()))
+        # Drag down starting on ordinary page text, not just an input control.
+        label = self.dialog.horizontal_scroll_help
+        self.scroll.ensureWidgetVisible(label)
+        self.application.processEvents()
+        before = self.bar.value()
+        self.page_touch(label, delta=QPoint(0, 70))
+        self.assertEqual(self.bar.value(), max(0, before - 70))
+
+    def test_window_routed_control_taps_keep_switch_combo_and_text_editing(self):
+        before = self.dialog.autoplay.isChecked()
+        self.page_touch(self.dialog.autoplay)
+        self.assertEqual(self.dialog.autoplay.isChecked(), not before)
+        self.page_touch(self.dialog.theme_mode)
+        self.assertTrue(self.dialog.theme_mode.view().isVisible())
+        self.dialog.theme_mode.hidePopup()
+        self.page_touch(self.dialog.hold.lineEdit())
+        self.assertTrue(self.dialog.hold.lineEdit().hasFocus())
+        self.dialog.hold.lineEdit().selectAll()
+        QTest.keyClicks(self.dialog.hold.lineEdit(), '650')
+        QTest.keyClick(self.dialog.hold.lineEdit(), Qt.Key.Key_Tab)
+        self.assertEqual(self.dialog.hold.value(), 650)
+        self.page_touch(self.dialog.live_key)
+        self.assertTrue(self.dialog.live_key.hasFocus())
+        QTest.keyClick(self.dialog.live_key, Qt.Key.Key_J)
+        self.assertEqual(self.dialog.live_key.keySequence(), QKeySequence('J'))
+
+    def test_cancelled_settings_contact_does_not_toggle_and_mouse_remains_usable(self):
+        before = self.dialog.autoplay.isChecked()
+        self.page_touch(self.dialog.autoplay, cancel=True)
+        self.assertEqual(self.dialog.autoplay.isChecked(), before)
+        QTest.mouseClick(self.dialog.autoplay, Qt.MouseButton.LeftButton)
+        self.assertEqual(self.dialog.autoplay.isChecked(), not before)
 
     def test_multi_select_menu_keeps_tick_checkboxes_and_stays_open_after_each_click(self):
         self.dialog.reject()

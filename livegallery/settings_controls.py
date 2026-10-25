@@ -1,9 +1,12 @@
 """Native-semantics controls for settings and multi-select menus."""
-from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen, QWheelEvent
+import time
+
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QEventPoint, QMouseEvent, QPainter, QPainterPath, QPalette, QPen, QWheelEvent
 from PySide6.QtWidgets import (
-    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QScrollArea, QSizePolicy, QStyle, QStyleOptionButton,
+    QAbstractSpinBox, QApplication, QCheckBox, QComboBox, QScrollArea, QSizePolicy, QStyle, QStyleOptionButton, QWidget,
 )
+from shiboken6 import isValid
 from .ui_theme import tokens_for
 
 
@@ -97,8 +100,141 @@ class TickCheckBox(QCheckBox):
         painter.drawPath(path)
 
 
+class _SettingsTouchFilter(QObject):
+    """Keep the app-wide observer separate from QScrollArea's viewport filter."""
+
+    def eventFilter(self, watched, event):
+        return self.parent()._filter_touch(watched, event)
+
+
 class SettingsScrollArea(QScrollArea):
-    """Keep pixel-only touchpad scrolling working alongside native wheel steps."""
+    """Scroll over form controls, committing a touch tap only after release.
+
+    A native combo opens on mouse-down, before a flick recognizer can take
+    over. Owning raw touch on the form avoids opening/changing controls while
+    scrolling; completed taps still use the controls' native mouse handling.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
+        self._touch_device = None
+        self._touch_id = None
+        self._touch_target = None
+        self._touch_start = QPointF()
+        self._touch_start_value = 0
+        self._touch_moved = False
+        self._touch_cancelled = False
+        self._touch_mouse_until = 0.0
+        self._replaying_tap = False
+        self._touch_filter = _SettingsTouchFilter(self)
+        self._touch_filter_installed = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._touch_filter_installed:
+            QApplication.instance().installEventFilter(self._touch_filter)
+            self._touch_filter_installed = True
+
+    def hideEvent(self, event):
+        if self._touch_filter_installed:
+            QApplication.instance().removeEventFilter(self._touch_filter)
+            self._touch_filter_installed = False
+        self._reset_touch()
+        super().hideEvent(event)
+
+    def _belongs_to_page(self, widget):
+        return (isinstance(widget, QWidget) and widget.window() is self.window()
+                and (widget is self.viewport() or self.viewport().isAncestorOf(widget)))
+
+    def _reset_touch(self):
+        self._touch_device = self._touch_id = self._touch_target = None
+        self._touch_cancelled = False
+
+    def _send_tap_mouse(self, target, position, device, kind):
+        if not isValid(target) or not target.isVisible() or not target.isEnabled():
+            return
+        local = QPointF(target.mapFromGlobal(position.toPoint()))
+        window_position = QPointF(target.window().mapFromGlobal(position.toPoint()))
+        event = QMouseEvent(kind, local, window_position, position, Qt.MouseButton.LeftButton,
+                            Qt.MouseButton.LeftButton if kind == QEvent.Type.MouseButtonPress else Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.MouseEventSource.MouseEventSynthesizedByApplication, device)
+        self._replaying_tap = True
+        try:
+            QApplication.sendEvent(target, event)
+        finally:
+            self._replaying_tap = False
+
+    def _replay_tap(self, target, position, device):
+        if target is None or not isValid(target) or not self.isVisible():
+            return
+        focus = target
+        while focus is not None and self._belongs_to_page(focus):
+            if focus.focusPolicy() & Qt.FocusPolicy.ClickFocus:
+                focus.setFocus(Qt.FocusReason.MouseFocusReason)
+                break
+            focus = focus.parentWidget()
+        # Schedule release first: a menu button can enter a nested event loop
+        # while processing its press, and must still receive its button-up.
+        QTimer.singleShot(0, self, lambda: self._send_tap_mouse(
+            target, position, device, QEvent.Type.MouseButtonRelease))
+        self._send_tap_mouse(target, position, device, QEvent.Type.MouseButtonPress)
+
+    def _filter_touch(self, watched, event):
+        kind = event.type()
+        if kind in (QEvent.Type.Hide, QEvent.Type.WindowDeactivate) and watched in (self, self.window()):
+            self._reset_touch()
+        if kind in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate, QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            if not self._belongs_to_page(watched) or not self.isVisible():
+                return False
+            if kind == QEvent.Type.TouchBegin:
+                if QApplication.activePopupWidget() is not None:
+                    return False
+                points = event.points()
+                if not points:
+                    return False
+                self._touch_device = event.pointingDevice()
+                self._touch_id = points[0].id()
+                self._touch_start = QPointF(points[0].globalPosition())
+                target = QApplication.widgetAt(self._touch_start.toPoint())
+                # Keep the Python wrapper alive until release. Internal Qt
+                # editors otherwise may have no Python owner between events.
+                self._touch_target = target if self._belongs_to_page(target) else None
+                self._touch_start_value = self.verticalScrollBar().value()
+                self._touch_moved = False
+                self._touch_cancelled = len(points) != 1
+            if self._touch_device != event.pointingDevice():
+                return False
+            self._touch_mouse_until = time.monotonic() + .7
+            points = event.points()
+            if kind == QEvent.Type.TouchCancel:
+                self._reset_touch()
+            else:
+                if len(points) != 1 or any(p.id() != self._touch_id for p in points):
+                    self._touch_cancelled = True
+                point = next((p for p in points if p.id() == self._touch_id), None)
+                if point is not None:
+                    delta = point.globalPosition() - self._touch_start
+                    if max(abs(delta.x()), abs(delta.y())) >= max(16, QApplication.startDragDistance()):
+                        self._touch_moved = True
+                    if self._touch_moved and not self._touch_cancelled:
+                        self.verticalScrollBar().setValue(self._touch_start_value - round(delta.y()))
+                if kind == QEvent.Type.TouchEnd or not any(p.state() != QEventPoint.State.Released for p in points):
+                    tap = not self._touch_moved and not self._touch_cancelled and point is not None
+                    target, position, device = self._touch_target, QPointF(self._touch_start), self._touch_device
+                    self._reset_touch()
+                    if tap:
+                        QTimer.singleShot(0, self, lambda: self._replay_tap(target, position, device))
+            event.accept()
+            return True
+        if (kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease,
+                     QEvent.Type.MouseButtonDblClick, QEvent.Type.MouseMove)
+                and not self._replaying_tap and time.monotonic() < self._touch_mouse_until
+                and self._belongs_to_page(watched)
+                and event.source() != Qt.MouseEventSource.MouseEventNotSynthesized):
+            event.accept()
+            return True
+        return False
 
     def wheelEvent(self, event):
         pixels = event.pixelDelta()

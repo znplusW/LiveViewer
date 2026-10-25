@@ -20,18 +20,18 @@ def _fitted_image_rect(image_area, pixmap):
                  size.width(), size.height())
 
 
-def _live_badge_layout(image_rect):
-    """Keep the full label from obscuring a small or narrow photo."""
-    if image_rect.isEmpty():
+def _live_badge_layout(image_area):
+    """Anchor to the thumbnail frame, using its margins around narrow photos."""
+    if image_area.isEmpty():
         return 'dot', QRect()
     # Include the four-pixel inset in the space needed by the 47 x 20 label.
-    compact = (55 > image_rect.width() * .45 or
-               28 > image_rect.height() * .45)
+    compact = (55 > image_area.width() * .45 or
+               28 > image_area.height() * .45)
     if not compact:
-        return 'full', QRect(image_rect.x() + 4, image_rect.y() + 4, 47, 20)
-    diameter = min(10, image_rect.width(), image_rect.height())
-    inset = min(4, max(0, (min(image_rect.width(), image_rect.height()) - diameter) // 2))
-    return 'dot', QRect(image_rect.x() + inset, image_rect.y() + inset, diameter, diameter)
+        return 'full', QRect(image_area.x() + 4, image_area.y() + 4, 47, 20)
+    diameter = min(10, image_area.width(), image_area.height())
+    inset = min(4, max(0, (min(image_area.width(), image_area.height()) - diameter) // 2))
+    return 'dot', QRect(image_area.x() + inset, image_area.y() + inset, diameter, diameter)
 
 
 def overview_tile_size(width):
@@ -131,7 +131,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, '· · ·')
         item = index.data(Qt.ItemDataRole.UserRole)
         if item.is_live:
-            mode, badge = _live_badge_layout(displayed_rect)
+            mode, badge = _live_badge_layout(image_rect)
             if mode == 'dot' and not badge.isEmpty():
                 painter.setPen(QPen(QColor(colors['badge_background']), 2))
                 painter.setBrush(QColor(colors['badge_text']))

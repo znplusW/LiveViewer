@@ -542,6 +542,35 @@ class CanvasTests(unittest.TestCase):
             self.assertAlmostEqual(self.canvas.zoom_factor(), target, places=8)
         self.assertEqual(self.player.play_calls, 0)
 
+    def test_window_routed_double_tap_accepts_touch_distance_and_jitter(self):
+        window = self.canvas.windowHandle()
+        sequence = QTest.touchEvent(window, self.touch_device, False)
+        hints = QApplication.styleHints()
+        with patch.object(hints, 'touchDoubleTapDistance', return_value=48), \
+                patch.object(QApplication, 'startDragDistance', return_value=10):
+            for factor in (2.0, 1.0):
+                for origin in (self.center, self.center + QPoint(30, 15)):
+                    start = window.mapFromGlobal(self.canvas.viewport().mapToGlobal(origin))
+                    sequence.press(0, start, window).commit()
+                    sequence.move(0, start + QPoint(6, 6), window).commit()
+                    sequence.release(0, start + QPoint(6, 6), window).commit()
+                    self.app.processEvents()
+                self.assertTrue(self.canvas.is_zoom_animating())
+                self.finish_zoom_animation()
+                self.assertAlmostEqual(self.canvas.zoom_factor(), factor, places=8)
+        self.assertEqual(self.player.play_calls, 0)
+
+    def test_fit_second_touch_is_recognized_on_press_before_hold_deadline(self):
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+        self.touch(QEvent.Type.TouchBegin, (0, QEventPoint.State.Pressed, 400, 300))
+        QTest.qWait(QApplication.doubleClickInterval() + 40)
+        self.assertEqual(self.player.play_calls, 0)
+        self.touch(QEvent.Type.TouchEnd, (0, QEventPoint.State.Released, 400, 300))
+        self.assertTrue(self.canvas.is_zoom_animating())
+        self.finish_zoom_animation()
+        self.assertAlmostEqual(self.canvas.zoom_factor(), 2)
+
     def test_upgrade_waits_for_zoom_and_preserves_twice_fit_subject(self):
         position = QPoint(500, 340)
         subject = self.canvas.mapToScene(position)

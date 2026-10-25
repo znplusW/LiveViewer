@@ -2361,6 +2361,106 @@ def _check_application_theme(window, report_dir: Path):
         window._toggle_grid(original_grid_mode)
 
 
+def _check_touch_scroll_and_double_tap(report_dir: Path):
+    """Exercise native QWindow delivery through settings children and canvas."""
+    from unittest.mock import patch
+    from .app import SettingsDialog, STYLE
+    from .settings import Preferences
+
+    settings = SettingsDialog(Preferences())
+    settings.setStyleSheet(STYLE)
+    settings.resize(680, 480)
+    viewer = ViewerCanvas()
+    routes = []
+    try:
+        settings.show()
+        settings.activateWindow()
+        _wait(lambda: settings.windowHandle() is not None and settings.windowHandle().isExposed())
+        scroll, target = settings.scroll_area, settings.windowHandle()
+        bar = scroll.verticalScrollBar()
+
+        def touch_control(control, delta=QPoint()):
+            settings.activateWindow()
+            QTest.qWait(20)
+            scroll.ensureWidgetVisible(control)
+            QCoreApplication.processEvents()
+            point = target.mapFromGlobal(control.mapToGlobal(control.rect().center()))
+            assert scroll.viewport().rect().contains(control.mapTo(scroll.viewport(), control.rect().center()))
+            sequence = QTest.touchEvent(target, QTest.createTouchDevice(), False)
+            sequence.press(0, point, target).commit()
+            if not delta.isNull():
+                sequence.move(0, point + delta, target).commit()
+            sequence.release(0, point + delta, target).commit()
+            QTest.qWait(30)
+
+        for control in (settings.theme_mode, settings.autoplay, settings.hold,
+                        settings.hold.lineEdit(), settings.live_key):
+            scroll.ensureWidgetVisible(control)
+            QCoreApplication.processEvents()
+            before = bar.value()
+            unchanged = (settings.theme_mode.currentIndex(), settings.autoplay.isChecked(),
+                         settings.hold.value(), settings.live_key.keySequence().toString())
+            touch_control(control, QPoint(3, -90))
+            assert bar.value() == before + 90, 'Touch drag over settings field did not scroll'
+            assert QApplication.activePopupWidget() is None, 'Scroll gesture opened a settings popup'
+            assert unchanged == (settings.theme_mode.currentIndex(), settings.autoplay.isChecked(),
+                                  settings.hold.value(), settings.live_key.keySequence().toString())
+            routes.append(type(control).__name__)
+        touch_control(settings.autoplay)
+        _wait(lambda: settings.autoplay.isChecked())
+        touch_control(settings.theme_mode)
+        _wait(lambda: settings.theme_mode.view().isVisible())
+        settings.theme_mode.hidePopup()
+        touch_control(settings.hold.lineEdit())
+        assert settings.hold.lineEdit().hasFocus(), 'Touch tap did not focus the spin editor'
+        settings.hold.lineEdit().selectAll()
+        QTest.keyClicks(settings.hold.lineEdit(), '650')
+        QTest.keyClick(settings.hold.lineEdit(), Qt.Key.Key_Tab)
+        assert settings.hold.value() == 650
+        touch_control(settings.live_key)
+        assert settings.live_key.hasFocus(), 'Touch tap did not focus the shortcut editor'
+        QTest.keyClick(settings.live_key, Qt.Key.Key_J)
+        assert settings.live_key.keySequence() == QKeySequence('J')
+        settings.grab().save(str(report_dir / 'settings-touch-scroll.png'))
+        settings.reject()
+
+        viewer.resize(800, 600)
+        viewer.show()
+        viewer.activateWindow()
+        viewer.setFocus()
+        _wait(lambda: viewer.windowHandle() is not None and viewer.windowHandle().isExposed())
+        image = QImage(2400, 1800, QImage.Format.Format_RGB32)
+        image.fill('#5794b6')
+        viewer.set_photo(image, Path('/synthetic/touch-double-tap.mov'))
+        viewer.set_options(hold_ms=100)
+        device, target = QTest.createTouchDevice(), viewer.windowHandle()
+        sequence = QTest.touchEvent(target, device, False)
+        with patch.object(viewer, 'start_live') as playback:
+            for factor in (2.0, 1.0):
+                for index, origin in enumerate((QPoint(400, 300), QPoint(432, 322))):
+                    point = target.mapFromGlobal(viewer.viewport().mapToGlobal(origin))
+                    sequence.press(0, point, target).commit()
+                    sequence.move(0, point + QPoint(6, 6), target).commit()
+                    if index == 1:
+                        QTest.qWait(180)
+                    sequence.release(0, point + QPoint(6, 6), target).commit()
+                assert viewer.is_zoom_animating(), 'Touch double-tap did not begin smooth zoom'
+                _wait(lambda: not viewer.is_zoom_animating())
+                assert abs(viewer.zoom_factor() - factor) < .001
+            assert playback.call_count == 0, 'Double-tap briefly started Live playback'
+        return {'touch_target': 'QWindow', 'settings_scroll_routes': routes,
+                'drag_does_not_change_fields_or_open_popup': True,
+                'tap_preserves_switch_combo_and_text_edit': True,
+                'touch_double_tap_toggles_fit_and_twice_fit': True,
+                'touch_jitter_and_second_contact_hold_do_not_play_live': True,
+                'physical_touch_hardware': False}
+    finally:
+        settings.reject()
+        settings.deleteLater()
+        viewer.close()
+        viewer.deleteLater()
+
+
 def _check_thumbnail_live_badges(report_dir: Path):
     """Render both thumbnail layouts without decoding or replacing their model."""
     from PySide6.QtCore import QRect
@@ -2390,10 +2490,10 @@ def _check_thumbnail_live_badges(report_dir: Path):
     requests, resets = QSignalSpy(model.thumbnail_requested), QSignalSpy(model.modelReset)
     cases = ((True, 120, 0, 'dot', 20, 45),
              (True, 260, 0, 'full', 170, 45),
-             (True, 260, 1, 'dot', 450, 45),
+             (True, 260, 1, 'full', 450, 45),
              (False, 64, 0, 'dot', 20, 300),
              (False, 180, 0, 'full', 170, 300),
-             (False, 180, 1, 'dot', 450, 300))
+             (False, 180, 1, 'full', 450, 300))
     previews = []
     rendered = 0
     try:
@@ -2424,10 +2524,17 @@ def _check_thumbnail_live_badges(report_dir: Path):
                         delegate.paint(painter, option, model.index(source_row))
                         painter.end()
                         images.append(image)
-                    photo_rect = _fitted_image_rect(option.rect.adjusted(10, 10, -10, -34),
+                    image_area = option.rect.adjusted(10, 10, -10, -34)
+                    photo_rect = _fitted_image_rect(image_area,
                                                    model.thumbnails[str(model.items[row].image_path)])
-                    mode, badge = _live_badge_layout(photo_rect)
-                    assert mode == expected and photo_rect.contains(badge), 'LIVE badge does not fit the actual photo'
+                    mode, badge = _live_badge_layout(image_area)
+                    assert mode == expected and image_area.contains(badge), 'LIVE badge does not fit the thumbnail frame'
+                    if row == 1:
+                        assert not badge.intersects(photo_rect), 'Portrait LIVE badge should use the frame margin'
+                        assert images[0].copy(photo_rect.x() * dpr, photo_rect.y() * dpr,
+                                              photo_rect.width() * dpr, photo_rect.height() * dpr) == images[1].copy(
+                                                  photo_rect.x() * dpr, photo_rect.y() * dpr,
+                                                  photo_rect.width() * dpr, photo_rect.height() * dpr)
                     differences = 0
                     for py in range(images[0].height()):
                         for px in range(images[0].width()):
@@ -2453,17 +2560,16 @@ def _check_thumbnail_live_badges(report_dir: Path):
         for width in (120, 260, 120, 260):
             delegate.set_thumbnail_width(width)
             size = delegate.sizeHint(None, model.index(0))
-            photo_rect = _fitted_image_rect(QRect(0, 0, size.width(), size.height()).adjusted(10, 10, -10, -34),
-                                           model.thumbnails[str(landscape)])
-            modes.append(_live_badge_layout(photo_rect)[0])
+            image_area = QRect(0, 0, size.width(), size.height()).adjusted(10, 10, -10, -34)
+            modes.append(_live_badge_layout(image_area)[0])
         assert modes == ['dot', 'full', 'dot', 'full']
         assert {path: pixmap.cacheKey() for path, pixmap in model.thumbnails.items()} == keys
         assert requests.count() == 0 and resets.count() == 0
         return {'overview_and_filmstrip_share_adaptive_live_badge': True,
                 'small_thumbnails_use_compact_dot': True,
                 'large_thumbnails_restore_full_live_label': True,
-                'actual_photo_bounds_control_compact_mode': True,
-                'dot_stays_inside_narrow_photo': True,
+                'thumbnail_frame_bounds_control_compact_mode': True,
+                'portrait_badge_uses_frame_margin_without_covering_photo': True,
                 'static_thumbnails_have_no_live_mark': True,
                 'dark_light_selected_dpr1_dpr2_painted': True,
                 'thumbnail_cache_identity_preserved': True,
@@ -3006,8 +3112,11 @@ def run_self_test(fixtures: Path | None, report_dir: Path) -> int:
         report['checks'].append({'check': 'index_and_thumbnails', 'status': 'passed',
                                  'items': len(catalog), 'live_items': len(lives)})
         thumbnail_badges = _check_thumbnail_live_badges(report_dir)
-        report['checks'].append({'check': 'thumbnail_live_badges_adapt_to_actual_photo_size',
+        report['checks'].append({'check': 'thumbnail_live_badges_adapt_to_frame_size',
                                  **thumbnail_badges, 'status': 'passed'})
+        touch_controls = _check_touch_scroll_and_double_tap(report_dir)
+        report['checks'].append({'check': 'settings_scroll_and_double_tap_native_touch',
+                                 **touch_controls, 'status': 'passed'})
         library_cache = _check_library_cache(fixtures, report_dir)
         report['checks'].append({'check': 'cache_locations_portable_library_reuse_and_validation',
                                  **library_cache, 'status': 'passed'})

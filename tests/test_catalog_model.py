@@ -5,7 +5,7 @@ import unittest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
 from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QWidget
@@ -56,9 +56,7 @@ class ThumbnailBadgeTests(unittest.TestCase):
         delegate.paint(painter, option, self.model.index(row))
         painter.end()
         area = option.rect.adjusted(10, 10, -10, -34)
-        pixmap = self.model.thumbnails[str(self.model.items[0].image_path)]
-        photo = _fitted_image_rect(area, pixmap)
-        return image, photo, _live_badge_layout(photo)
+        return image, area, _live_badge_layout(area)
 
     @staticmethod
     def changed_pixels(live, still):
@@ -89,15 +87,25 @@ class ThumbnailBadgeTests(unittest.TestCase):
                 setter(small)
                 self.assertEqual(self.render(delegate)[2][0], 'dot')
 
-    def test_narrow_photo_uses_actual_photo_bounds_and_dot_stays_inside(self):
-        delegate = ThumbnailDelegate(self.widget, large=True)
-        delegate.set_thumbnail_width(260)
-        for dimensions in ((60, 600), (1200, 45), (320, 180)):
-            self.set_image(*dimensions)
-            _, photo, (mode, badge) = self.render(delegate)
-            self.assertTrue(photo.contains(badge))
-            self.assertEqual(mode, 'full' if dimensions == (320, 180) else 'dot')
-            self.assertGreaterEqual(badge.left(), photo.left())
+    def test_portrait_and_panorama_keep_badge_at_frame_corner_outside_photo(self):
+        for large in (True, False):
+            delegate = ThumbnailDelegate(self.widget, large=large)
+            (delegate.set_thumbnail_width if large else delegate.set_thumbnail_height)(260 if large else 180)
+            previous = None
+            for dimensions in ((60, 600), (1200, 45), (320, 180)):
+                self.set_image(*dimensions)
+                live, area, (mode, badge) = self.render(delegate)
+                still, _, _ = self.render(delegate, 1)
+                photo = _fitted_image_rect(area, self.model.thumbnails[str(self.model.items[0].image_path)])
+                self.assertTrue(area.contains(badge))
+                self.assertEqual(mode, 'full')
+                self.assertEqual(badge.topLeft(), area.topLeft() + QPoint(4, 4))
+                if previous is not None:
+                    self.assertEqual(badge, previous)
+                previous = badge
+                if dimensions != (320, 180):
+                    self.assertFalse(photo.intersects(badge))
+                    self.assertEqual(live.copy(photo), still.copy(photo), 'Badge obscures the narrow photo')
         self.assertEqual(_live_badge_layout(QRect(0, 0, 1, 1))[1], QRect(0, 0, 1, 1))
         self.assertTrue(_live_badge_layout(QRect())[1].isEmpty())
 

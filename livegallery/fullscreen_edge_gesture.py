@@ -45,11 +45,8 @@ class FullscreenEdgeGesture(QObject):
         self._tail_until = 0.0
         self._physical_right = 0.0
         self.native_policy = WindowEdgeGesturePolicy(self._windows, parent=self)
-        self.native_touch = None
         self.set_enabled_edges(enabled_edges)
         self._app.installEventFilter(self)
-        from .native_edge_touch import install_native_edge_touch
-        self.native_touch = install_native_edge_touch(self)
 
     @property
     def enabled_edges(self):
@@ -60,16 +57,12 @@ class FullscreenEdgeGesture(QObject):
         if selected != self._enabled_edges:
             self._enabled_edges = selected
             self._cancelled = True  # Never reinterpret a half-contact under new settings.
-            if self.native_touch is not None:
-                self.native_touch.cancel()
             self.native_policy.set_enabled(bool(selected))
 
     def close(self):
         if not self._closed:
             self._closed = True
             self._app.removeEventFilter(self)
-            if self.native_touch is not None:
-                self.native_touch.close()
             self.native_policy.close()
             self._reset()
             self._blocked.clear()
@@ -98,23 +91,6 @@ class FullscreenEdgeGesture(QObject):
                 return True
             child = child.parentWidget()
         return False
-
-    def eligible_edges_at(self, window, position):
-        """Accept the physical boundary, including subpixel rounding at a bezel."""
-        if (not self._enabled_edges or not window.isFullScreen() or not window.isVisible()
-                or QApplication.activeModalWidget() is not None
-                or QApplication.activePopupWidget() is not None):
-            return frozenset()
-        edges = set()
-        if -1 <= position.y() <= window.height() and -1 <= position.x() <= window.width():
-            if position.y() <= self.edge_height:
-                edges.add('top')
-            if position.x() <= self.side_width:
-                edges.add('left')
-            if position.x() >= window.width() - self.side_width:
-                edges.add('right')
-        edges.intersection_update(self._enabled_edges)
-        return frozenset() if self._interactive_control(window, position) else frozenset(edges)
 
     def _reset(self):
         target = self._target() if self._target is not None else None
@@ -185,9 +161,6 @@ class FullscreenEdgeGesture(QObject):
             return False
         kind = event.type()
         self.native_policy.observe(receiver, event)
-        if self.native_touch is not None:
-            if self.native_touch.observe(receiver, event):
-                return True
         active = self._target is not None
         if active and kind in (QEvent.Type.ApplicationDeactivate, QEvent.Type.DevicePixelRatioChange):
             self._cancelled = True
@@ -233,8 +206,18 @@ class FullscreenEdgeGesture(QObject):
                 return False
             point = candidates[0]
             position = window.mapFromGlobal(point.globalPosition())
-            eligible = self.eligible_edges_at(window, position)
+            eligible = set()
+            if 0 <= position.y() < window.height() and 0 <= position.x() < window.width():
+                if position.y() <= self.edge_height:
+                    eligible.add('top')
+                if position.x() <= self.side_width:
+                    eligible.add('left')
+                if position.x() >= window.width() - self.side_width:
+                    eligible.add('right')
+            eligible.intersection_update(self._enabled_edges)
             if not eligible:
+                return False
+            if self._interactive_control(window, position):
                 return False
             self._target, self._device = weakref.ref(window), device
             window.destroyed.connect(self._target_destroyed)

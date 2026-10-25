@@ -1150,7 +1150,10 @@ class ViewerCanvas(QGraphicsView):
         if event_type == QEvent.Type.TouchBegin:
             previous_tap = (self._last_tap_time, self._last_tap_timestamp, self._last_tap_device)
             second_drag = False
-            if len(active) == 1 and not self._fit_mode and self._touch_started_on_image:
+            if len(active) == 1 and self._touch_started_on_image:
+                # Recognize the second contact on finger-down in both fit and
+                # zoomed views. Waiting until release used mouse-sized tap
+                # tolerance and could start Live playback before deciding.
                 delta = active[0].position() - self._last_tap_position
                 distance = max(36, QApplication.styleHints().touchDoubleTapDistance())
                 second_drag = (self._recent_contact(event, self._last_tap_time,
@@ -1165,8 +1168,8 @@ class ViewerCanvas(QGraphicsView):
             if self._input_epoch != epoch:
                 return True  # A synchronous playback callback replaced/cancelled the source.
             if not second_drag:
-                # Starting the next contact is the sole cancellation path that
-                # may retain the preceding tap for a fit-mode double-click.
+                # Keep the preceding tap only for an unrelated first contact;
+                # a recognized second contact owns its entire touch sequence.
                 self._last_tap_time, self._last_tap_timestamp, self._last_tap_device = previous_tap
             if self._dispatch_owner is None:
                 self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -1226,7 +1229,10 @@ class ViewerCanvas(QGraphicsView):
             # After a pinch, the remaining finger can pan, but it cannot start a
             # new long press or turn the same sequence into a swipe/tap.
             self._pointer_last = position
-        elif (position - self._pointer_start).manhattanLength() >= QApplication.startDragDistance():
+        elif max(abs(position.x() - self._pointer_start.x()),
+                 abs(position.y() - self._pointer_start.y())) >= max(16, QApplication.startDragDistance()):
+            # A finger's small diagonal jitter is not a mouse drag. Keep a
+            # modest logical-pixel dead zone without weakening swipe/pan.
             self._cancel_zoom_animation()
             self._hold_timer.stop()
             self._blank_hold_timer.stop()
@@ -1272,23 +1278,11 @@ class ViewerCanvas(QGraphicsView):
         ):
             self.navigate_requested.emit(1 if delta.x() < 0 else -1)
         elif was_tap:
-            now = time.monotonic()
-            is_double = (
-                self._recent_contact(event, self._last_tap_time, self._last_tap_timestamp, self._last_tap_device)
-                and (position - self._last_tap_position).manhattanLength() < 36
-            )
-            if is_double:
-                self._click_timer.stop()
-                self._last_tap_time = 0.0
-                self._last_tap_timestamp = 0
-                self._last_tap_device = None
-                self._toggle_double_zoom(position)
-            else:
-                self._last_tap_time = now
-                self._last_tap_timestamp = event.timestamp()
-                self._last_tap_device = event.pointingDevice()
-                self._last_tap_position = position
-                self._click_timer.start(QApplication.doubleClickInterval())
+            self._last_tap_time = time.monotonic()
+            self._last_tap_timestamp = event.timestamp()
+            self._last_tap_device = event.pointingDevice()
+            self._last_tap_position = position
+            self._click_timer.start(QApplication.doubleClickInterval())
         else:
             self._last_tap_time = 0.0
             self._last_tap_timestamp = 0
