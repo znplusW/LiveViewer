@@ -22,11 +22,14 @@ class FullscreenEdgeGesture(QObject):
     escapeRequested = Signal(object)
 
     def __init__(self, windows_provider, *, cancel_active=None, parent=None,
-                 enabled_edges=('left',), edge_height=20, threshold=78):
+                 enabled_edges=('left',), edge_height=20, side_width=48, threshold=78):
         super().__init__(parent)
         self._windows_provider = windows_provider
         self._cancel_active = cancel_active
         self.edge_height = max(1, int(edge_height))
+        # Real fingers often first reach Qt inside the side bezel. Keep the
+        # working top band narrow while accepting a wider logical side start.
+        self.side_width = max(1, int(side_width))
         self.threshold = max(1, int(threshold))
         self._enabled_edges = frozenset()
         self._eligible_edges = frozenset()
@@ -207,9 +210,9 @@ class FullscreenEdgeGesture(QObject):
             if 0 <= position.y() < window.height() and 0 <= position.x() < window.width():
                 if position.y() <= self.edge_height:
                     eligible.add('top')
-                if position.x() <= self.edge_height:
+                if position.x() <= self.side_width:
                     eligible.add('left')
-                if position.x() >= window.width() - self.edge_height:
+                if position.x() >= window.width() - self.side_width:
                     eligible.add('right')
             eligible.intersection_update(self._enabled_edges)
             if not eligible:

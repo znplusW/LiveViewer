@@ -253,6 +253,75 @@ class FullscreenEdgeGestureTests(unittest.TestCase):
         self.assertEqual(len(self.cancelled), count)
         self.assertIn(QEvent.Type.TouchBegin, self.window.touch_events)
 
+    def test_side_bands_accept_24_36_48_logical_pixel_starts_in_both_directions(self):
+        self.filter.set_enabled_edges({'left', 'right'})
+        for edge in ('left', 'right'):
+            for inset in (24, 36, 48):
+                with self.subTest(edge=edge, inset=inset):
+                    before = self.escape.count()
+                    self.window.touch_events.clear()
+                    start = QPoint(inset if edge == 'left' else self.window.width() - inset,
+                                   self.window.height() // 2)
+                    delta = QPoint(110 if edge == 'left' else -110, 2)
+                    self.touch.press(0, start, self.target).commit()
+                    claimed = self.filter._target is not None
+                    self.touch.move(0, start + delta, self.target).commit()
+                    self.touch.release(0, start + delta, self.target).commit()
+                    self.assertTrue(claimed)
+                    self.assertEqual(self.escape.count(), before + 1)
+                    self.assertEqual(self.window.touch_events, [])
+                    self.assertEqual(self.window.mouse_events, [])
+
+    def test_side_49_and_top_24_remain_content_and_updates_never_claim_half_contact(self):
+        self.filter.set_enabled_edges({'top', 'left', 'right'})
+        cases = ((QPoint(49, 160), QPoint(110, 0)),
+                 (QPoint(self.window.width() - 49, 160), QPoint(-110, 0)),
+                 (QPoint(self.window.width() // 2, 24), QPoint(0, 110)))
+        for start, delta in cases:
+            self.window.touch_events.clear()
+            self.touch.press(0, start, self.target).commit()
+            self.touch.move(0, start + delta, self.target).commit()
+            self.touch.release(0, start + delta, self.target).commit()
+            self.assertIn(QEvent.Type.TouchBegin, self.window.touch_events)
+            self.assertEqual(self.escape.count(), 0)
+        # A contact delivered to the photo stays there if it later enters the
+        # wider band; there is no late takeover or use of guessed press data.
+        start = QPoint(70, 160)
+        self.touch.press(0, start, self.target).commit()
+        self.touch.move(0, QPoint(24, 160), self.target).commit()
+        self.touch.move(0, QPoint(140, 160), self.target).commit()
+        self.touch.release(0, QPoint(140, 160), self.target).commit()
+        self.assertEqual(self.escape.count(), 0)
+        self.assertFalse(self.cancelled)
+
+    def test_wider_side_band_keeps_single_finger_direction_and_control_exemptions(self):
+        self.filter.set_enabled_edges({'left'})
+        start = QPoint(36, 160)
+        for delta in (QPoint(50, 0), QPoint(-100, 0), QPoint(100, 90)):
+            self.touch.press(0, start, self.target).commit()
+            self.touch.move(0, start + delta, self.target).commit()
+            self.touch.release(0, start + delta, self.target).commit()
+            self.assertEqual(self.escape.count(), 0)
+        self.touch.press(0, start, self.target).commit()
+        self.touch.stationary(0).press(1, start + QPoint(60, 0), self.target).commit()
+        self.touch.move(0, start + QPoint(120, 0), self.target).move(1, start + QPoint(180, 0), self.target).commit()
+        self.touch.release(0, start + QPoint(120, 0), self.target).release(1, start + QPoint(180, 0), self.target).commit()
+        self.assertEqual(self.escape.count(), 0)
+        window = QWidget()
+        self.windows.append(window)
+        button = QPushButton('靠侧边按钮', window)
+        button.setGeometry(24, 100, 120, 38)
+        window.showFullScreen()
+        window.activateWindow()
+        QCoreApplication.processEvents()
+        clicked = QSignalSpy(button.clicked)
+        target = window.windowHandle()
+        touch = QTest.touchEvent(target, QTest.createTouchDevice(), False)
+        touch.press(0, QPoint(36, 120), target).commit()
+        touch.release(0, QPoint(36, 120), target).commit()
+        self.assertEqual(clicked.count(), 1)
+        self.assertEqual(self.escape.count(), 0)
+
     def test_disabled_side_and_setting_change_leave_no_half_contact(self):
         self.filter.set_enabled_edges({'left'})
         self.touch.press(0, self.start, self.target).commit()

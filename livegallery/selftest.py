@@ -1920,8 +1920,10 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
     assert not window._detached, 'Run the edge self-check after restoring the main photo'
     device = QTest.createTouchDevice()
     clicked = QSignalSpy(window.grid.clicked)
+    navigated = QSignalSpy(window.viewer.navigate_requested)
     requests = QSignalSpy(gesture.escapeRequested)
     routes = []
+    side_inset_routes = []
     native_checks = []
 
     def native_snapshot(target_window, stage, hwnd=None, cookie=None, *, read_value=True):
@@ -1949,7 +1951,8 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
 
     def save_native_diagnostics():
         (report_dir / 'fullscreen-edge-native-diagnostics.json').write_text(
-            json.dumps({'checks': native_checks, 'routes': routes, 'policy': native.report()},
+            json.dumps({'checks': native_checks, 'routes': routes, 'side_inset_routes': side_inset_routes,
+                        'policy': native.report()},
                        ensure_ascii=False, indent=2), encoding='utf-8')
 
     def require_native_value(target_window, stage, hwnd, expected, cookie=None):
@@ -1964,7 +1967,7 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
             assert readback.get('raw_vt') == 0 and readback.get('value') is None, snapshot
         return snapshot
 
-    def swipe(target_window, edge, *, corner=False):
+    def swipe(target_window, edge, *, corner=False, inset=4, side_case=False):
         nonlocal native_verified, native_cleanup
         QCoreApplication.processEvents()
         target = target_window.windowHandle()
@@ -1982,15 +1985,18 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
                                             {'vt': 11, 'value': True}, cookie)
             assert record['hwnd'] == hwnd and snapshot['cookie_matches'], json.dumps(snapshot, ensure_ascii=False)
             native_verified = True
-        starts = {'top': QPoint(target_window.width() // 2, 4),
-                  'left': QPoint(4, target_window.height() // 2),
-                  'right': QPoint(target_window.width() - 4, target_window.height() // 2)}
+        starts = {'top': QPoint(target_window.width() // 2, inset),
+                  'left': QPoint(inset, target_window.height() // 2),
+                  'right': QPoint(target_window.width() - inset, target_window.height() // 2)}
         start = QPoint(4, 4) if corner else starts[edge]
         delta = {'top': QPoint(2, 110), 'left': QPoint(110, 2), 'right': QPoint(-110, 2)}[edge]
         sequence = QTest.touchEvent(target, device, False)
         count = requests.count()
+        navigation_before, playback_before = navigated.count(), playback.call_count
         sequence.press(0, start, target).commit()
         assert not window.viewer._hold_timer.isActive()
+        if side_case:
+            QTest.qWait(window.viewer._hold_ms + 20)
         sequence.move(0, start + delta, target).commit()
         _wait(lambda: not target_window.isFullScreen(), 5)
         native.sync_now()
@@ -2003,8 +2009,14 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
         QCoreApplication.processEvents()
         assert requests.count() == count + 1 and requests.at(count)[0] is target_window
         assert window._current_id == selected and not window.viewer._play_requested
-        routes.append({'edge': edge, 'corner': corner, 'escaped_once': True,
-                       'target': 'main' if target_window is window else 'preview'})
+        assert navigated.count() == navigation_before and playback.call_count == playback_before
+        result = {'edge': edge, 'corner': corner, 'escaped_once': True,
+                  'target': 'main' if target_window is window else 'preview'}
+        if side_case:
+            result.update(inset=inset, no_navigation_or_live=True)
+            side_inset_routes.append(result)
+        else:
+            routes.append(result)
 
     try:
         with patch.object(window.viewer._player, 'play', wraps=window.viewer._player.play) as playback:
@@ -2013,6 +2025,12 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
             window._toggle_fullscreen()
             swipe(window, 'left')
             assert window._grid_mode and window.content.currentWidget() is window.grid
+            window._toggle_grid(False)
+            for edge in ('left', 'right'):
+                gesture.set_enabled_edges({edge})
+                for inset in (24, 36, 48):
+                    window._toggle_fullscreen()
+                    swipe(window, edge, inset=inset, side_case=True)
             window._detach_preview()
             window._toggle_touch_map(True)
             window._float_touch_map()
@@ -2024,6 +2042,13 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
                 swipe(preview, edge, corner=corner)
                 assert window._detached and window.preview_window is preview
                 assert window.touch_map_window.isVisible() and window.touch_map_panel.isVisible()
+            for edge in ('left', 'right'):
+                gesture.set_enabled_edges({edge})
+                for inset in (24, 36, 48):
+                    window._toggle_fullscreen()
+                    swipe(preview, edge, inset=inset, side_case=True)
+                    assert window._detached and preview.isMaximized()
+                    assert window.touch_map_window.isVisible() and window.touch_map_panel.isVisible()
 
             # Explicit empty configuration must not reserve a new contact.
             gesture.set_enabled_edges([])
@@ -2056,7 +2081,10 @@ def _check_fullscreen_edge_gestures(window, report_dir: Path):
             window._toggle_fullscreen()
         if native.supported:
             assert native_verified and native_cleanup and not native.report()['failures'], native.report()
-        return {'routes': routes, 'settings_edges_applied': True, 'all_three_directions': True,
+        assert len(side_inset_routes) == 12 and gesture.side_width == 48 and gesture.edge_height == 20
+        return {'routes': routes, 'side_inset_routes': side_inset_routes,
+                'side_edge_width': gesture.side_width, 'top_edge_height': gesture.edge_height,
+                'settings_edges_applied': True, 'all_three_directions': True,
                 'corner_uses_actual_direction': True, 'explicit_empty_disables_reservation': True,
                 'settings_change_cancels_pending': True, 'same_escape_path': True,
                 'overview_stays_overview': True, 'preview_stays_detached_and_map_open': True,

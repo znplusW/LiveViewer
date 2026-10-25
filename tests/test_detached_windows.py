@@ -585,6 +585,90 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertEqual(self.window._current_id, selected)
         self.assertFalse(self.window.viewer._play_requested)
 
+    def test_qwindow_24_36_48_side_starts_escape_main_and_preview_without_navigation_or_live(self):
+        window = self.window
+        window.load_folder(Path(__file__).parent / 'fixtures')
+        _wait(lambda: not window._scan_pending and window._shown_image_path is not None, 25)
+        row = next(index for index, item in enumerate(window.model.items) if item.image_path.stem == 'JPEG_PAIR')
+        window._select_row(row, allow_autoplay=False)
+        _wait(lambda: window.viewer._video_path is not None, 25)
+        selected = window._current_id
+        requests = QSignalSpy(window.fullscreen_edge_gesture.escapeRequested)
+        navigation = QSignalSpy(window.viewer.navigate_requested)
+        device = QTest.createTouchDevice()
+        with patch.object(window.viewer._player, 'play', wraps=window.viewer._player.play) as playback:
+            for host in ('main', 'preview'):
+                target_window = window if host == 'main' else self.detach()
+                for edge in ('left', 'right'):
+                    window.fullscreen_edge_gesture.set_enabled_edges({edge})
+                    for inset in (24, 36, 48):
+                        with self.subTest(host=host, edge=edge, inset=inset):
+                            window._toggle_fullscreen()
+                            self.settle()
+                            target = target_window.windowHandle()
+                            start = QPoint(inset if edge == 'left' else target_window.width() - inset,
+                                           target_window.height() // 2)
+                            delta = QPoint(110 if edge == 'left' else -110, 2)
+                            touch = QTest.touchEvent(target, device, False)
+                            before = requests.count()
+                            touch.press(0, start, target).commit()
+                            self.assertFalse(window.viewer._hold_timer.isActive())
+                            QTest.qWait(window.viewer._hold_ms + 20)
+                            touch.move(0, start + delta, target).commit()
+                            self.settle()
+                            touch.move(0, start + delta * 2, target).commit()
+                            touch.release(0, start + delta * 2, target).commit()
+                            self.settle()
+                            self.assertEqual(requests.count(), before + 1)
+                            self.assertIs(requests.at(before)[0], target_window)
+                            self.assertFalse(target_window.isFullScreen())
+                            self.assertEqual(window._current_id, selected)
+                            self.assertFalse(window.viewer._play_requested or window.viewer._touch_active)
+                            self.assertEqual(navigation.count(), 0)
+                            self.assertEqual(playback.call_count, 0)
+                            if host == 'preview':
+                                self.assertTrue(window._detached and target_window.isMaximized())
+
+    def test_qwindow_outside_side_band_navigates_and_top_24_does_not_exit(self):
+        window = self.window
+        window._select_row(1, allow_autoplay=False)
+        _wait(lambda: window._shown_image_path == window.model.items[1].image_path, 25)
+        window.fullscreen_edge_gesture.set_enabled_edges({'top', 'left', 'right'})
+        window._toggle_fullscreen()
+        self.settle()
+        window.viewer.fit_image()
+        requests = QSignalSpy(window.fullscreen_edge_gesture.escapeRequested)
+        navigation = QSignalSpy(window.viewer.navigate_requested)
+        target = window.windowHandle()
+        device = QTest.createTouchDevice()
+        for edge, direction in (('left', -1), ('right', 1)):
+            selected = window._current_id
+            start = QPoint(49 if edge == 'left' else window.width() - 49, window.height() // 2)
+            delta = QPoint(110 if edge == 'left' else -110, 0)
+            touch = QTest.touchEvent(target, device, False)
+            touch.press(0, start, target).commit()
+            touch.move(0, start + delta, target).commit()
+            touch.release(0, start + delta, target).commit()
+            self.settle()
+            self.assertEqual(navigation.at(navigation.count() - 1)[0], direction)
+            self.assertNotEqual(window._current_id, selected)
+            _wait(lambda: window._shown_image_path == window._displayed_item.image_path, 25)
+            self.assertTrue(window.isFullScreen())
+            self.assertEqual(requests.count(), 0)
+        selected = window._current_id
+        count = navigation.count()
+        start = QPoint(window.width() // 2, 24)
+        touch = QTest.touchEvent(target, device, False)
+        touch.press(0, start, target).commit()
+        self.assertTrue(window.viewer._touch_active)
+        touch.move(0, start + QPoint(0, 110), target).commit()
+        touch.release(0, start + QPoint(0, 110), target).commit()
+        self.settle()
+        self.assertTrue(window.isFullScreen())
+        self.assertEqual(window._current_id, selected)
+        self.assertEqual(requests.count(), 0)
+        self.assertEqual(navigation.count(), count)
+
     def test_real_settings_save_applies_empty_exit_gestures_immediately_and_cancel_keeps_it(self):
         self.assertEqual(self.window.preferences.fullscreen_exit_gestures, ['left'])
         errors = []
