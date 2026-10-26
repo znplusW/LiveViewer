@@ -434,7 +434,7 @@ class NativeReadbackTests(unittest.TestCase):
                 edge.set_enabled_edges([])
                 assert native.read(hwnd)=={'vt':VT_EMPTY,'value':None},native.last_readback
                 phase='reenabled_fullscreen'
-                edge.set_enabled_edges(['left']); app.processEvents(); edge.native_policy.sync_now()
+                edge.set_enabled_edges(['top']); app.processEvents(); edge.native_policy.sync_now()
                 require_true(hwnd)
                 record=edge.native_policy._tracked[id(window)];cookie=record['cookie']
                 phase='provider_forgot_window_then_close'

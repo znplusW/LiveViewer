@@ -7,6 +7,7 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QPersistentModelIndex, Q
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QListView, QWidget
 from .ui_theme import tokens_for
+from .filename_field import ElidedFilenameMouseHandler
 
 
 class TouchFilmstrip(QListView):
@@ -32,6 +33,7 @@ class TouchFilmstrip(QListView):
         self._suppress_touch_mouse_until = 0.0
         self._viewport_height = self.viewport().height()
         self._viewport_size = self.viewport().size()
+        self._filename_mouse = ElidedFilenameMouseHandler(self)
 
     @property
     def scroll_axis(self):
@@ -78,6 +80,9 @@ class TouchFilmstrip(QListView):
     def viewportEvent(self, event):
         kind = event.type()
         if kind == QEvent.Type.Resize:
+            filename_mouse = getattr(self, '_filename_mouse', None)
+            if filename_mouse is not None:
+                filename_mouse.cancel()
             result = super().viewportEvent(event)
             self._notify_viewport_height()
             return result
@@ -92,6 +97,9 @@ class TouchFilmstrip(QListView):
             elif self._drop_mouse_release and kind in (QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick):
                 event.accept()
                 return True
+        filename_mouse = getattr(self, '_filename_mouse', None)
+        if filename_mouse is not None and filename_mouse.handle(event):
+            return True
         if kind not in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
                         QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
             return super().viewportEvent(event)

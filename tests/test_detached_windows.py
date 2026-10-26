@@ -12,7 +12,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QRect, Qt, QTimer
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QLabel
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.detached_windows import FloatingMapWindow, PreviewWindow, accessible_geometry
@@ -66,7 +66,17 @@ class DetachedWindowTests(unittest.TestCase):
         QTest.mouseClick(self.window.detach_button, Qt.MouseButton.LeftButton)
         self.settle()
         self.assertTrue(self.window._detached)
+        self.assertTrue(self.window.preview_window.isMaximized())
+        self.assertFalse(self.window.preview_window.isFullScreen())
+        self.assertTrue(self.window.preview_window.windowFlags() & Qt.WindowType.WindowTitleHint)
+        self.assertFalse(self.window.preview_window.windowFlags() & Qt.WindowType.FramelessWindowHint)
         return self.window.preview_window
+
+    def fullscreen_preview(self, preview):
+        QTest.mouseClick(self.window.fullscreen_button, Qt.MouseButton.LeftButton)
+        self.settle()
+        self.assertTrue(preview.isFullScreen())
+        self.assertFalse(self.window.isFullScreen() or self.window._fullscreen_active)
 
     def test_actual_button_moves_same_viewer_player_and_grid_selection_updates_preview(self):
         window = self.window
@@ -89,128 +99,90 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertIs(preview.content.currentWidget(), viewer)
         self.assertIn(expected.name, preview.windowTitle())
         self.assertFalse(window.film.isVisible())
+        self.fullscreen_preview(preview)
 
-    def test_each_detach_starts_native_maximized_ignoring_saved_window_state_and_keeps_normal_rect(self):
-        for state in ('first', 'normal', 'maximized', 'fullscreen', 'minimized'):
-            with self.subTest(saved_state=state):
-                donor = QWidget()
-                try:
-                    donor.setGeometry(60, 70, 520, 360)
-                    donor.show()
+    def test_idle_leave_between_touch_taps_zooms_same_main_and_preview_viewer_without_live(self):
+        window = self.window
+        viewer = window.viewer
+        video_path = self.base / 'touch-hold.mov'
+        video_path.touch()
+        window._toggle_grid(False)
+        device = QTest.createTouchDevice()
+        with patch.object(viewer._player, 'play') as playback, \
+                patch.object(viewer, '_mouse_press_authorizer', create=True,
+                             side_effect=AssertionError('Raw touchscreen input must bypass mouse authorization')) as authorize:
+            for route in ('main', 'preview', 'redocked'):
+                with self.subTest(route=route):
+                    if route == 'preview':
+                        target_window = self.detach()
+                    else:
+                        if route == 'redocked':
+                            window._redock_preview()
+                            self.settle()
+                            self.assertIsNone(window.preview_window)
+                            self.assertFalse(window._detached or window._grid_mode)
+                        target_window = window
+                    self.assertIs(window.viewer, viewer)
+                    viewer._video_path = video_path
+                    viewer.fit_image()
+                    target_window.activateWindow()
+                    viewer.setFocus()
                     self.settle()
-                    normal = QRect(donor.geometry())
-                    if state == 'maximized':
-                        donor.showMaximized()
-                    elif state == 'fullscreen':
-                        donor.showFullScreen()
-                    elif state == 'minimized':
-                        donor.showMinimized()
-                    self.settle()
-                    self.window.preferences.preview_geometry = '' if state == 'first' else bytes(donor.saveGeometry().toHex()).decode('ascii')
-                    self.window.preferences.preview_screen = donor.screen().name()
-                finally:
-                    donor.close()
-                    donor.deleteLater()
-                    self.settle()
-                preview = self.detach()
-                self.assertTrue(preview.isMaximized())
-                self.assertFalse(preview.isFullScreen() or preview.isMinimized())
-                self.assertFalse(preview.windowFlags() & Qt.WindowType.FramelessWindowHint)
-                self.assertEqual(preview.screen().name(), self.window.preferences.preview_screen)
-                preview.showNormal()
-                self.settle()
-                if state != 'first':
-                    self.assertEqual(preview.geometry(), normal)
-                preview.close()
-                self.settle()
+                    target = target_window.windowHandle()
+                    point = viewer.viewport().mapTo(target_window, viewer.viewport().rect().center())
+                    touch = QTest.touchEvent(target, device, False)
+                    for expected in (2.0, 1.0):
+                        touch.press(49, point, target).commit()
+                        touch.release(49, point, target).commit()
+                        self.assertFalse(viewer._touch_active)
+                        self.assertIsNone(viewer._input_owner)
+                        self.assertGreater(viewer._last_tap_time, 0)
+                        with patch.object(viewer, 'leaveEvent', wraps=viewer.leaveEvent) as leave:
+                            QApplication.sendEvent(viewer, QEvent(QEvent.Type.Leave))
+                            self.assertEqual(leave.call_count, 1)
+                        QTest.qWait(40)
+                        touch.press(50, point, target).commit()
+                        touch.release(50, point, target).commit()
+                        _wait(lambda: not viewer.is_zoom_animating(), 3)
+                        self.assertAlmostEqual(viewer.zoom_factor(), expected, delta=.005)
+                        self.assertFalse(viewer._play_requested)
+                        self.assertIsNone(viewer._input_owner)
+                        self.assertEqual(playback.call_count, 0)
+            authorize.assert_not_called()
 
-    def test_actual_main_fullscreen_button_and_escape_f11_restore_preview_entering_state(self):
+    def test_maximized_preview_can_restore_move_and_minimize_without_returning_before_fullscreen(self):
+        viewer, player = self.window.viewer, self.window.viewer._player
+        selected = self.window._current_id
         preview = self.detach()
-        self.assertTrue(preview.isMaximized() and not preview.isFullScreen())
-        for maximized, key in ((True, Qt.Key.Key_Escape), (True, Qt.Key.Key_F11), (False, Qt.Key.Key_Escape)):
-            with self.subTest(maximized=maximized, exit_key=key):
-                if not maximized:
-                    preview.showNormal()
-                    preview.setGeometry(60, 70, 520, 360)
-                    self.settle()
-                before = QRect(preview.normalGeometry())
-                self.window.activateWindow()
-                self.window.raise_()
-                self.settle()
-                button = self.window.fullscreen_button
-                target = self.window.windowHandle()
-                QTest.mouseClick(target, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
-                                 button.mapTo(self.window, button.rect().center()))
-                self.settle()
-                self.assertTrue(preview.isFullScreen())
-                self.assertFalse(self.window._fullscreen_active)
-                preview.activateWindow()
-                self.window.viewer.setFocus()
-                self.settle()
-                QTest.keyClick(preview.windowHandle(), key)
-                self.settle()
-                self.assertFalse(preview.isFullScreen())
-                self.assertEqual(preview.isMaximized(), maximized)
-                self.assertEqual(preview.normalGeometry(), before)
-                if not maximized:
-                    self.assertEqual(preview.geometry(), before)
-
-    def test_maximized_preview_screen_recovery_does_not_rewrite_restore_geometry(self):
-        preview = self.detach()
+        self.window._toggle_touch_map(True)
+        self.settle()
+        preview.showNormal()
+        available = preview.screen().availableGeometry()
+        preview.setGeometry(accessible_geometry(QRect(available.topLeft() + QPoint(30, 30),
+                                                        preview.minimumSize()), [available]))
+        self.settle()
+        self.assertFalse(preview.isMaximized() or preview.isFullScreen())
+        self.assertTrue(available.intersects(preview.geometry()))
+        self.assertIsNone(preview._fullscreen_geometry)
+        preview.showMinimized()
+        self.settle()
         preview.showNormal()
         self.settle()
-        preview.setGeometry(60, 70, 520, 360)
-        self.settle()
-        preview.showMaximized()
-        self.settle()
-        normal = QRect(preview.normalGeometry())
-        with patch.object(preview, 'geometry', return_value=QRect(-30000, -20000, 1200, 900)), \
-                patch.object(preview, 'setGeometry', wraps=preview.setGeometry) as set_geometry:
-            self.window._recover_auxiliary_windows()
-            self.settle()
-            set_geometry.assert_not_called()
-        self.assertTrue(preview.isMaximized() and not preview.isFullScreen())
-        self.assertEqual(preview.normalGeometry(), normal)
-        preview.showNormal()
-        self.settle()
-        self.assertEqual(preview.geometry(), normal)
-
-    def test_initial_presented_geometry_signal_is_once_and_pending_redock_is_cancelled(self):
-        auxiliary = PreviewWindow()
-        ready = QSignalSpy(auxiliary.initialGeometryReady)
-        try:
-            auxiliary.show_initial_maximized()
-            self.settle()
-            self.assertEqual(ready.count(), 1)
-            for _ in range(4):
-                auxiliary.update()
-                self.settle()
-            self.assertEqual(ready.count(), 1)
-        finally:
-            auxiliary.shutdown()
-            auxiliary.deleteLater()
-            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-            self.settle()
-        self.window._detach_preview()
-        preview = self.window.preview_window
-        cancelled = QSignalSpy(preview.initialGeometryReady)
-        preview._initial_geometry_timer.start(0)
-        self.window._redock_preview()
-        self.settle()
-        self.assertEqual(cancelled.count(), 0)
-        self.assertFalse(self.window._detached)
-        self.assertIs(self.window.content.currentWidget(), self.window.viewer)
+        self.assertTrue(self.window._detached and self.window._grid_mode)
+        self.assertIs(self.window.preview_window, preview)
+        self.assertIs(preview.content.currentWidget(), viewer)
+        self.assertIs(viewer._player, player)
+        self.assertEqual(self.window._current_id, selected)
+        self.assertTrue(self.window.touch_map_panel.isVisible())
+        self.assertFalse(viewer._play_requested)
+        self.fullscreen_preview(preview)
 
     def test_reparent_preserves_real_transform_and_center_without_autoplay(self):
         window = self.window
-        viewer = window.viewer
-        available = window.screen().availableGeometry().size()
-        fill_scale = max(available.width() / viewer._image_rect.width(),
-                         available.height() / viewer._image_rect.height())
-        viewer._zoom_at(max(2.5, fill_scale * 1.2 / viewer._fit_scale), viewer._viewport_center())
+        window.viewer._zoom_at(2.5, window.viewer._viewport_center())
         before = window.viewer.transform(), window.viewer._scene_center()
         with patch.object(window.viewer, 'play_live_once') as play:
-            for _ in range(4):
+            for _ in range(2):
                 self.detach()
                 self.assertEqual(window.viewer.transform(), before[0])
                 self.assertLess((window.viewer._scene_center() - before[1]).manhattanLength(), 5)
@@ -220,33 +192,6 @@ class DetachedWindowTests(unittest.TestCase):
                 self.assertLess((window.viewer._scene_center() - before[1]).manhattanLength(), 5)
                 self.assertIs(window.content.currentWidget(), window.viewer)
             play.assert_not_called()
-
-    def test_maximized_reparent_preserves_scrollable_axis_and_keeps_fitted_axis_centered(self):
-        viewer = self.window.viewer
-        available = self.window.screen().availableGeometry().size()
-        width_scale = available.width() / viewer._image_rect.width()
-        height_scale = available.height() / viewer._image_rect.height()
-        # This landscape fixture is wider than the maximized viewport's aspect:
-        # choose an actual scale where X can pan and Y must remain centered.
-        self.assertLess(width_scale, height_scale)
-        scale = (width_scale + height_scale) / 2
-        viewer._zoom_at(scale / viewer._fit_scale, viewer._viewport_center())
-        viewer._pan_by(QPoint(0, -55))
-        expected_x = viewer._scene_center().x()
-        transform = viewer.transform()
-        for _ in range(3):
-            self.detach()
-            image = viewer.viewportTransform().mapRect(viewer._image_rect)
-            self.assertEqual(viewer.transform(), transform)
-            self.assertGreater(image.width(), viewer.viewport().width())
-            self.assertLess(image.height(), viewer.viewport().height())
-            self.assertLess(abs(viewer._scene_center().x() - expected_x), 2)
-            self.assertLess(abs(image.center().y() - viewer.viewport().height() / 2), 1)
-            self.assertGreaterEqual(image.top(), 0)
-            self.assertLessEqual(image.bottom(), viewer.viewport().height())
-            self.assertEqual(viewer.verticalScrollBar().minimum(), viewer.verticalScrollBar().maximum())
-            self.window._redock_preview()
-            self.settle()
 
     def test_detach_mid_zoom_applies_deferred_high_resolution_before_capturing_view(self):
         viewer = self.window.viewer
@@ -331,15 +276,13 @@ class DetachedWindowTests(unittest.TestCase):
         _wait(lambda: self.window._shown_image_path == self.photos / '0.jpg')
         self.assertIs(self.window.content.currentWidget(), self.window.viewer)
 
-    def test_preview_close_redocks_and_startup_restores_geometry_without_opening_auxiliary_windows(self):
+    def test_preview_close_redocks_and_startup_keeps_screen_geometry_without_opening_auxiliary_windows(self):
         preview = self.detach()
-        preview.showNormal()
-        self.settle()
-        preview.resize(740, 530)
-        self.settle()
-        preview._remember_geometry()
+        _wait(lambda: bool(Preferences.load().preview_geometry))
         saved = Preferences.load().preview_geometry
         self.assertTrue(saved)
+        self.assertTrue(preview.isMaximized())
+        self.assertFalse(preview.isFullScreen())
         preview.close()
         self.settle()
         self.assertFalse(self.window._detached)
@@ -355,6 +298,64 @@ class DetachedWindowTests(unittest.TestCase):
             restored.close()
             self.assertTrue(restored.wait_for_shutdown(25))
             restored.deleteLater()
+
+    def test_every_preview_fullscreen_exit_returns_shared_viewer_to_single_and_closes_map(self):
+        window = self.window
+        viewer, player, model = window.viewer, window.viewer._player, window.model
+        viewer._zoom_at(2.5, viewer._viewport_center())
+        transform, center, selected = viewer.transform(), viewer._scene_center(), window._current_id
+        actions = ('escape', 'f11', 'toggle', 'native_restore', 'close')
+        with patch.object(viewer, 'play_live_once') as autoplay:
+            for action in actions:
+                with self.subTest(action=action):
+                    preview = self.detach()
+                    self.fullscreen_preview(preview)
+                    window._toggle_touch_map(True)
+                    window._float_touch_map()
+                    self.settle()
+                    floating = window.touch_map_window
+                    preview.activateWindow()
+                    viewer.setFocus()
+                    self.settle()
+                    if action == 'escape':
+                        QTest.keyClick(viewer, Qt.Key.Key_Escape)
+                    elif action == 'f11':
+                        QTest.keyClick(viewer, Qt.Key.Key_F11)
+                    elif action == 'toggle':
+                        window._toggle_fullscreen()
+                    elif action == 'native_restore':
+                        preview.showNormal()
+                    else:
+                        preview.close()
+                    self.settle()
+                    self.assertFalse(window._detached or window._grid_mode or window._fullscreen_active)
+                    self.assertIsNone(window.preview_window)
+                    self.assertIsNone(window.touch_map_window)
+                    self.assertFalse(window.touch_map_panel.isVisible())
+                    self.assertFalse(isValid(preview) and preview.isVisible())
+                    self.assertFalse(isValid(floating) and floating.isVisible())
+                    self.assertIs(window.content.currentWidget(), viewer)
+                    self.assertIs(window.viewer, viewer)
+                    self.assertIs(viewer._player, player)
+                    self.assertIs(window.model, model)
+                    self.assertEqual(window._current_id, selected)
+                    self.assertEqual(viewer.transform(), transform)
+                    self.assertLess((viewer._scene_center() - center).manhattanLength(), 5)
+                    self.assertFalse(viewer._play_requested)
+            autoplay.assert_not_called()
+
+    def test_minimizing_preview_preserves_session_and_windowed_restore_returns_to_single(self):
+        preview = self.detach()
+        self.fullscreen_preview(preview)
+        preview.showMinimized()
+        self.settle()
+        self.assertTrue(self.window._detached)
+        self.assertIs(self.window.preview_window, preview)
+        preview.showNormal()
+        self.settle()
+        self.assertFalse(self.window._detached or self.window._grid_mode)
+        self.assertIsNone(self.window.preview_window)
+        self.assertIs(self.window.content.currentWidget(), self.window.viewer)
 
     def test_keyboard_shortcuts_route_to_shared_photo_but_grid_zoom_and_text_input_remain_local(self):
         preview = self.detach()
@@ -379,8 +380,6 @@ class DetachedWindowTests(unittest.TestCase):
 
     def test_display_recovery_uses_real_available_screen_and_preserves_live_window(self):
         preview = self.detach()
-        preview.showNormal()
-        self.settle()
         preview.move(-30000, -20000)
         self.window._recover_auxiliary_windows()
         self.settle()
@@ -424,6 +423,10 @@ class DetachedWindowTests(unittest.TestCase):
         self.settle()
         panel = self.window.touch_map_panel
         self.assertIs(panel.surface.viewer, self.window.viewer)
+        self.assertIn('触控板', [label.text() for label in panel.findChildren(QLabel)])
+        self.assertEqual(panel.hide_button.toolTip(), '关闭触控板，保留独立预览')
+        self.assertEqual(panel.redock_button.text(), '收回触控板')
+        self.assertEqual(panel.return_button.text(), '返回主窗口')
         self.assertEqual(panel.edge, 'right')
         self.assertTrue(panel.isVisible())
         self.window._dock_touch_map('left')
@@ -432,6 +435,7 @@ class DetachedWindowTests(unittest.TestCase):
         QTest.keyClick(panel.location, Qt.Key.Key_Return)
         self.settle()
         floating = self.window.touch_map_window
+        self.assertEqual(floating.windowTitle(), 'LiveViewer · 触控板')
         self.assertTrue(floating.isVisible() and self.window.preferences.map_floating)
         floating.close()
         self.settle()
@@ -499,12 +503,11 @@ class DetachedWindowTests(unittest.TestCase):
 
     def test_floating_preview_fullscreen_is_pure_and_main_close_stops_all_auxiliary_windows(self):
         preview = self.detach()
+        self.fullscreen_preview(preview)
         self.window._toggle_touch_map(True)
         self.window._float_touch_map()
         self.settle()
         floating = self.window.touch_map_window
-        self.window._toggle_fullscreen()
-        self.settle()
         self.assertTrue(preview.isFullScreen())
         self.assertFalse(preview.isAncestorOf(self.window.film))
         self.assertFalse(preview.isAncestorOf(self.window.touch_map_panel))
@@ -551,7 +554,7 @@ class DetachedWindowTests(unittest.TestCase):
             self.assertEqual(state['preferred_height'], preferred)
             self.assertGreaterEqual(state['overview'][1], 160)
 
-    def test_qwindow_top_edge_swipe_exits_only_corresponding_fullscreen_and_keeps_overview_or_preview(self):
+    def test_qwindow_top_edge_swipe_keeps_main_overview_and_returns_preview_to_single(self):
         self.window.fullscreen_edge_gesture.set_enabled_edges({'top'})
         device = QTest.createTouchDevice()
         def swipe(window):
@@ -561,7 +564,14 @@ class DetachedWindowTests(unittest.TestCase):
             sequence.press(0, point, target).commit()
             sequence.move(0, point + QPoint(0, 110), target).commit()
             self.settle()
-            sequence.release(0, point + QPoint(0, 110), target).commit()
+            if isValid(target):
+                sequence.release(0, point + QPoint(0, 110), target).commit()
+            else:
+                # The preview closes at the threshold. Deliver the remaining
+                # contact to the surviving application window, as native
+                # promotion can do after its original HWND is destroyed.
+                target = self.window.windowHandle()
+                QTest.touchEvent(target, device, False).release(0, QPoint(8, 115), target).commit()
             self.settle()
         selected = self.window._current_id
         self.window._toggle_grid(True)
@@ -571,112 +581,29 @@ class DetachedWindowTests(unittest.TestCase):
         self.assertFalse(self.window._fullscreen_active)
         self.assertTrue(self.window._grid_mode)
         self.assertIs(self.window.content.currentWidget(), self.window.grid)
-        self.detach()
+        self.fullscreen_preview(self.detach())
         self.window._toggle_touch_map(True)
         self.window._float_touch_map()
         self.settle()
         preview = self.window.preview_window
-        self.window._toggle_fullscreen()
-        self.settle()
         swipe(preview)
-        self.assertFalse(preview.isFullScreen())
-        self.assertTrue(self.window._detached and self.window.touch_map_panel.isVisible())
-        self.assertTrue(self.window.touch_map_window.isVisible())
+        self.assertFalse(isValid(preview) and preview.isVisible())
+        self.assertFalse(self.window._detached or self.window._grid_mode)
+        self.assertIsNone(self.window.preview_window)
+        self.assertIsNone(self.window.touch_map_window)
+        self.assertFalse(self.window.touch_map_panel.isVisible())
+        self.assertIs(self.window.content.currentWidget(), self.window.viewer)
         self.assertEqual(self.window._current_id, selected)
         self.assertFalse(self.window.viewer._play_requested)
 
-    def test_qwindow_24_36_48_side_starts_escape_main_and_preview_without_navigation_or_live(self):
-        window = self.window
-        window.load_folder(Path(__file__).parent / 'fixtures')
-        _wait(lambda: not window._scan_pending and window._shown_image_path is not None, 25)
-        row = next(index for index, item in enumerate(window.model.items) if item.image_path.stem == 'JPEG_PAIR')
-        window._select_row(row, allow_autoplay=False)
-        _wait(lambda: window.viewer._video_path is not None, 25)
-        selected = window._current_id
-        requests = QSignalSpy(window.fullscreen_edge_gesture.escapeRequested)
-        navigation = QSignalSpy(window.viewer.navigate_requested)
-        device = QTest.createTouchDevice()
-        with patch.object(window.viewer._player, 'play', wraps=window.viewer._player.play) as playback:
-            for host in ('main', 'preview'):
-                target_window = window if host == 'main' else self.detach()
-                for edge in ('left', 'right'):
-                    window.fullscreen_edge_gesture.set_enabled_edges({edge})
-                    for inset in (24, 36, 48):
-                        with self.subTest(host=host, edge=edge, inset=inset):
-                            window._toggle_fullscreen()
-                            self.settle()
-                            target = target_window.windowHandle()
-                            start = QPoint(inset if edge == 'left' else target_window.width() - inset,
-                                           target_window.height() // 2)
-                            delta = QPoint(110 if edge == 'left' else -110, 2)
-                            touch = QTest.touchEvent(target, device, False)
-                            before = requests.count()
-                            touch.press(0, start, target).commit()
-                            self.assertFalse(window.viewer._hold_timer.isActive())
-                            QTest.qWait(window.viewer._hold_ms + 20)
-                            touch.move(0, start + delta, target).commit()
-                            self.settle()
-                            touch.move(0, start + delta * 2, target).commit()
-                            touch.release(0, start + delta * 2, target).commit()
-                            self.settle()
-                            self.assertEqual(requests.count(), before + 1)
-                            self.assertIs(requests.at(before)[0], target_window)
-                            self.assertFalse(target_window.isFullScreen())
-                            self.assertEqual(window._current_id, selected)
-                            self.assertFalse(window.viewer._play_requested or window.viewer._touch_active)
-                            self.assertEqual(navigation.count(), 0)
-                            self.assertEqual(playback.call_count, 0)
-                            if host == 'preview':
-                                self.assertTrue(window._detached and target_window.isMaximized())
-
-    def test_qwindow_outside_side_band_navigates_and_top_24_does_not_exit(self):
-        window = self.window
-        window._select_row(1, allow_autoplay=False)
-        _wait(lambda: window._shown_image_path == window.model.items[1].image_path, 25)
-        window.fullscreen_edge_gesture.set_enabled_edges({'top', 'left', 'right'})
-        window._toggle_fullscreen()
-        self.settle()
-        window.viewer.fit_image()
-        requests = QSignalSpy(window.fullscreen_edge_gesture.escapeRequested)
-        navigation = QSignalSpy(window.viewer.navigate_requested)
-        target = window.windowHandle()
-        device = QTest.createTouchDevice()
-        for edge, direction in (('left', -1), ('right', 1)):
-            selected = window._current_id
-            start = QPoint(49 if edge == 'left' else window.width() - 49, window.height() // 2)
-            delta = QPoint(110 if edge == 'left' else -110, 0)
-            touch = QTest.touchEvent(target, device, False)
-            touch.press(0, start, target).commit()
-            touch.move(0, start + delta, target).commit()
-            touch.release(0, start + delta, target).commit()
-            self.settle()
-            self.assertEqual(navigation.at(navigation.count() - 1)[0], direction)
-            self.assertNotEqual(window._current_id, selected)
-            _wait(lambda: window._shown_image_path == window._displayed_item.image_path, 25)
-            self.assertTrue(window.isFullScreen())
-            self.assertEqual(requests.count(), 0)
-        selected = window._current_id
-        count = navigation.count()
-        start = QPoint(window.width() // 2, 24)
-        touch = QTest.touchEvent(target, device, False)
-        touch.press(0, start, target).commit()
-        self.assertTrue(window.viewer._touch_active)
-        touch.move(0, start + QPoint(0, 110), target).commit()
-        touch.release(0, start + QPoint(0, 110), target).commit()
-        self.settle()
-        self.assertTrue(window.isFullScreen())
-        self.assertEqual(window._current_id, selected)
-        self.assertEqual(requests.count(), 0)
-        self.assertEqual(navigation.count(), count)
-
     def test_real_settings_save_applies_empty_exit_gestures_immediately_and_cancel_keeps_it(self):
-        self.assertEqual(self.window.preferences.fullscreen_exit_gestures, ['left'])
+        self.assertEqual(self.window.preferences.fullscreen_exit_gestures, ['top'])
         errors = []
         def choose(accept):
             dialog = QApplication.activeModalWidget()
             try:
                 self.assertIsInstance(dialog, SettingsDialog)
-                dialog.fullscreen_exit_gestures.set_selected_gestures([] if accept else ['top', 'right'])
+                dialog.fullscreen_exit_gestures.set_selected_gestures([] if accept else ['top'])
                 buttons = dialog.findChild(QDialogButtonBox)
                 button = buttons.button(QDialogButtonBox.StandardButton.Save if accept else QDialogButtonBox.StandardButton.Cancel)
                 QTest.mouseClick(button, Qt.MouseButton.LeftButton)

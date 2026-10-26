@@ -1,5 +1,6 @@
 """Exact video-frame identity, VFR timestamps, orientation and cancellation."""
 from pathlib import Path
+from fractions import Fraction
 import json
 import shutil
 import subprocess
@@ -65,6 +66,8 @@ class ExactFrameTests(unittest.TestCase):
             self.assertEqual(reader.frame_count, len(VFR_TIMES))
             self.assertFalse(reader.metadata.timestamps_estimated)
             self.assertEqual([round(frame.pts_seconds * 1000) for frame in reader.metadata.frames], list(VFR_TIMES))
+            self.assertEqual([frame.presentation_time for frame in reader.metadata.frames],
+                             [Fraction(value, 1000) for value in VFR_TIMES])
             self.assertEqual(reader.nearest_index(140), 2)
             self.assertEqual(reader.nearest_index(9999), 6)
             self.assertEqual(reader.nearest_index(-10), 0)
@@ -73,6 +76,25 @@ class ExactFrameTests(unittest.TestCase):
                 actual = image.getpixel((160, 120))
                 expected = ImageColor.getrgb(color)
                 self.assertLess(max(abs(a - b) for a, b in zip(actual, expected)), 8)
+
+    def test_nonzero_exact_pts_survives_normalized_ui_and_rounded_probe_times(self):
+        document = {'streams': [{'width': 120, 'height': 90, 'codec_name': 'h264',
+                                 'time_base': '1/90000', 'start_pts': 180000,
+                                 'avg_frame_rate': '30000/1001'}],
+                    'frames': [{'best_effort_timestamp': tick,
+                                'best_effort_timestamp_time': f'{tick / 90000:.6f}',
+                                'duration': 3003} for tick in (180000, 183003, 192012)]}
+        with FrameReader(FIXTURES / 'Live_H264.MOV') as reader:
+            # Force this independent timing document instead of opening cached metadata.
+            reader._metadata = None
+            with patch.object(reader, '_run', return_value=json.dumps(document).encode()):
+                metadata = reader.open()
+            self.assertEqual([frame.presentation_time for frame in metadata.frames],
+                             [Fraction(tick, 90000) for tick in (180000, 183003, 192012)])
+            self.assertEqual(metadata.frames[0].pts_seconds, 0)
+            self.assertAlmostEqual(metadata.frames[1].pts_seconds, 3003 / 90000)
+            self.assertEqual(metadata.start_time_seconds, 2)
+            self.assertFalse(metadata.timestamps_estimated)
 
     def test_h264_and_hevc_frames_match_independent_decoded_frame_order(self):
         for name in ('Live_H264.MOV', 'Live_HEVC.MOV'):

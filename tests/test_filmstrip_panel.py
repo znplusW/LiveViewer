@@ -5,10 +5,10 @@ import unittest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QImage, QMouseEvent, QPainter, QWheelEvent
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QGridLayout, QStyle, QStyleFactory, QStyleOptionSlider, QToolTip, QWidget
+from PySide6.QtWidgets import QApplication, QGridLayout, QLabel, QStyle, QStyleFactory, QStyleOptionSlider, QToolTip, QWidget
 
 from livegallery.catalog_model import CatalogModel
 from livegallery.filmstrip_panel import FilmstripPanel
@@ -94,6 +94,7 @@ class FilmstripPanelTests(unittest.TestCase):
         self.settle()
 
     def test_actual_buttons_jump_to_explicit_sides_and_close_without_losing_controls(self):
+        original_buttons = (self.panel.hide_button, self.panel.side_button, self.panel.orientation_button)
         self.assertEqual([button.text() for button in (self.panel.side_button, self.panel.hide_button,
                                                       self.panel.orientation_button)], ['左侧', 'X', '右侧'])
         self.assertTrue(self.panel.side_button.isVisible())
@@ -123,6 +124,48 @@ class FilmstripPanelTests(unittest.TestCase):
         hidden = QSignalSpy(self.panel.hideRequested)
         QTest.mouseClick(self.panel.hide_button, Qt.MouseButton.LeftButton)
         self.assertEqual(hidden.count(), 1)
+        self.assertEqual((self.panel.hide_button, self.panel.side_button, self.panel.orientation_button), original_buttons)
+        self.assertIs(self.panel.controls.parentWidget(), self.panel._body)
+
+    def test_bottom_controls_stay_in_fixed_right_column_without_covering_or_scrolling_with_photos(self):
+        panel = self.panel
+
+        def bounds(widget):
+            return QRect(widget.mapTo(panel, QPoint()), widget.size())
+
+        for theme in ('dark', 'light'):
+            self.window.setStyleSheet(stylesheet_for(theme))
+            for width, height in ((520, 160), (1000, 200)):
+                with self.subTest(theme=theme, width=width, height=height):
+                    self.window.resize(width, 700)
+                    self.dock('horizontal', 'right')
+                    panel.set_extent(height)
+                    self.settle()
+                    self.assertIs(panel.controls.parentWidget(), panel._body)
+                    self.assertEqual(panel.controls.width(), 38)
+                    buttons = (panel.hide_button, panel.side_button, panel.orientation_button)
+                    self.assertEqual([button.text() for button in buttons], ['X', '左侧', '右侧'])
+                    rects = [bounds(button) for button in buttons]
+                    self.assertEqual(len({rect.x() for rect in rects}), 1)
+                    self.assertTrue(all(first.bottom() < second.top() for first, second in zip(rects, rects[1:])))
+                    for button, rect in zip(buttons, rects):
+                        self.assertEqual(button.size().toTuple(), (38, 34))
+                        self.assertTrue(button.isVisible())
+                        self.assertTrue(panel.rect().contains(rect))
+                        self.assertFalse(rect.intersects(bounds(panel.strip)))
+                    self.assertGreater(bounds(panel.controls).left(), bounds(panel.strip).right())
+                    self.assertEqual(panel.resize_handle.x(), panel.contentsRect().x())
+                    self.assertEqual(panel.resize_handle.width(), panel.contentsRect().width())
+                    self.assertEqual(bounds(panel.strip).top(), bounds(panel.resize_handle).bottom() + 1)
+                    self.assertEqual(panel.findChildren(QLabel), [])
+                    bar = panel.strip.horizontalScrollBar()
+                    self.assertGreater(bar.maximum(), 0)
+                    bar.setValue(bar.maximum())
+                    self.settle()
+                    self.assertEqual([bounds(button) for button in buttons], rects)
+                    bar.setValue(0)
+                    self.settle()
+                    self.assertEqual([bounds(button) for button in buttons], rects)
 
     def test_mode_and_resize_preserve_model_pixmap_identity_selection_and_browsing_anchor(self):
         strip = self.panel.strip
@@ -252,16 +295,19 @@ class FilmstripPanelTests(unittest.TestCase):
         self.assertEqual(layout.count(), 0)
         self.assertEqual(thickness.count(), 0)
 
-    def test_hidden_info_and_theme_buttons_remain_large_and_available(self):
+    def test_statistics_absent_and_theme_buttons_remain_large_and_available(self):
         for mode in ('light', 'dark'):
             self.window.setProperty('liveviewerTheme', mode)
             self.window.setStyleSheet(stylesheet_for(mode))
             for orientation, side in (('horizontal', 'right'), ('vertical', 'right'), ('vertical', 'left')):
                 self.dock(orientation, side)
-                self.panel.set_info_visible(False)
                 self.settle()
-                self.assertFalse(self.panel.library_label.isVisible())
-                self.assertFalse(self.panel.analysis_label.isVisible())
+                self.assertEqual(self.panel.findChildren(QLabel), [])
+                for removed in ('_info', '_info_layout', 'library_label', 'analysis_label', 'set_info_visible'):
+                    self.assertFalse(hasattr(self.panel, removed), removed)
+                if orientation == 'vertical':
+                    self.assertEqual(self.panel.strip.y(), self.panel.controls.geometry().bottom()
+                                     + 1 + self.panel._body_layout.verticalSpacing())
                 for button in (self.panel.hide_button, self.panel.orientation_button, self.panel.side_button):
                     if button.isVisible():
                         self.assertGreaterEqual(button.width(), 38)
@@ -297,7 +343,6 @@ class FilmstripPanelTests(unittest.TestCase):
                     self.window.setStyleSheet(stylesheet_for(theme) + '\nQWidget {font-family:Arial;}')
                     for orientation, side in (('horizontal', 'right'), ('vertical', 'right'), ('vertical', 'left')):
                         self.dock(orientation, side)
-                        self.panel.set_info_visible(False)
                         self.panel.hide()
                         self.panel.show()
                         for button in (self.panel.hide_button, self.panel.orientation_button, self.panel.side_button):
@@ -319,13 +364,16 @@ class FilmstripPanelTests(unittest.TestCase):
             for orientation, side in (('vertical', 'right'), ('vertical', 'left'), ('horizontal', 'left')):
                 self.dock(orientation, side)
                 self.settle()
-                order = ((self.panel.side_button, self.panel.hide_button, self.panel.orientation_button)
+                order = ((self.panel.hide_button, self.panel.side_button, self.panel.orientation_button)
                          if orientation == 'horizontal' else
                          (self.panel.side_button, self.panel.orientation_button, self.panel.hide_button)
                          if side == 'right' else
                          (self.panel.hide_button, self.panel.orientation_button, self.panel.side_button))
-                positions = [button.mapTo(self.panel, QPoint()).x() for button in order if button.isVisible()]
+                positions = [(button.mapTo(self.panel, QPoint()).y() if orientation == 'horizontal'
+                              else button.mapTo(self.panel, QPoint()).x())
+                             for button in order if button.isVisible()]
                 self.assertEqual(positions, sorted(positions))
+                self.assertTrue(all(first < second for first, second in zip(positions, positions[1:])))
             button = self.panel.orientation_button
             QToolTip.showText(button.mapToGlobal(QPoint(0, button.height())), button.toolTip(), button)
             QTest.qWait(30)

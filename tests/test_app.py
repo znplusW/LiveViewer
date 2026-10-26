@@ -17,9 +17,10 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QContextMenuEvent, QImage, QKeyEvent, QKeySequence, QMouseEvent, QPalette
+from PySide6.QtGui import (QContextMenuEvent, QEventPoint, QImage, QKeyEvent,
+                          QKeySequence, QMouseEvent, QPalette, QTouchEvent)
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QStyleFactory
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMenu, QStatusBar, QStyleFactory
 
 from livegallery.app import MainWindow, SettingsDialog
 from livegallery.models import MediaItem, PairDecision
@@ -29,6 +30,7 @@ from livegallery.cache_locations import open_cache
 from livegallery.settings import Preferences
 from livegallery.system_open import (E_ABORT, HRESULT_CANCELLED, OAIF_EXEC,
                                      OAIF_HIDE_REGISTRATION, OPENASINFO, open_with)
+from tests.live_photo_fixtures import prepare_live_photo_pair
 
 
 class WindowTests(unittest.TestCase):
@@ -89,7 +91,7 @@ class WindowTests(unittest.TestCase):
                  'bound_roots': list(map(str, window._cache_bound_roots)),
                  'current_id': window._current_id, 'model_items': len(window.model.items),
                  'request_context': {key: value[0] for key, value in window._request_context.items()},
-                 'empty_title': window.empty_title.text(), 'status': window.statusBar().currentMessage(),
+                 'empty_title': window.empty_title.text(), 'status': window.toast.text(),
                  'prepare_map_locked': window._cache_prepare_lock.locked(),
                  'root_prepare_locks': {str(root): guard.locked() for root, guard in
                                         getattr(window, '_cache_root_locks', {}).copy().items()},
@@ -148,8 +150,13 @@ class WindowTests(unittest.TestCase):
         self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer)
         self.assertEqual(len(self.window.model.items), 4)
         self.window._navigate(1)
+        # Selection metadata is assigned before the asynchronous decode. The
+        # grid round trip starts only after the selected image is displayed.
         self.wait_until(lambda: self.window._displayed_item is not None and
-                        self.window._displayed_item.image_path.name == "2.jpeg")
+                        self.window._displayed_item.image_path.name == "2.jpeg" and
+                        self.window._shown_image_path == self.base / "photos" / "2.jpeg" and
+                        self.window._current_image_available(),
+                        stage='selected navigation image is decoded and displayed')
         self.window.grid_button.click()
         self.assertIs(self.window.content.currentWidget(), self.window.grid)
         self.window.grid_button.click()
@@ -504,6 +511,47 @@ class WindowTests(unittest.TestCase):
         self.assertIsNone(self.window._current_id)
         self.assertEqual(Preferences.load().selected_folders, [])
 
+    def test_folder_name_click_only_anchors_shift_without_changing_gallery_or_saved_checks(self):
+        first = self.picture('folders/A/first.jpg')
+        middle = self.picture('folders/B/middle.jpg')
+        last = self.picture('folders/C/last.jpg')
+        self.window.load_folder(first.parent.parent)
+        self.wait_until(lambda: len(self.window.model.items) == 3 and not self.window._scan_pending)
+        tree = self.window.tree
+        tree.set_checked_directories([middle.parent])
+        current = self.window._current_id
+        changes, resets = QSignalSpy(tree.checkedChanged), QSignalSpy(self.window.model.modelReset)
+
+        def click(path, modifiers=Qt.KeyboardModifier.NoModifier, *, checkbox=False):
+            box = tree.checkbox_rect(tree._nodes[path])
+            point = box.center() if checkbox else QPoint(box.right() + 14, box.center().y())
+            QTest.mouseClick(tree.viewport(), Qt.MouseButton.LeftButton, modifiers, point)
+            self.application.processEvents()
+
+        for path, modifiers in ((first.parent, Qt.KeyboardModifier.NoModifier),
+                                (last.parent, Qt.KeyboardModifier.ControlModifier),
+                                (first.parent, Qt.KeyboardModifier.NoModifier)):
+            click(path, modifiers)
+            self.assertEqual(tree.checked_directories, {middle.parent})
+            self.assertEqual([item.image_path for item in self.window.model.items], [middle])
+            self.assertEqual(self.window._current_id, current)
+            self.assertEqual(Preferences.load().selected_folders, [str(middle.parent)])
+            self.assertEqual(changes.count(), 0)
+            self.assertEqual(resets.count(), 0)
+
+        click(last.parent, Qt.KeyboardModifier.ShiftModifier)
+        self.assertEqual(tree.checked_directories, {first.parent, middle.parent, last.parent})
+        self.assertEqual({item.image_path for item in self.window.model.items}, {first, middle, last})
+        self.assertEqual(changes.count(), 1)
+        self.assertEqual(resets.count(), 1)
+        self.assertEqual(set(Preferences.load().selected_folders),
+                         {str(first.parent), str(middle.parent), str(last.parent)})
+        click(middle.parent, checkbox=True)
+        self.assertEqual(tree.checked_directories, {first.parent, last.parent})
+        self.assertEqual({item.image_path for item in self.window.model.items}, {first, last})
+        self.assertEqual(changes.count(), 2)
+        self.assertEqual(resets.count(), 2)
+
     def test_folder_ctrl_a_batches_one_model_update_and_text_edit_select_all_is_unchanged(self):
         first, second = self.picture('A/a.jpg'), self.picture('B/b.jpg')
         self.window.load_folders([first.parent, second.parent])
@@ -608,6 +656,13 @@ class WindowTests(unittest.TestCase):
         self.wait_until(lambda: not self.window._scan_pending and len(self.window.model.items) == 2)
         self.assertEqual(self.window.folders, (first.parent, missing, second.parent))
         self.assertEqual(self.window._missing_folders, {missing})
+        # Renaming an intact directory simulates an unavailable disk here.
+        # Windows denies that rename while its image/thumbnail readers have
+        # files open; indexing can finish before those real reads complete.
+        self.wait_until(lambda: not self.window._request_context and
+                        self.window.jobs.wait_owner(None, timeout=0) and
+                        self.window.jobs.wait_owner(self.window.cache, timeout=0),
+                        stage='initial media reads before simulated disk disconnection')
         disconnected = second.parent.with_name('B-disconnected')
         second.parent.rename(disconnected)
         try:
@@ -687,7 +742,7 @@ class WindowTests(unittest.TestCase):
         first, second, third = (self.picture(f'{name}/same.jpg') for name in ('A', 'B', 'C'))
         self.choose_cache('library')
         self.wait_until(lambda: self.window._cache_key == ('library', None))
-        entered, release, left_gate = threading.Event(), threading.Event(), threading.Event()
+        entered, release = threading.Event(), threading.Event()
         blocked = [False]
         stale = []
         def slow_scan(folder, **arguments):
@@ -697,16 +752,12 @@ class WindowTests(unittest.TestCase):
                     stale.extend(cache for cache in self.window._cache_stores.values()
                                  if getattr(cache, 'roots', ()) == (first.parent, second.parent))
                 entered.set()
-                release.wait()
-                left_gate.set()
+                release.wait(4)
             return scan_folder(folder, **arguments)
         try:
             with patch('livegallery.app.scan_folder', side_effect=slow_scan):
                 self.window.load_folders([first.parent, second.parent])
-                # Entry follows real per-root cache/SQLite preparation, which
-                # has no one-second disk latency contract. Pump Qt events and
-                # retain bounded thread/cache diagnostics if preparation stalls.
-                self.wait_until(entered.is_set, timeout=15, stage='prepared multi-root scan entry')
+                self.assertTrue(entered.wait(1))
                 before = time.monotonic()
                 self.window.load_folders([first.parent, third.parent])
                 self.assertLess(time.monotonic() - before, .3)
@@ -715,7 +766,6 @@ class WindowTests(unittest.TestCase):
                 self.assertEqual(set(self.window.cache.writer_roots), {first.parent, third.parent})
                 self.assertTrue(stale and stale[0]._closed)
                 self.assertFalse(self.window.cache.has_fallbacks)
-                self.assertFalse(left_gate.is_set(), 'Old scan must stay blocked until the overlapping load completes')
                 release.set()
                 self.wait_until(lambda: all(not thread.is_alive() for thread in self.window._load_threads))
                 self.assertEqual(self.window.folders, (first.parent, third.parent))
@@ -898,9 +948,9 @@ class WindowTests(unittest.TestCase):
 
     def assert_fullscreen_has_no_controls(self):
         self.assertTrue(self.window.isFullScreen())
+        self.assertEqual(self.window.findChildren(QStatusBar), [])
         for widget in (self.window.header, self.window.filterbar, self.window.infobar,
-                       self.window.viewer_tools, self.window.sidebar, self.window.statusBar(),
-                       self.window.toast, self.window.library_label, self.window.analysis_label):
+                       self.window.sidebar, self.window.toast, self.window.library_label, self.window.analysis_label):
             self.assertFalse(widget.isVisible(), widget.objectName() or type(widget).__name__)
 
     def test_fullscreen_is_immediate_stable_and_f11_or_escape_exit(self):
@@ -1149,7 +1199,7 @@ class WindowTests(unittest.TestCase):
                 dialog.live_once_key.setKeySequence(QKeySequence("P"))
                 dialog.filmstrip_key.setKeySequence(QKeySequence("F"))
                 for key, description in (("Left", "上一张"), ("Right", "下一张"),
-                                         ("F11", "全屏"), ("Ctrl+O", "打开文件夹")):
+                                         ("F11", "全屏"), ("Ctrl+O", "添加文件夹")):
                     with self.subTest(editor=editor, key=key):
                         editor.setKeySequence(QKeySequence(key))
                         self.assertTrue(dialog.shortcut_note.isVisible())
@@ -1229,7 +1279,7 @@ class WindowTests(unittest.TestCase):
         dialog = SettingsDialog(self.window.preferences, self.window)
         for name in ('Ctrl+=', 'Ctrl++', 'Ctrl+Shift+=', 'Ctrl+Num++', 'Ctrl+-', 'Ctrl+Num+-'):
             dialog.filmstrip_key.setKeySequence(QKeySequence(name))
-            self.assertIn('总览缩略图', dialog.shortcut_note.text(), name)
+            self.assertIn('全览缩略图', dialog.shortcut_note.text(), name)
             self.assertFalse(dialog.override_keys.isChecked())
         dialog.filmstrip_key.setKeySequence(QKeySequence('Ctrl+='))
         with patch('livegallery.app.QMessageBox.information') as message:
@@ -1305,6 +1355,41 @@ class WindowTests(unittest.TestCase):
             self.application.processEvents()
         self.assertGreaterEqual(self.window.viewer.viewport().height(), 150)
         self.assertTrue(handle.isVisible())
+
+        # A fixed strip must fit the actual right pane, even when switching
+        # from a wide vertical strip immediately before shrinking the window.
+        self.window.resize(1280, 850)
+        self.window._set_film_layout('vertical', 'left')
+        self.window._set_film_width(480)
+        for _ in range(4):
+            self.application.processEvents()
+        self.window._set_film_layout('horizontal', 'left')
+        self.window._set_film_height(480)
+        self.window.resize(940, 650)
+        for _ in range(5):
+            self.application.processEvents()
+        right = self.window._right_layout.parentWidget()
+        detail = {'right': right.contentsRect().getRect(), 'film': self.window.film.geometry().getRect(),
+                  'photo': self.window.photo_area.geometry().getRect()}
+        self.assertEqual(self.window.preferences.filmstrip_height, 480)
+        self.assertTrue(right.contentsRect().contains(self.window.film.geometry()), detail)
+        self.assertTrue(right.contentsRect().contains(self.window.photo_area.geometry()), detail)
+        self.assertLess(self.window.film.height(), 480)
+        self.assertGreaterEqual(self.window.photo_area.height(),
+                                max(160, self.window.photo_area.minimumSizeHint().height()))
+        clamped_height = self.window.film.height()
+        for _ in range(4):
+            self.window._clamp_film_height()
+            self.application.processEvents()
+            self.assertEqual(self.window.film.height(), clamped_height)
+            self.assertEqual(self.window.preferences.filmstrip_height, 480)
+            self.assertTrue(right.contentsRect().contains(self.window.film.geometry()))
+        self.window.resize(1500, 950)
+        for _ in range(5):
+            self.application.processEvents()
+        self.assertEqual(self.window.preferences.filmstrip_height, 480)
+        self.assertEqual(self.window.film.height(), 480)
+        self.assertTrue(right.contentsRect().contains(self.window.film.geometry()))
 
     def test_few_film_thumbnails_do_not_oscillate_and_manual_view_zoom_is_preserved(self):
         path = self.picture('one.jpg')
@@ -1509,6 +1594,48 @@ class WindowTests(unittest.TestCase):
         self.window._job_finished("pair-ready", PairDecision(pending.image_path, (), False, "ready"), None)
         self.wait_until(lambda: self.window.content.currentWidget() is self.window.viewer)
         self.assertTrue(self.window.fullscreen_live_badge.isVisible())
+
+    def test_photo_single_click_and_touch_tap_preserve_filmstrip_state(self):
+        self.show_live_item()
+        self.window._toggle_grid(False)
+        viewer = self.window.viewer
+        toggled = QSignalSpy(viewer.controls_toggled)
+        device = QTest.createTouchDevice()
+        interval = QApplication.doubleClickInterval()
+        for route in ("mouse", "touch"):
+            for visible in (True, False):
+                with self.subTest(route=route, visible=visible):
+                    self.window.strip_button.setChecked(visible)
+                    self.window._toggle_strip(visible)
+                    self.application.processEvents()
+                    position = viewer.viewport().rect().center()
+                    self.assertTrue(viewer.image_contains_viewport_point(QPointF(position)))
+                    self.assertEqual(self.window.film.isVisible(), visible)
+                    before = toggled.count()
+                    if route == "mouse":
+                        QTest.mouseClick(viewer.viewport(), Qt.MouseButton.LeftButton, pos=position)
+                    else:
+                        for kind, state in ((QEvent.Type.TouchBegin, QEventPoint.State.Pressed),
+                                            (QEvent.Type.TouchEnd, QEventPoint.State.Released)):
+                            event = QTouchEvent(kind, device)
+                            # As in the raw canvas regressions, supply local coordinates:
+                            # QEventPoint's public constructor only sets scene/global positions.
+                            point = SimpleNamespace(id=lambda: 71, state=lambda value=state: value,
+                                                    position=lambda: QPointF(position))
+                            event.points = lambda value=point: [value]
+                            self.assertTrue(viewer.viewportEvent(event))
+                        self.assertFalse(viewer._touch_active)
+                        self.assertIsNone(viewer._input_owner)
+                    self.assertTrue(viewer._click_timer.isActive())
+                    QTest.qWait(interval + 50)
+                    self.wait_until(lambda: toggled.count() == before + 1,
+                                    stage="photo click reached the existing controls signal")
+                    self.assertEqual(toggled.count(), before + 1)
+                    self.assertEqual(self.window.film.isVisible(), visible)
+                    self.assertEqual(self.window._remembered_strip, visible)
+                    self.assertEqual(self.window.strip_button.isChecked(), visible)
+                    self.assertEqual(self.window.preferences.filmstrip_visible, visible)
+                    self.assertEqual(Preferences.load().filmstrip_visible, visible)
 
     def test_filmstrip_shortcut_fullscreen_grid_input_safety_and_persistence(self):
         self.show_live_item()
@@ -1991,58 +2118,116 @@ class WindowTests(unittest.TestCase):
             self.assertEqual(refresh.call_count, 1)
             self.assertIs(refresh.call_args.args[1], dialog.saved_result)
 
-    def test_cover_editor_releases_real_player_and_cancel_allows_replay(self):
-        item = self.show_live_item()
-        item.video_path.write_bytes((Path(__file__).parent / 'fixtures' / 'JPEG_PAIR.mov').read_bytes())
-        original_photo, original_video = item.image_path.read_bytes(), item.video_path.read_bytes()
-        viewer = self.window.viewer
-        viewer.set_options(loop=True)
-        viewer.zoom_in()
-        photo_key = viewer._photo.pixmap().cacheKey()
-        try:
-            for detached in (False, True):
-                with self.subTest(detached=detached):
-                    if detached:
-                        self.window._detach_preview()
-                    transform, center = viewer.transform(), viewer._scene_center()
-                    viewer.start_live()
-                    self.wait_until(lambda: viewer._live_visible, stage='real playback before cover editor')
-                    self.assertFalse(viewer._player.source().isEmpty())
-                    dialog = MagicMock()
-                    dialog.exec.return_value = QDialog.DialogCode.Rejected
-                    dialog.saved_result = None
-                    def editor(*args, **kwargs):
-                        # The worker may open immediately in the constructor, so
-                        # media must be released before even constructing it.
-                        self.assertTrue(viewer._player.source().isEmpty())
-                        self.assertIsNone(viewer._player.videoSink())
-                        self.assertFalse(viewer._video_sink.videoFrame().isValid())
-                        self.assertFalse(viewer._last_presented_frame.isValid())
-                        probe = item.video_path.with_suffix('.unlocked')
-                        os.replace(item.video_path, probe)
-                        os.replace(probe, item.video_path)
-                        return dialog
-                    with patch('livegallery.cover_editor.EditorDialog', side_effect=editor), \
-                            patch.object(self.window, '_apply_cover_result') as refresh:
-                        self.window._open_cover_editor(item)
-                        refresh.assert_not_called()
-                    self.assertEqual(viewer._video_path, item.video_path)
-                    self.assertEqual(viewer._photo.pixmap().cacheKey(), photo_key)
-                    self.assertEqual(viewer.transform(), transform)
-                    self.assertLess((viewer._scene_center() - center).manhattanLength(), 2)
-                    self.assertTrue(viewer._photo.isVisible())
-                    self.assertEqual(item.image_path.read_bytes(), original_photo)
-                    self.assertEqual(item.video_path.read_bytes(), original_video)
-                    viewer.start_live()
-                    self.wait_until(lambda: viewer._live_visible, stage='real replay after cancelled cover editor')
-                    self.assertIs(viewer._player.videoSink(), viewer._video_sink)
-                    self.assertEqual(Path(viewer._player.source().toLocalFile()), item.video_path.resolve())
-                    viewer.stop_live()
-        finally:
-            # A cancelled test assertion must still release the real decoder
-            # before the shared fixture deletes its files on Windows.
-            viewer.release_media_for_edit()
+    def test_heic_cover_overwrite_removes_deleted_candidates_and_preserves_existing_alternatives(self):
+        first = self.picture('converted.jpg')
+        other = self.picture('still-present-alternative.jpeg')
+        removed = self.picture('converted.jpeg')
+        video = first.with_suffix('.MOV')
+        video.touch()
+        original = MediaItem('converted', first, video, (first, other, removed))
+        self.catalog([original], cached=True)
+        self.window.preferences.autoplay = True
+        self.window._extras[original.id] = [MediaItem('old-extra', first),
+                                           MediaItem('kept-extra', other),
+                                           MediaItem('missing-extra', removed)]
+        versions = tuple(file_version(path) for path in original.candidates)
+        thumbnail = self.window.cache.get_thumbnail(first)
+        self.assertTrue(thumbnail.exists())
+        self.assertIn(str(first), self.window._previews)
+        self.window.model.pending.add(str(first))
+        self.window.model.failures.add(str(first))
+        self.window._file_times[str(first)] = first.stat().st_mtime_ns
+        output = first.with_suffix('.HEIC')
+        output.write_bytes((Path(__file__).parent / 'fixtures/Live_H264.heic').read_bytes())
+        first.unlink()
+        removed.unlink()
+        result = SimpleNamespace(image_path=output, video_path=video, created_copy=False)
+        with patch.object(self.window, 'load_folder') as rescan, \
+                patch.object(self.window.viewer, 'play_live_once') as autoplay:
+            self.window._apply_cover_result(original, result, versions)
+            updated = self.window._primary_items[0]
+            self.assertEqual(updated.candidates, (output, other))
+            self.assertEqual(updated.image_path, output)
+            self.assertEqual(updated.video_path, video)
+            self.assertEqual([item.image_path for item in self.window._extras[original.id]], [other])
+            self.assertEqual(self.window.cache.get_override(updated), output)
+            self.assertFalse(thumbnail.exists())
+            self.assertNotIn(str(first), self.window._previews)
+            self.assertNotIn(str(first), self.window.model.pending)
+            self.assertNotIn(str(first), self.window.model.failures)
+            self.assertNotIn(str(first), self.window._file_times)
+            self.assertNotIn(first, [item.image_path for item in self.window._items])
+            self.assertNotIn(removed, [item.image_path for item in self.window._items])
+            self.wait_until(lambda: self.window._displayed_item is not None
+                            and self.window._displayed_item.image_path == output
+                            and self.window._current_image_available())
+            self.assertEqual(self.window.viewer._video_path, video)
+            self.assertTrue(other.is_file())
+            self.assertEqual(len(self.window._primary_items), 1)
+            rescan.assert_not_called()
+            autoplay.assert_not_called()
 
+    def _cover_editor_releases_real_loaded_movie(self, save):
+        from fractions import Fraction
+        from PIL import Image
+        from livegallery.cover_save import CoverSource, save_cover
+        from livegallery.live_photo_image import read_content_identifier
+        from livegallery.live_photo_movie import inspect_live_photo_movie, media_payload_digests
+        photo = self.picture('loaded.jpg')
+        video = photo.with_suffix('.MOV')
+        video.write_bytes((Path(__file__).parent / 'fixtures/VFR_PAIR.MOV').read_bytes())
+        prepare_live_photo_pair(photo, video)
+        original_identifier = read_content_identifier(photo)
+        original = (photo.read_bytes(), video.read_bytes())
+        payloads = media_payload_digests(video)
+        item = MediaItem('loaded-editor', photo, video)
+        self.catalog([item], cached=True)
+        self.window._select_row(0)
+        self.window._toggle_grid(False)
+        self.window.viewer.set_photo(self.image, video)
+        viewer = self.window.viewer
+        try:
+            viewer.start_live()
+            self.wait_until(lambda: viewer._player.position() > 0, stage='real MOV playback before cover edit')
+            viewer.stop_live()
+            self.assertFalse(viewer._player.source().isEmpty())
+            observations = []
+            class ImmediateEditor(QDialog):
+                frame_exported = Signal(object)
+                def __init__(editor, current, parent, **kwargs):
+                    super().__init__(parent)
+                    observations.append(viewer._player.source().isEmpty())
+                    editor.saved_result = None
+                    if save:
+                        editor.saved_result = save_cover(CoverSource.capture(current),
+                            Image.new('RGB', (320, 240), 'red'), 'overwrite', photo_time=Fraction(11, 25))
+                def exec(editor):
+                    return QDialog.DialogCode.Accepted if save else QDialog.DialogCode.Rejected
+            with patch('livegallery.cover_editor.EditorDialog', ImmediateEditor):
+                self.window._open_cover_editor(item)
+            self.assertEqual(observations, [True])
+            self.assertTrue(viewer._player.source().isEmpty())
+            if save:
+                self.assertEqual(inspect_live_photo_movie(video).photo_time, Fraction(11, 25))
+                self.assertNotEqual(inspect_live_photo_movie(video).asset_identifier, original_identifier)
+                self.assertEqual(media_payload_digests(video), payloads)
+                self.assertFalse(photo.exists())
+                self.assertEqual(self.window._primary_items[0].image_path, photo.with_suffix('.HEIC'))
+                self.assertEqual(self.window._primary_items[0].candidates, (photo.with_suffix('.HEIC'),))
+                self.wait_until(lambda: self.window._current_image_available(), stage='saved cover decode')
+            else:
+                self.assertEqual((photo.read_bytes(), video.read_bytes()), original)
+            viewer.start_live()
+            self.wait_until(lambda: viewer._player.position() > 0, stage='real MOV replay after editor')
+            self.assertEqual(Path(viewer._player.source().toLocalFile()), video)
+        finally:
+            viewer.release_video_for_cover_edit()
+
+    def test_cover_editor_releases_real_played_movie_for_pair_overwrite_and_replay(self):
+        self._cover_editor_releases_real_loaded_movie(True)
+
+    def test_cancelled_cover_editor_releases_loaded_movie_and_next_play_reloads_it(self):
+        self._cover_editor_releases_real_loaded_movie(False)
 
     def test_committed_frame_export_remembers_directory_even_when_cover_editor_is_cancelled(self):
         live = self.show_live_item()

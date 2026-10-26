@@ -42,6 +42,15 @@ def data_directory() -> Path:
     return user_data_directory()
 
 
+def normalize_fullscreen_exit_gestures(values) -> list[str]:
+    """Migrate enabled legacy edge choices to the sole top-edge gesture."""
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return ['top']
+    # Keep an explicit empty selection disabled; ignore unknown list entries.
+    return ['top'] if any(isinstance(value, str) and value in ('top', 'left', 'right')
+                         for value in values) else []
+
+
 @dataclass
 class Preferences:
     loop: bool = False
@@ -53,6 +62,7 @@ class Preferences:
     live_once_key: str = 'P'
     filmstrip_key: str = 'F'
     filmstrip_visible: bool = True
+    show_zoom_controls: bool = True
     horizontal_scroll_mode: str = 'navigate'
     cache_mb: int = 2048
     cache_location: str = 'user'
@@ -78,7 +88,7 @@ class Preferences:
     map_dock_width: int = 320
     map_bottom_height: int = 260
     map_floating: bool = False
-    fullscreen_exit_gestures: list[str] = field(default_factory=lambda: ['left'])
+    fullscreen_exit_gestures: list[str] = field(default_factory=lambda: ['top'])
     theme_mode: str = 'dark'
 
     def normalize_shortcuts(self):
@@ -189,13 +199,13 @@ class Preferences:
                     setattr(result, name, default)
             if not isinstance(result.map_floating, bool):
                 result.map_floating = False
-            if not isinstance(result.fullscreen_exit_gestures, list):
-                result.fullscreen_exit_gestures = ['left']
-            result.fullscreen_exit_gestures = list(dict.fromkeys(
-                value for value in result.fullscreen_exit_gestures if value in ('top', 'left', 'right')))
+            result.fullscreen_exit_gestures = normalize_fullscreen_exit_gestures(
+                result.fullscreen_exit_gestures)
             result.normalize_shortcuts()
             if not isinstance(result.filmstrip_visible, bool):
                 result.filmstrip_visible = True
+            if not isinstance(result.show_zoom_controls, bool):
+                result.show_zoom_controls = True
             if not isinstance(result.autoplay, bool):
                 result.autoplay = False
             if result.horizontal_scroll_mode not in ('navigate', 'pan'):

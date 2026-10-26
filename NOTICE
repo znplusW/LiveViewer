@@ -1,0 +1,24 @@
+LiveViewer
+Copyright (c) 2026 LiveViewer contributors
+
+The LiveViewer application is licensed under the GNU General Public License,
+version 3 only (SPDX-License-Identifier: GPL-3.0-only). See LICENSE.
+It is provided WITHOUT ANY WARRANTY, including merchantability or fitness
+for a particular purpose, to the extent permitted by applicable law.
+
+License transition: versions distributed before this change retained their
+original MIT grants. The original notice is preserved in
+licenses/LiveViewer-MIT-NOTICE.txt. This change does not revoke those grants.
+
+Explicit component exception: native/heic_encoder/ and its standalone
+LiveViewer.HeicEncoder helper remain MIT-licensed. The full MIT notice above
+also covers that helper. Its replaceable libheif and Kvazaar dependencies
+retain their own licenses. No helper source or binary is relicensed by this notice.
+
+Third-party code and assets retain their original notices and licenses.
+See THIRD_PARTY_NOTICES.md and licenses/. A source archive for LiveViewer
+alone is not a substitute for the corresponding source of bundled copyleft
+components. See docs/SOURCE_DISTRIBUTION.md for release preparation status.
+
+Apple, iPhone and Live Photos are trademarks of Apple Inc.
+LiveViewer is an independent project and is not affiliated with Apple.

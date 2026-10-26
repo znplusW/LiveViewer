@@ -6,6 +6,7 @@ import threading
 import time
 import traceback
 import unittest
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -24,8 +25,7 @@ from livegallery.frame_reader import FrameCancelled, FrameReader
 from livegallery.frame_tools import resolve_frame_tools
 from livegallery.models import MediaItem
 from livegallery.ui_theme import application_theme
-from livegallery.livephoto_metadata import photo_identifier, validate_pair
-from tests.movie_helpers import assert_video_media_preserved
+from tests.live_photo_fixtures import prepare_live_photo_pair
 
 
 class FakeReader:
@@ -49,7 +49,7 @@ class FakeReader:
         positions += tuple(.90 + .04 * (index - 7) for index in range(8, self.frame_count))
         self.metadata = SimpleNamespace(
             width=120, height=90,
-            frames=tuple(SimpleNamespace(index=i, pts_seconds=value, duration_seconds=.04)
+            frames=tuple(SimpleNamespace(index=i, pts_seconds=value, duration_seconds=.04, presentation_time=Fraction(str(value)))
                          for i, value in enumerate(positions)),
         )
         self.instances.append(self)
@@ -101,7 +101,8 @@ class CoverEditorTests(unittest.TestCase):
         self.photo = self.folder / "Holiday.jpg"
         self.video = self.folder / "Holiday.MOV"
         Image.new("RGB", (200, 150), "blue").save(self.photo, "JPEG")
-        self.video.write_bytes((Path(__file__).parent / "fixtures" / "JPEG_PAIR.mov").read_bytes())
+        self.video.write_bytes((Path(__file__).parent / 'fixtures/VFR_PAIR.MOV').read_bytes())
+        prepare_live_photo_pair(self.photo, self.video)
         self.original_photo = self.photo.read_bytes()
         self.original_video = self.video.read_bytes()
         self.item = MediaItem("live", self.photo, self.video)
@@ -276,6 +277,17 @@ class CoverEditorTests(unittest.TestCase):
     def assert_originals(self):
         self.assertEqual(self.photo.read_bytes(), self.original_photo)
         self.assertEqual(self.video.read_bytes(), self.original_video)
+
+    def assert_encoded_media_and_track_properties_preserved(self, source, output):
+        from livegallery import live_photo_movie as movie
+        from livegallery.live_photo_native_image import verify_native_movie_payload_preserved
+        self.assertEqual(movie.media_payload_digests(source), movie.media_payload_digests(output))
+        # ExifTool may relocate media when updating the shared identifier.
+        # This verifier allows only chunk-address changes: same-ID tracks,
+        # every other track byte, encoded samples and exact times stay exact.
+        verified = verify_native_movie_payload_preserved(source, output)
+        self.assertTrue(verified['all_encoded_samples_and_timing_preserved'])
+        self.assertTrue(verified['all_track_structure_except_chunk_offsets_preserved'])
 
     def test_main_editor_has_larger_preview_maximize_and_no_save_mode_panel(self):
         dialog = self.open_dialog()
@@ -897,15 +909,21 @@ class CoverEditorTests(unittest.TestCase):
         dialog.timeline.setValue(4)
         self.wait(lambda: dialog.save_button.isEnabled())
         self.choose_save()
-        self.wait(lambda: dialog.result() == QDialog.DialogCode.Accepted)
+        self.wait(lambda: dialog.result() == QDialog.DialogCode.Accepted, self.REAL_SAVE_TIMEOUT)
         result = dialog.saved_result
         self.assertTrue(result.created_copy)
-        self.assertEqual(result.image_path.name, "Holiday v1.jpg")
+        self.assertEqual(result.image_path.name, "Holiday v1.HEIC")
         self.assertEqual(result.video_path.name, "Holiday v1.MOV")
-        assert_video_media_preserved(self, self.original_video, result.video_path.read_bytes())
-        validate_pair(result.image_path, result.video_path, photo_identifier(result.image_path), .44)
+        from livegallery.live_photo_image import read_content_identifier
+        from livegallery.live_photo_movie import inspect_live_photo_movie
+        self.assert_encoded_media_and_track_properties_preserved(self.video, result.video_path)
+        info = inspect_live_photo_movie(result.video_path)
+        self.assertEqual(info.asset_identifier, read_content_identifier(result.image_path))
+        self.assertEqual(info.photo_time, Fraction(11, 25))
+        self.assertEqual(result.photo_time, Fraction(11, 25))
         self.assertEqual(FakeReader.instances[0].export_indices, [4])
         with Image.open(result.image_path) as image:
+            self.assertEqual(image.format, 'HEIF')
             self.assertEqual(image.size, (120, 90))
         self.assert_originals()
 
@@ -913,16 +931,42 @@ class CoverEditorTests(unittest.TestCase):
         dialog = self.open_dialog()
         def inspect(prompt):
             prompt.overwrite_choice.setChecked(True)
-            self.assertIn("不保留备份", prompt.warning_label.text())
-            self.assertIn("无法", prompt.warning_label.text())
-            self.assertIn("校验通过", prompt.warning_label.text())
+            self.assertEqual(prompt.warning_label.text(), "覆盖原图，无法撤销")
+            self.assertLessEqual(len(prompt.warning_label.text()), 10)
         self.choose_save("overwrite", inspect=inspect)
-        self.wait(lambda: dialog.result() == QDialog.DialogCode.Accepted)
+        self.wait(lambda: dialog.result() == QDialog.DialogCode.Accepted, self.REAL_SAVE_TIMEOUT)
         self.assertFalse(dialog.saved_result.created_copy)
         self.assertIsNone(dialog.saved_result.backup_path)
-        self.assertNotEqual(self.photo.read_bytes(), self.original_photo)
-        assert_video_media_preserved(self, self.original_video, self.video.read_bytes())
-        validate_pair(self.photo, self.video, photo_identifier(self.photo), 0)
+        output = self.photo.with_suffix('.HEIC')
+        self.assertEqual(dialog.saved_result.image_path, output)
+        self.assertFalse(self.photo.exists())
+        self.assertNotEqual(output.read_bytes(), self.original_photo)
+        self.assertNotEqual(self.video.read_bytes(), self.original_video)
+        from livegallery.live_photo_image import read_content_identifier
+        from livegallery.live_photo_movie import inspect_live_photo_movie, media_payload_digests
+        info = inspect_live_photo_movie(self.video)
+        self.assertEqual(info.asset_identifier, read_content_identifier(output))
+        self.assertEqual(info.photo_time, Fraction(0))
+        self.assertEqual(media_payload_digests(self.video), media_payload_digests(Path(__file__).parent / 'fixtures/VFR_PAIR.MOV'))
+
+    def test_save_choices_preserve_copy_help_and_use_short_overwrite_warning(self):
+        prompt = SaveModeDialog(self.item)
+        try:
+            self.assertEqual(prompt.mode, 'copy')
+            self.assertEqual(prompt.copy_choice.text(), '创建副本（保留原图片和原视频）')
+            self.assertEqual(prompt.overwrite_choice.text(), '覆盖原组（不保留备份）')
+            copy_help = '统一保存为 HEIC 封面，与 MOV 视频一起创建 v1、v2… 副本，使用同一个版本号和新的共同标识。视频封面时间设为所选帧；音视频内容不变，原文件不变。'
+            self.assertEqual(prompt.warning_label.text(), copy_help)
+            prompt.overwrite_choice.setChecked(True)
+            self.assertEqual(prompt.mode, 'overwrite')
+            self.assertEqual(prompt.warning_label.text(), '覆盖原图，无法撤销')
+            self.assertLessEqual(len(prompt.warning_label.text()), 10)
+            prompt.copy_choice.setChecked(True)
+            self.assertEqual(prompt.mode, 'copy')
+            self.assertEqual(prompt.warning_label.text(), copy_help)
+        finally:
+            prompt.deleteLater()
+            self.app.processEvents()
 
     def test_failed_save_keeps_dialog_open_and_originals_unchanged(self):
         def failed(*args, **kwargs):
@@ -935,67 +979,119 @@ class CoverEditorTests(unittest.TestCase):
         self.assertIsNone(dialog.saved_result)
         self.assert_originals()
 
-    def test_save_passes_actual_frame_time_start_offset_and_duration(self):
-        received = []
-        def capture(*args, **kwargs):
-            received.append(kwargs)
-            raise OSError('timing captured without writing')
-        dialog = self.open_dialog(save_function=capture)
-        reader = FakeReader.instances[0]
-        reader.metadata.start_time_seconds = .125
-        dialog.timeline.setValue(4)
-        self.wait(lambda: dialog.save_button.isEnabled())
+    def test_late_preview_failure_cannot_finish_active_save(self):
+        entered, release = threading.Event(), threading.Event()
+        def saving(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(3))
+            raise OSError('actual save failure')
+        dialog = self.open_dialog(save_function=saving)
+        try:
+            self.choose_save()
+            self.wait(entered.is_set)
+            dialog._worker._preview_failed('late worker preview failure')
+            # Also exercise a signal queued before the worker became busy.
+            dialog._failed('preview', dialog._request_sequence, 'already queued preview failure')
+            self.app.processEvents()
+            self.assertTrue(dialog._saving)
+            self.assertFalse(dialog.timeline.isEnabled())
+            self.assertFalse(dialog.save_button.isEnabled())
+            self.assertEqual(dialog._worker._busy, 'save')
+            release.set()
+            self.wait(lambda: 'actual save failure' in dialog.status_label.text())
+            self.assertFalse(dialog._saving)
+            self.assertTrue(dialog.isVisible())
+        finally:
+            release.set()
+
+    def test_cancelled_save_with_recovery_failure_stays_visible_and_can_close(self):
+        from livegallery.cover_save import CoverSaveError
+        entered = threading.Event()
+        def saving(*args, cancel_event=None, **kwargs):
+            entered.set()
+            self.assertTrue(cancel_event.wait(3))
+            raise CoverSaveError('自动恢复未完成；已保留恢复资料')
+        dialog = self.open_dialog(save_function=saving)
         self.choose_save()
-        self.wait(lambda: bool(received))
-        self.assertAlmostEqual(received[0]['frame_time_seconds'], .565)
-        self.assertAlmostEqual(received[0]['frame_duration_seconds'], .04)
+        self.wait(entered.is_set)
+        dialog.reject()
+        self.wait(lambda: '已保留恢复资料' in dialog.status_label.text())
+        self.assertTrue(dialog.isVisible())
+        self.assertFalse(dialog._saving)
+        self.assertFalse(dialog._cancel_pending)
+        self.assertTrue(dialog.buttons.button(QDialogButtonBox.StandardButton.Cancel).isEnabled())
+        self.assertIsNone(dialog.saved_result)
+        dialog.reject()
+        self.assertFalse(dialog.isVisible())
+
+    def test_missing_exact_timestamp_never_calls_save(self):
+        called = []
+        dialog = self.open_dialog(save_function=lambda *args, **kwargs: called.append(kwargs))
+        FakeReader.instances[0].metadata.frames[0].presentation_time = None
+        self.choose_save()
+        self.wait(lambda: '真实时间戳' in dialog.status_label.text())
+        self.assertEqual(called, [])
+        self.assertTrue(dialog.isVisible())
         self.assert_originals()
 
-    def test_overwrite_closes_movie_readers_before_save_and_restarts_after_failure(self):
+    def test_overwrite_closes_preview_before_save_and_restarts_after_failure(self):
         sessions = []
-        class Preview:
+        class ObservedPreview:
             def __init__(self, *args, **kwargs):
-                self.closed = self.waited = False
+                self.closed = False
+                self.started = False
+                self.requested = []
                 sessions.append(self)
-            def start(self):
-                pass
-            def get(self, index):
-                return Image.new('RGB', (120, 90), 'red')
-            def request(self, index):
-                pass
-            def close(self):
-                self.closed = True
-            def wait(self, timeout):
-                self.waited = True
-                return True
-        attempts = []
-        def save(*args, **kwargs):
-            self.assertTrue(sessions[-1].closed)
-            self.assertTrue(sessions[-1].waited)
-            self.assertTrue(FakeReader.instances[-1].closed)
-            attempts.append(1)
-            from livegallery.cover_save import save_cover
-            if len(attempts) == 1:
-                replace = os.replace
-                def fail_second(staged, target):
-                    if Path(target) == self.video:
-                        raise PermissionError('temporary write denial')
-                    replace(staged, target)
-                with patch('livegallery.cover_save.os.replace', side_effect=fail_second):
-                    return save_cover(*args, **kwargs)
-            return save_cover(*args, **kwargs)
-        dialog = self.open_dialog(save_function=save, preview_factory=Preview)
+            def start(self): self.started = True
+            def get(self, index): return Image.new('RGB', (120, 90), 'blue')
+            def request(self, index): self.requested.append(index)
+            def close(self): self.closed = True
+            def wait(self, timeout): return self.closed
+        def fail(source, image, mode, **kwargs):
+            self.assertTrue(sessions[0].closed)
+            self.assertEqual(mode, 'overwrite')
+            self.assertEqual(kwargs['photo_time'], Fraction(0))
+            raise OSError('simulated disk failure')
+        dialog = self.open_dialog(preview_factory=ObservedPreview, save_function=fail)
         self.choose_save('overwrite')
-        self.wait(lambda: len(sessions) == 2 and dialog.save_button.isEnabled())
-        self.assertFalse(FakeReader.instances[-1].closed)
-        self.assertFalse(sessions[-1].closed)
+        self.wait(lambda: len(sessions) == 2 and 'simulated disk failure' in dialog.status_label.text())
+        self.assertTrue(sessions[1].started)
+        self.assertEqual(sessions[1].requested, [0])
+        self.assertTrue(dialog.isVisible())
         self.assert_originals()
-        dialog.timeline.setValue(4)
-        self.wait(lambda: dialog.save_button.isEnabled())
+
+    def test_overwrite_releases_actual_ffmpeg_preview_pipe_before_replacing_movie(self):
+        entered = threading.Event()
+        sessions = []
+        class HeldPipePreview(PreviewSession):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                sessions.append(self)
+            def _store(self, index, image, **kwargs):
+                super()._store(index, image, **kwargs)
+                if index == 0 and kwargs.get('matching'):
+                    entered.set()
+                    # Keep FFmpeg's genuine source read handle alive until the
+                    # production save worker closes its preview session.
+                    if not self._closed.wait(10):
+                        raise AssertionError('save did not close active preview')
+        self.dialog = EditorDialog(self.item, reader_factory=FrameReader, preview_factory=HeldPipePreview)
+        dialog = self.dialog
+        dialog.show()
+        self.wait(lambda: entered.is_set() and dialog.save_button.isEnabled(), 8)
+        self.assertIsNotNone(sessions[0]._process)
         self.choose_save('overwrite')
-        self.wait(lambda: dialog.saved_result is not None)
-        self.assertEqual(len(attempts), 2)
-        validate_pair(self.photo, self.video, photo_identifier(self.photo), .44)
+        self.wait(lambda: dialog.saved_result is not None, self.REAL_SAVE_TIMEOUT)
+        self.assertTrue(sessions[0]._closed.is_set())
+        self.assertTrue(sessions[0].wait(2))
+        from livegallery.live_photo_image import read_content_identifier
+        from livegallery.live_photo_movie import inspect_live_photo_movie, media_payload_digests
+        info = inspect_live_photo_movie(self.video)
+        self.assertFalse(self.photo.exists())
+        self.assertEqual(info.asset_identifier, read_content_identifier(dialog.saved_result.image_path))
+        self.assertEqual(info.photo_time, Fraction(0))
+        self.assertEqual(media_payload_digests(self.video), media_payload_digests(Path(__file__).parent / 'fixtures/VFR_PAIR.MOV'))
+        self.assertFalse(list((self.folder / '.LiveViewer-work').iterdir()))
 
     def test_cancel_during_save_waits_for_worker_cleanup(self):
         entered = threading.Event()
@@ -1013,41 +1109,15 @@ class CoverEditorTests(unittest.TestCase):
         self.assertIsNone(dialog.saved_result)
         self.assert_originals()
 
-    def test_preview_release_timeout_keeps_navigation_and_retry_available(self):
-        sessions = []
-        class SlowClosingPreview:
-            def __init__(self, *args, **kwargs):
-                self.waits = 0
-                sessions.append(self)
-            def start(self):
-                pass
-            def get(self, index):
-                return Image.new('RGB', (120, 90), 'red')
-            def request(self, index):
-                pass
-            def close(self):
-                pass
-            def wait(self, timeout):
-                self.waits += 1
-                return self.waits > 1
-        dialog = self.open_dialog(preview_factory=SlowClosingPreview)
-        self.choose_save('overwrite')
-        self.wait(lambda: '尚未释放' in dialog.status_label.text())
-        self.assert_originals()
-        self.assertFalse(FakeReader.instances[0].closed)
-        self.assertIsNone(dialog._worker._preview)
-        dialog.timeline.setValue(4)
-        self.wait(lambda: dialog.displayed_frame_index == 4 and dialog.save_button.isEnabled())
-        self.assertIn(4, FakeReader.instances[0].preview_indices)
-        self.choose_save('overwrite')
-        self.wait(lambda: dialog.saved_result is not None)
-        self.assertGreaterEqual(sessions[0].waits, 2)
-        validate_pair(self.photo, self.video, photo_identifier(self.photo), .44)
-
     def test_slow_save_close_waits_for_flush_and_releases_stage_before_cleanup(self):
         entered, release = threading.Event(), threading.Event()
         original_fsync = os.fsync
         def blocked_flush(descriptor):
+            # The pair transaction now flushes its journal before encoding;
+            # this regression specifically holds the staged image flush.
+            if not list((self.folder / '.LiveViewer-work').rglob('cover.HEIC')):
+                original_fsync(descriptor)
+                return
             entered.set()
             if not release.wait(3):
                 raise AssertionError('test did not release the simulated slow flush')
@@ -1058,7 +1128,7 @@ class CoverEditorTests(unittest.TestCase):
             with patch('livegallery.cover_save.os.fsync', side_effect=blocked_flush):
                 self.choose_save()
                 self.wait(entered.is_set)
-                staged = list((self.folder / '.LiveViewer-work').rglob('cover.jpg'))
+                staged = list((self.folder / '.LiveViewer-work').rglob('cover.HEIC'))
                 self.assertEqual(len(staged), 1)
                 before = time.monotonic()
                 dialog.close()
@@ -1076,7 +1146,7 @@ class CoverEditorTests(unittest.TestCase):
         self.assertEqual(observations, [(True, True, True, True)])
         self.assertFalse(dialog._worker.thread.is_alive())
         self.assertTrue(FakeReader.instances[0].closed)
-        self.assertFalse(list((self.folder / '.LiveViewer-work').rglob('cover.jpg')))
+        self.assertFalse(list((self.folder / '.LiveViewer-work').rglob('cover.HEIC')))
         self.assert_originals()
 
     def test_external_mutation_during_edit_is_rejected_by_save(self):
@@ -1097,6 +1167,7 @@ class CoverEditorTests(unittest.TestCase):
         shutil.copyfile(Path(__file__).parent / "fixtures" / "VFR_PAIR.MOV", self.video)
         with FrameReader(self.video) as reader:
             reader.export(4).save(self.photo, "JPEG", quality=95)
+        prepare_live_photo_pair(self.photo, self.video, photo_time=Fraction(11, 25))
         self.original_photo = self.photo.read_bytes()
         self.original_video = self.video.read_bytes()
         self.dialog = EditorDialog(self.item)
@@ -1160,6 +1231,8 @@ class CoverEditorTests(unittest.TestCase):
         except OSError:
             self.skipTest("frame tools unavailable in this developer environment")
         shutil.copyfile(Path(__file__).parent / "fixtures" / "VFR_PAIR.MOV", self.video)
+        prepare_live_photo_pair(self.photo, self.video)
+        self.original_photo = self.photo.read_bytes()
         self.original_video = self.video.read_bytes()
         self.dialog = EditorDialog(self.item, reader_factory=FrameReader, preview_factory=False)
         self.dialog.show()
@@ -1174,10 +1247,15 @@ class CoverEditorTests(unittest.TestCase):
         result = self.dialog.saved_result
         with Image.open(result.image_path) as decoded:
             decoded.load()
-            self.assertEqual(decoded.format, "JPEG")
+            self.assertEqual(decoded.format, "HEIF")
             self.assertEqual(decoded.size, (self.dialog.metadata.width, self.dialog.metadata.height))
-        assert_video_media_preserved(self, self.original_video, result.video_path.read_bytes())
-        validate_pair(result.image_path, result.video_path, photo_identifier(result.image_path), .44)
+        from livegallery.live_photo_image import read_content_identifier
+        from livegallery.live_photo_movie import inspect_live_photo_movie
+        self.assert_encoded_media_and_track_properties_preserved(self.video, result.video_path)
+        info = inspect_live_photo_movie(result.video_path)
+        self.assertEqual(info.asset_identifier, read_content_identifier(result.image_path))
+        self.assertEqual(info.photo_time, Fraction(11, 25))
+        self.assertEqual(result.photo_time, Fraction(11, 25))
         self.assert_originals()
 
 

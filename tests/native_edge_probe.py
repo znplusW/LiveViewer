@@ -259,7 +259,7 @@ def run_probe(app, report):
             check('policy_fullscreen_true', simple, lambda: native.read(hwnd), true, policy)
             edge.set_enabled_edges([])
             check('policy_explicit_empty', simple, lambda: native.read(hwnd), empty, policy)
-            edge.set_enabled_edges(['left'])
+            edge.set_enabled_edges(['top'])
             app.processEvents()
             policy.sync_now()
             check('policy_reenabled_true', simple, lambda: native.read(hwnd), true, policy)

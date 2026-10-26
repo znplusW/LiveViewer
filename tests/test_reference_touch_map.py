@@ -4,19 +4,20 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, Qt, QTimer
-from PySide6.QtGui import QColor, QCursor, QImage, QMouseEvent, QPainter, QWheelEvent
+from PySide6.QtCore import QCoreApplication, QEvent, QPoint, QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QContextMenuEvent, QCursor, QImage, QMouseEvent, QWheelEvent
 from PySide6.QtMultimedia import QVideoFrame
 from PySide6.QtTest import QSignalSpy, QTest
-from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QMenu, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QVBoxLayout, QWidget
 
 from livegallery.reference_touch_map import ReferenceTouchMap
 from livegallery.viewer import ViewerCanvas
-from tests.test_viewer import FakePlayer
+from tests.test_viewer import FakePlayer, MousePressAuthorization
 
 
 class ReferenceTouchMapTests(unittest.TestCase):
@@ -77,40 +78,40 @@ class ReferenceTouchMapTests(unittest.TestCase):
                 return
         self.fail('Mapped gesture did not reach its expected state')
 
-    def test_reference_matches_current_crop_black_bars_and_bounded_photo_cache(self):
+    def test_full_surface_maps_visible_photo_without_thumbnail_or_source_io(self):
+        self.assertEqual(self.map.accessibleName(), '预览触控板')
         portrait = QImage(800, 1600, QImage.Format.Format_RGB32)
         portrait.fill('#cc5533')
         self.viewer.set_photo(portrait, self.video)
         self.map._refresh()
         area = self.map.mapped_rect()
-        self.assertAlmostEqual(area.width() / area.height(), 800 / 600)
+        self.assertEqual(area, QRectF(self.map.rect()))
         output = self.map.grab().toImage()
-        middle = self.map.map_from_viewer(QPointF(400, 300)).toPoint()
-        blank = self.map.map_from_viewer(QPointF(30, 300)).toPoint()
         ratio = self.map.devicePixelRatioF()
-        self.assertEqual(output.pixelColor(round(middle.x() * ratio), round(middle.y() * ratio)).name(), '#cc5533')
-        self.assertEqual(output.pixelColor(round(blank.x() * ratio), round(blank.y() * ratio)), self.viewer.backgroundBrush().color())
-        self.assertFalse(self.map.image_contains_viewport_point(QPointF(blank)))
-        self.assertTrue(self.map.image_contains_viewport_point(QPointF(middle)))
-        revision = self.map.thumbnail_revision
-        key = self.map._thumbnail.cacheKey()
-        self.assertLessEqual(max(self.map._thumbnail.width(), self.map._thumbnail.height()), 1024)
-        with patch('builtins.open', side_effect=AssertionError('Reference reread a source file')):
+        for point in (QPoint(2, 2), self.map.rect().center(), self.map.rect().bottomRight() - QPoint(2, 2)):
+            self.assertEqual(output.pixelColor(round(point.x() * ratio), round(point.y() * ratio)),
+                             QColor(self.map._colors['surface']))
+            self.assertTrue(self.map.image_contains_viewport_point(QPointF(point)))
+            self.assertTrue(self.viewer.image_contains_viewport_point(self.map.map_to_viewer(QPointF(point))))
+        self.assertFalse(hasattr(self.map, '_thumbnail'))
+        self.assertFalse(hasattr(self.map, '_photo_key'))
+        with patch('builtins.open', side_effect=AssertionError('Touchpad reread a source file')):
             self.viewer._zoom_at(2, QPointF(400, 300))
             for _ in range(15):
                 self.viewer._pan_by(QPointF(3, 2))
                 self.map._refresh()
             self.map.grab()
-        self.assertEqual(self.map.thumbnail_revision, revision)
-        self.assertEqual(self.map._thumbnail.cacheKey(), key)
+        with patch.object(self.viewer._photo, 'pixmap', side_effect=AssertionError('Touchpad sampled the photo')):
+            self.map._refresh()
+            self.map.grab()
         self.viewer.start_live()
         frame = QImage(320, 240, QImage.Format.Format_RGB32)
         frame.fill('green')
         for _ in range(8):
             self.viewer._video_frame(QVideoFrame(frame), self.viewer._generation)
             self.map._refresh()
-        self.assertEqual(self.map.thumbnail_revision, revision)
-        self.assertEqual(self.map._thumbnail.toImage().pixelColor(10, 10).name(), '#cc5533')
+        self.assertFalse(hasattr(self.map, '_thumbnail'))
+        self.assertEqual(self.map.grab().toImage(), output)
 
     def test_touch_hold_plays_existing_player_without_focus_or_os_cursor_change(self):
         player = self.viewer._player
@@ -159,6 +160,54 @@ class ReferenceTouchMapTests(unittest.TestCase):
         self.touch.release(0, first - QPoint(30, 0), self.target).release(1, second + QPoint(30, 0), self.target).commit()
         self.assertEqual(self.player.play_calls, 0)
 
+    def test_equal_distance_two_finger_rotation_does_not_zoom_or_pan(self):
+        self.viewer.resize(1000, 720)
+        self.controls.resize(320, 500)
+        self.app.processEvents()
+        for size, offsets in (
+                ((2000, 400), (QPoint(0, 50), QPoint(30, 40), QPoint(40, 30), QPoint(50, 0))),
+                ((400, 2000), (QPoint(50, 0), QPoint(40, 30), QPoint(30, 40), QPoint(0, 50)))):
+            with self.subTest(image=size):
+                image = QImage(*size, QImage.Format.Format_RGB32)
+                image.fill('#334455')
+                self.viewer.set_photo(image, self.video)
+                self.viewer._zoom_at(1.5, self.viewer._viewport_center())
+                zoom, subject = self.viewer.zoom_factor(), self.viewer._scene_center()
+                center = self.map.mapTo(self.controls, self.map.rect().center())
+                offset = offsets[0]
+                self.touch.press(0, center - offset, self.target).press(1, center + offset, self.target).commit()
+                try:
+                    for offset in offsets[1:]:
+                        self.touch.move(0, center - offset, self.target).move(1, center + offset, self.target).commit()
+                        self.assertAlmostEqual(self.viewer.zoom_factor(), zoom, delta=.03)
+                        self.assertLess((self.viewer._scene_center() - subject).manhattanLength(), 7)
+                finally:
+                    self.touch.release(0, center - offset, self.target).release(1, center + offset, self.target).commit()
+                self.assertEqual(self.player.play_calls, 0)
+                self.assertIsNone(self.viewer._input_owner)
+
+    def test_pinch_scale_is_independent_of_finger_orientation(self):
+        self.viewer.resize(1000, 720)
+        self.controls.resize(320, 500)
+        self.app.processEvents()
+        for size in ((2000, 400), (400, 2000)):
+            for initial, final in ((QPoint(0, 30), QPoint(60, 0)),
+                                   (QPoint(30, 0), QPoint(0, 60)),
+                                   (QPoint(18, 24), QPoint(48, 36))):
+                with self.subTest(image=size, initial=initial, final=final):
+                    image = QImage(*size, QImage.Format.Format_RGB32)
+                    image.fill('#334455')
+                    self.viewer.set_photo(image, self.video)
+                    center = self.map.mapTo(self.controls, self.map.rect().center())
+                    self.touch.press(0, center - initial, self.target).press(1, center + initial, self.target).commit()
+                    self.touch.move(0, center - final, self.target).move(1, center + final, self.target).commit()
+                    try:
+                        self.assertAlmostEqual(self.viewer.zoom_factor(), 2, delta=.03)
+                    finally:
+                        self.touch.release(0, center - final, self.target).release(1, center + final, self.target).commit()
+                    self.assertEqual(self.player.play_calls, 0)
+                    self.assertIsNone(self.viewer._input_owner)
+
     def test_portrait_fit_pinch_centers_fitting_axis_and_preserves_scrollable_axis_anchor(self):
         # Native preview client geometry from the Windows source gate. At 2x
         # this portrait is still narrower than the viewport, so X must center.
@@ -168,7 +217,9 @@ class ReferenceTouchMapTests(unittest.TestCase):
         portrait = QImage(420, 640, QImage.Format.Format_RGB32)
         portrait.fill('#334455')
         self.viewer.set_photo(portrait, self.video)
-        center = self.center() + QPoint(8, -5)
+        # The full touchpad now maps to the photo, so use a clear off-center
+        # displacement rather than the old letterboxed-map pixel distance.
+        center = self.center() + QPoint(20, -15)
         mapped = self.map.map_to_viewer(QPointF(self.map.mapFrom(self.controls, center)))
         subject = self.viewer.mapToScene(mapped.toPoint())
         first, second = center - QPoint(20, 0), center + QPoint(20, 0)
@@ -196,7 +247,7 @@ class ReferenceTouchMapTests(unittest.TestCase):
         image = self.viewer.viewportTransform().mapRect(self.viewer._image_rect)
         self.assertGreater(image.width(), self.viewer.viewport().width())
         self.assertGreater(image.height(), self.viewer.viewport().height())
-        center = self.center() + QPoint(8, -5)
+        center = self.center() + QPoint(20, -15)
         mapped = self.map.map_to_viewer(QPointF(self.map.mapFrom(self.controls, center)))
         self.assertGreater(abs(mapped.x() - self.viewer._viewport_center().x()), 10)
         self.assertGreater(abs(mapped.y() - self.viewer._viewport_center().y()), 10)
@@ -321,67 +372,78 @@ class ReferenceTouchMapTests(unittest.TestCase):
         finally:
             modal.close()
 
-    def test_navigation_overlay_is_reachable_from_the_map(self):
+    def test_preview_navigator_has_no_hidden_touchpad_hitbox(self):
         self.viewer._zoom_at(3, self.viewer._viewport_center())
         self.viewer._pan_by(QPointF(120, 80))
-        area = self.map.navigator_rect()
-        self.assertFalse(area.isEmpty())
+        navigator = self.viewer.zoom_navigator
+        self.assertTrue(navigator.isVisible())
+        self.assertTrue(self.map.navigator_rect().isEmpty())
         before = self.viewer._scene_center()
-        point = self.map.mapTo(self.controls, (area.topLeft() + QPointF(4, 4)).toPoint())
-        self.touch.press(0, point, self.target).commit()
-        self.touch.move(0, point + QPoint(8, 12), self.target).commit()
+        local = self.map.map_from_viewer(QPointF(navigator.geometry().center()))
+        point = self.map.mapTo(self.controls, local.toPoint())
+        with patch.object(self.viewer, '_navigate_from_thumbnail', side_effect=AssertionError('Hidden navigator')):
+            self.touch.press(0, point, self.target).commit()
+            self.assertEqual(before, self.viewer._scene_center())
+            self.wait(lambda: self.player.play_calls == 1)
+            self.touch.move(0, point + QPoint(8, 12), self.target).commit()
         self.touch.release(0, point + QPoint(8, 12), self.target).commit()
         self.assertGreater((self.viewer._scene_center() - before).manhattanLength(), 1)
-        self.assertEqual(self.player.play_calls, 0)
+        self.assertEqual(self.player.play_calls, 1)
+        self.assertFalse(self.viewer._play_requested)
 
-    def test_padding_is_not_an_input_surface_and_wheel_uses_mapped_anchor(self):
-        padding = self.map.mapTo(self.controls, QPoint(1, 1))
-        self.touch.press(0, padding, self.target).commit()
-        QTest.qWait(160)
-        self.touch.release(0, padding, self.target).commit()
-        self.assertIsNone(self.viewer._input_owner)
-        self.assertEqual(self.player.play_calls, 0)
+    def test_every_corner_and_edge_plays_even_when_preview_has_black_bars(self):
+        for width, height in ((421, 641), (1801, 419)):
+            portrait = QImage(width, height, QImage.Format.Format_RGB32)
+            portrait.fill('#cc5533')
+            self.viewer.set_photo(portrait, self.video)
+            rect = self.map.rect()
+            points = (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight(),
+                      QPoint(rect.center().x(), 0), QPoint(rect.center().x(), rect.bottom()),
+                      QPoint(0, rect.center().y()), QPoint(rect.right(), rect.center().y()))
+            for local in points:
+                with self.subTest(image=(width, height), point=local):
+                    # Separate contacts exercise holds, not intentionally recognized double taps.
+                    self.viewer.cancel_interaction()
+                    self.viewer._last_tap_time = self.viewer._last_tap_timestamp = 0
+                    before = self.player.play_calls
+                    self.assertTrue(self.map.image_contains_viewport_point(QPointF(local)))
+                    point = self.map.mapTo(self.controls, local)
+                    self.touch.press(0, point, self.target).commit()
+                    self.wait(lambda: self.player.play_calls == before + 1)
+                    self.touch.release(0, point, self.target).commit()
+                    self.assertFalse(self.viewer._play_requested)
+                    self.assertIsNone(self.viewer._input_owner)
+
+    def test_wheel_uses_mapped_anchor(self):
         point = self.map.map_from_viewer(QPointF(470, 260))
+        mapped = self.map.map_to_viewer(point)
+        subject = self.viewer.mapToScene(mapped.toPoint())
         event = QWheelEvent(point, QPointF(self.map.mapToGlobal(point.toPoint())), QPoint(), QPoint(0, 120),
                             Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
                             Qt.ScrollPhase.NoScrollPhase, False)
         QApplication.sendEvent(self.map, event)
         self.assertGreater(self.viewer.zoom_factor(), 1)
+        self.assertLess((subject - self.viewer.mapToScene(mapped.toPoint())).manhattanLength(), 7)
 
-    def test_blank_hold_menu_uses_map_finger_and_original_release_keeps_popup(self):
+    def test_letterboxed_preview_holds_play_but_physical_right_click_opens_menu(self):
         portrait = QImage(800, 1600, QImage.Format.Format_RGB32)
         portrait.fill('#cc5533')
         self.viewer.set_photo(portrait, self.video)
-        point = self.point(QPoint(80, 300))
+        point = self.map.mapTo(self.controls, QPoint(1, self.map.height() // 2))
         global_point = self.controls.mapToGlobal(point)
-        results, errors = {}, []
-
-        def popup(position):
-            results['position'] = position
-            self.viewer.stop_live()  # MainWindow cancels before the real menu.exec.
-            menu = QMenu(self.controls)
-            menu.addAction('当前图片测试项')
-
-            def release():
-                try:
-                    self.touch.release(0, point, self.target).commit()
-                    results['visible_after_release'] = menu.isVisible()
-                except Exception as error:
-                    errors.append(error)
-                QTimer.singleShot(40, menu.close)
-
-            QTimer.singleShot(160, release)
-            menu.exec(position)
-
-        self.map.contextMenuRequested.connect(popup)
-        hints = QApplication.styleHints()
-        with patch.object(hints, 'mousePressAndHoldInterval', return_value=130):
-            self.touch.press(0, point, self.target).commit()
-            self.wait(lambda: 'visible_after_release' in results, 2)
-        self.assertFalse(errors)
-        self.assertEqual(results['position'], global_point)
-        self.assertTrue(results['visible_after_release'])
-        self.assertEqual(self.player.play_calls, 0)
+        menus = QSignalSpy(self.map.contextMenuRequested)
+        self.touch.press(0, point, self.target).commit()
+        self.wait(lambda: self.player.play_calls == 1)
+        local = self.map.mapFrom(self.controls, point)
+        QApplication.sendEvent(self.map, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, local, global_point))
+        self.assertEqual(menus.count(), 0)
+        self.touch.release(0, point, self.target).commit()
+        self.assertFalse(self.viewer._play_requested)
+        QTest.mousePress(self.map, Qt.MouseButton.RightButton, pos=local)
+        QApplication.sendEvent(self.map, QContextMenuEvent(QContextMenuEvent.Reason.Mouse, local, global_point))
+        QTest.mouseRelease(self.map, Qt.MouseButton.RightButton, pos=local)
+        self.assertEqual(menus.count(), 1)
+        self.assertEqual(menus.at(0)[0], global_point)
 
     def test_mouse_hold_and_second_contact_drag_reuse_guard_without_preview_focus(self):
         point = self.map.map_from_viewer(self.viewer._viewport_center()).toPoint()
@@ -413,6 +475,47 @@ class ReferenceTouchMapTests(unittest.TestCase):
         self.assertGreater((self.viewer._scene_center() - center).manhattanLength(), 1)
         self.assertIs(QApplication.focusWidget(), self.edit)
 
+    def test_native_tap_drag_uses_mapping_window_permission_without_first_click(self):
+        self.viewer._zoom_at(2, self.viewer._viewport_center())
+        point = self.map.map_from_viewer(self.viewer._viewport_center()).toPoint()
+        scale, center = self.viewer.transform().m11(), self.viewer._scene_center()
+        permission = MousePressAuthorization(False)
+        calls = []
+
+        def authorize(event, hwnd):
+            calls.append((hwnd, event.timestamp(), event.globalPosition()))
+            return permission
+
+        monitor = SimpleNamespace(authorize=authorize, is_current=lambda token: token is permission)
+
+        def send(kind, position, timestamp):
+            event = QMouseEvent(kind, QPointF(position), QPointF(self.map.mapToGlobal(position)),
+                                Qt.MouseButton.NoButton if kind == QEvent.Type.MouseMove else Qt.MouseButton.LeftButton,
+                                Qt.MouseButton.NoButton if kind == QEvent.Type.MouseButtonRelease else Qt.MouseButton.LeftButton,
+                                Qt.KeyboardModifier.NoModifier)
+            event.setTimestamp(timestamp)
+            QApplication.sendEvent(self.map, event)
+
+        with patch.object(self.viewer, '_native_pointer_input', monitor, create=True):
+            self.assertEqual(self.viewer._last_mouse_click_time, 0)
+            send(QEvent.Type.MouseButtonPress, point, 18488031)
+            QTest.qWait(180)
+            self.assertEqual(self.player.play_calls, 0)
+            self.assertFalse(self.viewer._hold_timer.isActive())
+            self.viewer._hold_timeout()
+            self.assertEqual(self.player.play_calls, 0)
+            send(QEvent.Type.MouseMove, point + QPoint(30, 10), 18488500)
+            send(QEvent.Type.MouseButtonRelease, point + QPoint(30, 10), 18489812)
+            self.assertEqual(self.player.play_calls, 0)
+            self.assertEqual(self.viewer.transform().m11(), scale)
+            self.assertGreater((self.viewer._scene_center() - center).manhattanLength(), 1)
+            self.assertIs(QApplication.focusWidget(), self.edit)
+            self.assertEqual(calls, [(int(self.controls.winId()), 18488031,
+                                     QPointF(self.map.mapToGlobal(point)))])
+            self.assertNotEqual(int(self.controls.winId()), int(self.viewer.winId()))
+            self.assertIsNone(self.viewer._input_owner)
+            self.assertFalse(self.map._active or self.viewer._play_requested)
+
     def test_adding_second_finger_then_lifting_one_cannot_restart_hold_or_swipe(self):
         point = self.center()
         self.touch.press(0, point, self.target).commit()
@@ -440,22 +543,26 @@ class ReferenceTouchMapTests(unittest.TestCase):
         self.touch.release(0, remote, self.target).commit()
         self.assertFalse(self.viewer.is_zoom_animating())
 
-    def test_reference_crop_samples_match_scene_under_zoom_and_pan(self):
-        image = QImage(2400, 1800, QImage.Format.Format_RGB32)
-        painter = QPainter(image)
-        for x, y, color in ((0, 0, '#ee2233'), (1200, 0, '#22bb44'),
-                             (0, 900, '#3344ee'), (1200, 900, '#eebb33')):
-            painter.fillRect(x, y, 1200, 900, QColor(color))
-        painter.end()
-        self.viewer.set_photo(image, self.video)
-        self.viewer._zoom_at(2.5, QPointF(300, 200))
-        self.viewer._pan_by(QPointF(-80, -70))
-        output, ratio = self.map.grab().toImage(), self.map.devicePixelRatioF()
-        for point in (QPoint(200, 160), QPoint(500, 180), QPoint(210, 410)):
-            source = self.viewer.mapToScene(point).toPoint()
-            local = self.map.map_from_viewer(QPointF(point))
-            actual = output.pixelColor(round(local.x() * ratio), round(local.y() * ratio))
-            self.assertEqual(actual, image.pixelColor(source))
+    def test_continuous_pinch_freezes_mapping_then_next_gesture_uses_new_crop(self):
+        portrait = QImage(421, 641, QImage.Format.Format_RGB32)
+        portrait.fill('#cc5533')
+        self.viewer.set_photo(portrait, self.video)
+        local = QPointF(self.map.rect().center()) + QPointF(12, -20)
+        center = self.map.mapTo(self.controls, local.toPoint())
+        first, second = center - QPoint(20, 0), center + QPoint(20, 0)
+        before = self.map.map_to_viewer(local)
+        self.touch.press(0, first, self.target).press(1, second, self.target).commit()
+        for distance in (30, 40, 60):
+            self.touch.move(0, center - QPoint(distance, 0), self.target).move(
+                1, center + QPoint(distance, 0), self.target).commit()
+            self.assertAlmostEqual(self.viewer.zoom_factor(), distance / 20, delta=.03)
+            self.assertEqual(self.map.map_to_viewer(local), before)
+            self.assertLess((self.map.map_from_viewer(before) - local).manhattanLength(), 1e-8)
+        self.touch.release(0, center - QPoint(60, 0), self.target).release(
+            1, center + QPoint(60, 0), self.target).commit()
+        self.assertTrue(self.map._gesture_target_rect.isEmpty())
+        self.assertGreater((self.map.map_to_viewer(local) - before).manhattanLength(), 1)
+        self.assertEqual(self.player.play_calls, 0)
 
     def test_group_can_forget_a_destroyed_control_window(self):
         temporary = QWidget()
@@ -502,7 +609,7 @@ class ReferenceTouchMapTests(unittest.TestCase):
         local = self.map.map_from_viewer(self.viewer._viewport_center())
         ratio = self.map.devicePixelRatioF()
         self.assertEqual(output.pixelColor(round(local.x() * ratio), round(local.y() * ratio)),
-                         self.viewer.backgroundBrush().color())
+                         QColor(self.map._colors['surface']))
 
     def test_mapped_horizontal_wheel_always_navigates_at_fit_and_obeys_zoomed_setting(self):
         navigation = []

@@ -4,10 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       preflight_only:
-        description: Run interaction diagnostics without compiling or packaging
+        description: Run interaction diagnostics without packaging (native dependencies may be built)
         type: boolean
         required: false
         default: false
+      exiftool_archive_url:
+        description: HTTPS URL of the exact ExifTool archive pinned in dependencies/exiftool-windows.json
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -40,6 +44,56 @@ jobs:
           python -m pip install --disable-pip-version-check --only-binary=:all: -r requirements-build.txt
       - name: Fetch and validate pinned LGPL frame tools
         run: python scripts/fetch_frame_tools.py
+      - name: Identify native build environment
+        id: heic_environment
+        shell: pwsh
+        env:
+          HEIC_INPUT_HASH: ${{ hashFiles('scripts/build_heic_encoder.py', 'dependencies/heic-encoder.json', 'native/heic_encoder/**', 'requirements-build.txt', 'requirements.txt') }}
+          HEIC_RUNNER_OS: ${{ runner.os }}
+          HEIC_RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          if (-not $env:ImageOS -or -not $env:ImageVersion) { throw 'Hosted runner image identity is unavailable' }
+          $image = '{0}-{1}' -f $env:ImageOS, $env:ImageVersion
+          $key = 'heic-v1-{0}-{1}-{2}-{3}' -f $env:HEIC_RUNNER_OS, $env:HEIC_RUNNER_ARCH, $image, $env:HEIC_INPUT_HASH
+          "cache_key=$key" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Restore matching native HEIC output
+        id: heic_cache
+        continue-on-error: true
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/heic
+            licenses/HEIC
+          key: ${{ steps.heic_environment.outputs.cache_key }}
+      - name: Build private HEIC encoder from pinned sources
+        if: ${{ (steps.heic_cache.outcome != 'success' || steps.heic_cache.outputs.cache-hit != 'true') }}
+        run: python scripts/build_heic_encoder.py
+      - name: Verify native HEIC sources and binary provenance
+        run: python scripts/build_heic_encoder.py --verify-only
+      - name: Save verified native HEIC output immediately
+        if: ${{ (steps.heic_cache.outcome != 'success' || steps.heic_cache.outputs.cache-hit != 'true') }}
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            vendor/heic
+            licenses/HEIC
+          key: ${{ steps.heic_environment.outputs.cache_key }}
+      - name: Restore the pinned ExifTool distribution
+        shell: pwsh
+        env:
+          EXIFTOOL_ARCHIVE_URL: ${{ inputs.exiftool_archive_url || vars.EXIFTOOL_ARCHIVE_URL }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:EXIFTOOL_ARCHIVE_URL)) {
+            throw 'Provide exiftool_archive_url or EXIFTOOL_ARCHIVE_URL for the exact pinned 13.38 Windows archive.'
+          }
+          $archiveUri = [Uri]$env:EXIFTOOL_ARCHIVE_URL
+          if (-not $archiveUri.IsAbsoluteUri -or $archiveUri.Scheme -ne 'https') { throw 'ExifTool archive URL must use HTTPS.' }
+          New-Item -ItemType Directory -Path 'work/dependency-cache' -Force | Out-Null
+          $archiveFile = 'work/dependency-cache/exiftool-13.38_64-accepted.zip'
+          Invoke-WebRequest -Uri $archiveUri -OutFile $archiveFile
+          python scripts/fetch_exiftool.py --archive $archiveFile
+          if ($LASTEXITCODE -ne 0) { throw 'ExifTool archive or runtime differs from the fixed SHA-256 inventory.' }
       - name: Preflight native fullscreen window property readback
         shell: pwsh
         timeout-minutes: 2
@@ -153,44 +207,6 @@ jobs:
           if ($testExitCode -ne 0) { throw "Native SaveAs export preflight failed with exit code $testExitCode" }
           $report = Get-Content -Raw 'reports/native-export.json' | ConvertFrom-Json
           if ($report.status -cne 'passed') { throw "Native export status: $($report.status)" }
-      - name: Identify native build environment
-        if: ${{ !inputs.preflight_only }}
-        id: heic_environment
-        shell: pwsh
-        env:
-          HEIC_INPUT_HASH: ${{ hashFiles('scripts/build_heic_encoder.py', 'dependencies/heic-encoder.json', 'native/heic_encoder/**', 'requirements-build.txt', 'requirements.txt') }}
-          HEIC_RUNNER_OS: ${{ runner.os }}
-          HEIC_RUNNER_ARCH: ${{ runner.arch }}
-        run: |
-          if (-not $env:ImageOS -or -not $env:ImageVersion) { throw 'Hosted runner image identity is unavailable' }
-          $image = '{0}-{1}' -f $env:ImageOS, $env:ImageVersion
-          $key = 'heic-v1-{0}-{1}-{2}-{3}' -f $env:HEIC_RUNNER_OS, $env:HEIC_RUNNER_ARCH, $image, $env:HEIC_INPUT_HASH
-          "cache_key=$key" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-      - name: Restore matching native HEIC output
-        if: ${{ !inputs.preflight_only }}
-        id: heic_cache
-        continue-on-error: true
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            vendor/heic
-            licenses/HEIC
-          key: ${{ steps.heic_environment.outputs.cache_key }}
-      - name: Build private HEIC encoder from pinned sources
-        if: ${{ !inputs.preflight_only && (steps.heic_cache.outcome != 'success' || steps.heic_cache.outputs.cache-hit != 'true') }}
-        run: python scripts/build_heic_encoder.py
-      - name: Verify native HEIC sources and binary provenance
-        if: ${{ !inputs.preflight_only }}
-        run: python scripts/build_heic_encoder.py --verify-only
-      - name: Save verified native HEIC output immediately
-        if: ${{ !inputs.preflight_only && (steps.heic_cache.outcome != 'success' || steps.heic_cache.outputs.cache-hit != 'true') }}
-        continue-on-error: true
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            vendor/heic
-            licenses/HEIC
-          key: ${{ steps.heic_environment.outputs.cache_key }}
       - name: Prepare and verify media fixtures
         if: ${{ !inputs.preflight_only }}
         run: python scripts/generate_fixtures.py --output tests/fixtures --require-codecs
@@ -240,7 +256,7 @@ jobs:
         if: ${{ !inputs.preflight_only }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: LiveViewer-Windows-x64-v0.8.3
+          name: LiveViewer-Windows-x64-v1.0
           path: release/
           if-no-files-found: error
           retention-days: 3

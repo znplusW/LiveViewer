@@ -96,6 +96,28 @@ class CachePreferencesTests(unittest.TestCase):
             self.assertEqual(loaded.theme_mode, 'dark')
             self.assertFalse(loaded.muted)
 
+    def test_zoom_controls_default_and_strict_boolean_roundtrip_preserve_other_preferences(self):
+        self.assertIs(Preferences().show_zoom_controls, True)
+        self.assertIs(Preferences.load().show_zoom_controls, True)
+        for enabled in (False, True):
+            Preferences(show_zoom_controls=enabled, muted=False, cache_location='library').save()
+            persisted = json.loads((self.data / 'settings.json').read_text(encoding='utf-8'))
+            self.assertIs(persisted['show_zoom_controls'], enabled)
+            loaded = Preferences.load()
+            self.assertIs(loaded.show_zoom_controls, enabled)
+            self.assertFalse(loaded.muted)
+            self.assertEqual(loaded.cache_location, 'library')
+        for invalid in (None, 0, 1, 'false', 'true', [], {}):
+            with self.subTest(invalid=invalid):
+                (self.data / 'settings.json').write_text(json.dumps({
+                    'show_zoom_controls': invalid, 'muted': False, 'theme_mode': 'light'}), encoding='utf-8')
+                loaded = Preferences.load()
+                self.assertIs(loaded.show_zoom_controls, True)
+                self.assertFalse(loaded.muted)
+                self.assertEqual(loaded.theme_mode, 'light')
+        (self.data / 'settings.json').write_text('{"muted": false}', encoding='utf-8')
+        self.assertIs(Preferences.load().show_zoom_controls, True)
+
     def test_multiple_folders_and_search_scope_roundtrip_and_migrate_single_folder(self):
         folders = [str(self.base / '图库 A'), str(self.base / '图库 B')]
         Preferences(last_folders=folders, last_folder=folders[0], search_scope='all', muted=False).save()
@@ -178,18 +200,27 @@ class CachePreferencesTests(unittest.TestCase):
                           restored.map_floating, restored.muted), ('right', 320, 640, False, False))
 
 
-    def test_fullscreen_exit_edges_default_left_deduplicate_and_preserve_explicit_empty(self):
-        self.assertEqual(Preferences.load().fullscreen_exit_gestures, ['left'])
-        for raw, expected in (([], []), (['right', 'left', 'right', 'wrong', None], ['right', 'left']),
-                              (None, ['left']), (['top'], ['top'])):
-            (self.data / 'settings.json').write_text(json.dumps({'fullscreen_exit_gestures': raw}), encoding='utf-8')
-            result = Preferences.load()
-            self.assertEqual(result.fullscreen_exit_gestures, expected)
-            result.save()
-            self.assertEqual(Preferences.load().fullscreen_exit_gestures, expected)
+    def test_fullscreen_exit_top_default_legacy_migration_and_explicit_disabled_persist(self):
+        self.assertEqual(Preferences.load().fullscreen_exit_gestures, ['top'])
+        for raw, expected in (([], []), (['left'], ['top']), (['right'], ['top']),
+                              (['right', 'left', 'right', 'wrong', None], ['top']),
+                              (['top', 'right', 'left', 'top'], ['top']),
+                              (['top', {}, []], ['top']), (['unknown', None, {}, []], []),
+                              (None, ['top']), ('left', ['top']), (False, ['top']),
+                              (12, ['top']), ({'unknown': True}, ['top']), (['top'], ['top'])):
+            with self.subTest(raw=raw):
+                (self.data / 'settings.json').write_text(
+                    json.dumps({'fullscreen_exit_gestures': raw, 'muted': False}), encoding='utf-8')
+                result = Preferences.load()
+                self.assertEqual(result.fullscreen_exit_gestures, expected)
+                self.assertFalse(result.muted)
+                result.save()
+                self.assertEqual(Preferences.load().fullscreen_exit_gestures, expected)
+                persisted = json.loads((self.data / 'settings.json').read_text(encoding='utf-8'))
+                self.assertEqual(persisted['fullscreen_exit_gestures'], expected)
         a, b = Preferences(), Preferences()
         a.fullscreen_exit_gestures.clear()
-        self.assertEqual(b.fullscreen_exit_gestures, ['left'])
+        self.assertEqual(b.fullscreen_exit_gestures, ['top'])
 
 
 if __name__ == '__main__':

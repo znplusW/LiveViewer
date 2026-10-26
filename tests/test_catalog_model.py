@@ -56,7 +56,10 @@ class ThumbnailBadgeTests(unittest.TestCase):
         delegate.paint(painter, option, self.model.index(row))
         painter.end()
         area = option.rect.adjusted(10, 10, -10, -34)
-        return image, area, _live_badge_layout(area)
+        frame = option.rect.adjusted(5, 5, -5, -5)
+        pixmap = self.model.thumbnails[str(self.model.items[0].image_path)]
+        photo = _fitted_image_rect(area, pixmap)
+        return image, photo, _live_badge_layout(photo, frame_rect=frame), frame
 
     @staticmethod
     def changed_pixels(live, still):
@@ -69,45 +72,44 @@ class ThumbnailBadgeTests(unittest.TestCase):
             for small, large_value in ((120, 260),) if large else ((64, 180),):
                 setter = delegate.set_thumbnail_width if large else delegate.set_thumbnail_height
                 setter(small)
-                compact, photo, (mode, badge) = self.render(delegate)
-                still, _, _ = self.render(delegate, 1)
+                compact, photo, (mode, badge), frame = self.render(delegate)
+                still, _, _, _ = self.render(delegate, 1)
                 self.assertEqual(mode, 'dot')
-                self.assertTrue(photo.contains(badge))
+                self.assertTrue(frame.contains(badge))
+                self.assertEqual(badge.topLeft(), frame.topLeft() + QPoint(4, 4))
                 changed = self.changed_pixels(compact, still)
                 self.assertGreater(len(changed), 15)
                 self.assertLessEqual(len(changed), 100)
                 self.assertTrue(all(badge.contains(x, y) for x, y in changed))
                 setter(large_value)
-                full, photo, (mode, badge) = self.render(delegate)
-                still, _, _ = self.render(delegate, 1)
+                full, photo, (mode, badge), frame = self.render(delegate)
+                still, _, _, _ = self.render(delegate, 1)
                 self.assertEqual(mode, 'full')
                 self.assertEqual(badge.size().toTuple(), (47, 20))
-                self.assertTrue(photo.contains(badge))
+                self.assertTrue(frame.contains(badge))
+                self.assertEqual(badge.topLeft(), frame.topLeft() + QPoint(4, 4))
                 self.assertGreater(len(self.changed_pixels(full, still)), 500)
                 setter(small)
                 self.assertEqual(self.render(delegate)[2][0], 'dot')
 
-    def test_portrait_and_panorama_keep_badge_at_frame_corner_outside_photo(self):
-        for large in (True, False):
-            delegate = ThumbnailDelegate(self.widget, large=large)
-            (delegate.set_thumbnail_width if large else delegate.set_thumbnail_height)(260 if large else 180)
-            previous = None
-            for dimensions in ((60, 600), (1200, 45), (320, 180)):
-                self.set_image(*dimensions)
-                live, area, (mode, badge) = self.render(delegate)
-                still, _, _ = self.render(delegate, 1)
-                photo = _fitted_image_rect(area, self.model.thumbnails[str(self.model.items[0].image_path)])
-                self.assertTrue(area.contains(badge))
-                self.assertEqual(mode, 'full')
-                self.assertEqual(badge.topLeft(), area.topLeft() + QPoint(4, 4))
-                if previous is not None:
-                    self.assertEqual(badge, previous)
-                previous = badge
-                if dimensions != (320, 180):
-                    self.assertFalse(photo.intersects(badge))
-                    self.assertEqual(live.copy(photo), still.copy(photo), 'Badge obscures the narrow photo')
+    def test_photo_bounds_choose_compact_mode_but_badge_anchors_inside_thumbnail_frame(self):
+        delegate = ThumbnailDelegate(self.widget, large=True)
+        delegate.set_thumbnail_width(260)
+        for dimensions in ((60, 600), (1200, 45), (320, 180)):
+            self.set_image(*dimensions)
+            live, photo, (mode, badge), frame = self.render(delegate)
+            still, _, _, _ = self.render(delegate, 1)
+            self.assertTrue(frame.contains(badge))
+            self.assertEqual(mode, 'full' if dimensions == (320, 180) else 'dot')
+            self.assertEqual(badge.topLeft(), frame.topLeft() + QPoint(4, 4))
+            self.assertTrue(all(badge.contains(x, y) for x, y in self.changed_pixels(live, still)))
+            if mode == 'dot':
+                self.assertEqual(badge.size().toTuple(), (10, 10))
+                self.assertFalse(photo.intersects(badge))
         self.assertEqual(_live_badge_layout(QRect(0, 0, 1, 1))[1], QRect(0, 0, 1, 1))
         self.assertTrue(_live_badge_layout(QRect())[1].isEmpty())
+        self.assertEqual(_live_badge_layout(QRect(0, 0, 1, 1), frame_rect=QRect(50, 80, 260, 200))[1],
+                         QRect(54, 84, 10, 10))
 
     def test_theme_selection_and_output_dpr_preserve_visible_dot_and_logical_size(self):
         delegate = ThumbnailDelegate(self.widget, large=True)
@@ -115,9 +117,10 @@ class ThumbnailBadgeTests(unittest.TestCase):
         for theme in ('dark', 'light'):
             for selected in (False, True):
                 for dpr in (1, 2):
-                    live, _, (mode, badge) = self.render(delegate, theme=theme, dpr=dpr, selected=selected)
-                    still, _, _ = self.render(delegate, 1, theme=theme, dpr=dpr, selected=selected)
+                    live, _, (mode, badge), frame = self.render(delegate, theme=theme, dpr=dpr, selected=selected)
+                    still, _, _, _ = self.render(delegate, 1, theme=theme, dpr=dpr, selected=selected)
                     self.assertEqual(mode, 'dot')
+                    self.assertEqual(badge.topLeft(), frame.topLeft() + QPoint(4, 4))
                     self.assertEqual(badge.size().toTuple(), (10, 10))
                     self.assertEqual(live.pixelColor(badge.center().x() * dpr, badge.center().y() * dpr),
                                      QColor(theme_tokens(theme)['badge_text']))
@@ -135,7 +138,7 @@ class ThumbnailBadgeTests(unittest.TestCase):
         resets = QSignalSpy(self.model.modelReset)
         for width in (120, 204, 480, 120) * 5:
             delegate.set_thumbnail_width(width)
-            _, photo, (mode, _) = self.render(delegate, dpr=2)
+            _, photo, (mode, _), _ = self.render(delegate, dpr=2)
             self.assertGreater(photo.width(), photo.height())
             self.assertEqual(mode, 'dot' if width == 120 else 'full')
         self.assertEqual(pixmap.cacheKey(), key)

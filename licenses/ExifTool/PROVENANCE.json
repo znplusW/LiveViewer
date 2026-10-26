@@ -1,0 +1,2052 @@
+{
+  "schema": "liveviewer.exiftool-provenance.v1",
+  "version": "13.38",
+  "archive_sha256": "828fdcf2d229b88e1b327e1043ac33974fb15787e156d44fc61a94286f40eb16",
+  "archive_bytes": 10506557,
+  "source_projects": {
+    "ExifTool": "https://exiftool.org/",
+    "Strawberry_Perl": "https://strawberryperl.com/",
+    "Windows_launcher": "https://oliverbetz.de/pages/Artikel/ExifTool-for-Windows"
+  },
+  "runtime_directory": "tools/exiftool",
+  "runtime_files": {
+    "exiftool.exe": {
+      "sha256": "936d7caf8dc620e0a732aa65c4fd17c4c9064b5e0d44624681725245407c3294",
+      "bytes": 58368
+    },
+    "exiftool_files/exiftool.pl": {
+      "sha256": "9b868ce9ae0cba1be6f2ce174e15bc87c304f97e5ee3070ed9d0a6ef9f8183cd",
+      "bytes": 202385
+    },
+    "exiftool_files/lib/Archive/Zip/Archive.pm": {
+      "sha256": "77b1f447970ea0aed5152a20309e3c8c30d8fe50ad4c5a1148d44bce94d6eb27",
+      "bytes": 44937
+    },
+    "exiftool_files/lib/Archive/Zip/DirectoryMember.pm": {
+      "sha256": "f459d4f366519ec6542aaaeeefba6d269f02296e9ad3f55d489b6f68650d06c7",
+      "bytes": 1982
+    },
+    "exiftool_files/lib/Archive/Zip/FileMember.pm": {
+      "sha256": "33e67636caa38c1dc32e6b6d1828027f759a620ea105d867419ac1c848c098de",
+      "bytes": 1338
+    },
+    "exiftool_files/lib/Archive/Zip/Member.pm": {
+      "sha256": "9f903935348393eeaf47be3e95d5a039943a4cdba0ef8676de6667f6d1276e7a",
+      "bytes": 49269
+    },
+    "exiftool_files/lib/Archive/Zip/NewFileMember.pm": {
+      "sha256": "ddb18a6f26e62072f466fedd894db02e2ad5efbe65f176e7ed0b277ab8b54f2b",
+      "bytes": 2186
+    },
+    "exiftool_files/lib/Archive/Zip/StringMember.pm": {
+      "sha256": "61da4281d833a1620b88ddc34a21ecf4a4e36892c6c649613abd0dfad031a982",
+      "bytes": 1759
+    },
+    "exiftool_files/lib/Archive/Zip/ZipFileMember.pm": {
+      "sha256": "3c030c75d318925265aa04720d947f80701bdd2dd5b07122d702d05c9fd6eaf9",
+      "bytes": 16212
+    },
+    "exiftool_files/lib/Archive/Zip.pm": {
+      "sha256": "2025ab80c717e8b4cbdc393ee36aaf3c18edf53e4105f6626ef08c8e563a3db9",
+      "bytes": 72417
+    },
+    "exiftool_files/lib/auto/B/B.xs.dll": {
+      "sha256": "29acb321d887ae5c2251c8d4d69f2aec7bc8d5ddd51279f738da0d49974883ea",
+      "bytes": 80384
+    },
+    "exiftool_files/lib/auto/Compress/Raw/Bzip2/Bzip2.xs.dll": {
+      "sha256": "61895e2854c95814aa62491f9aa84af968bcb78cf1c695f943ba85aa20a9949c",
+      "bytes": 107008
+    },
+    "exiftool_files/lib/auto/Compress/Raw/Lzma/autosplit.ix": {
+      "sha256": "0b59b1f1ef51e9e4da5292fd8359ef093cbdf3371e27e853d031ecf6fa00d851",
+      "bytes": 99
+    },
+    "exiftool_files/lib/auto/Compress/Raw/Lzma/Lzma.xs.dll": {
+      "sha256": "1abc3aae3a51618b1fdb91c4201f478368a1173a5930ace283ee7debe7c6dfc2",
+      "bytes": 51712
+    },
+    "exiftool_files/lib/auto/Compress/Raw/Zlib/Zlib.xs.dll": {
+      "sha256": "14989f765eabe2b0eac205fdcba675d83853bb20e85b0a7efb1574bc5fce31d9",
+      "bytes": 139776
+    },
+    "exiftool_files/lib/auto/CryptX/CryptX.xs.dll": {
+      "sha256": "b1906a0514a2e970464fb07fe54762e0495e90c1f1dfaaae7e7f59c642e8e626",
+      "bytes": 912384
+    },
+    "exiftool_files/lib/auto/Cwd/Cwd.xs.dll": {
+      "sha256": "7d26a2568eff0769e37acc3e5d1746878dd6be40bf82fe921c693508267cf184",
+      "bytes": 23040
+    },
+    "exiftool_files/lib/auto/Data/Dumper/Dumper.xs.dll": {
+      "sha256": "f9006622a076acc6cb2d7abf1a6887546cd83824dbb6ba0cd56c946f3446a3ee",
+      "bytes": 65536
+    },
+    "exiftool_files/lib/auto/Digest/MD5/MD5.xs.dll": {
+      "sha256": "cc22eba3612c5f39694769637777bcf50188ba8b1b070a368b202841f40d6526",
+      "bytes": 25088
+    },
+    "exiftool_files/lib/auto/Digest/SHA/SHA.xs.dll": {
+      "sha256": "4f92b834957dac8f553f53dd32fe20de198337a4ebfcf412b378e2ac20e37a57",
+      "bytes": 47616
+    },
+    "exiftool_files/lib/auto/Encode/Encode.xs.dll": {
+      "sha256": "92c0c5714bca1c56a7e1db68aec152b7dbd31e94d5134e7d0564d005a0c9718d",
+      "bytes": 67072
+    },
+    "exiftool_files/lib/auto/Fcntl/Fcntl.xs.dll": {
+      "sha256": "77a850b7c59f732a92fa67f4b340fba6a23d51a83b01f4586d71e3484937efd7",
+      "bytes": 23552
+    },
+    "exiftool_files/lib/auto/File/Glob/Glob.xs.dll": {
+      "sha256": "aa6e4119bb1e4e617387ca98a918d6e2562565f8662790edd29cdd9c04b8a771",
+      "bytes": 30208
+    },
+    "exiftool_files/lib/auto/IO/Compress/Brotli/Brotli.xs.dll": {
+      "sha256": "7a2d367a0ddea0c422647b85f51a43482679826d64b7616212d06bf3d3ef2b1e",
+      "bytes": 714752
+    },
+    "exiftool_files/lib/auto/IO/IO.xs.dll": {
+      "sha256": "cf531c8e8a3bf8ae8cc8330603126e289b7957f20e78e5f9b1f3bb47e4355eb1",
+      "bytes": 25088
+    },
+    "exiftool_files/lib/auto/List/Util/Util.xs.dll": {
+      "sha256": "55be0a3d736c696614ad6455b1645b9d6701a7c7ef7867f0d49714f5f3887bba",
+      "bytes": 56320
+    },
+    "exiftool_files/lib/auto/Math/BigInt/FastCalc/FastCalc.xs.dll": {
+      "sha256": "5e5420cf0127859738e15f54b9497455ff492a4bb546bbcf3dcf1189fceb463a",
+      "bytes": 22016
+    },
+    "exiftool_files/lib/auto/Math/BigInt/GMP/GMP.xs.dll": {
+      "sha256": "9b933a611c03049291baa282a72299fea6cc4d45895d17077a522bb0a2816de2",
+      "bytes": 251392
+    },
+    "exiftool_files/lib/auto/MIME/Base64/Base64.xs.dll": {
+      "sha256": "52608122dbf4eaf6ea2c229472fa7287ea518306409c6b7f7e2522d5e9406fd7",
+      "bytes": 22016
+    },
+    "exiftool_files/lib/auto/mro/mro.xs.dll": {
+      "sha256": "8d930ee319cefe5453927b85af3dac915a431096b6d6bbe009ed9ec415761109",
+      "bytes": 26112
+    },
+    "exiftool_files/lib/auto/PerlIO/scalar/scalar.xs.dll": {
+      "sha256": "4b862b819a1c1277f7641d3974b2b524dd97d0feff82452426e8641597e18cb3",
+      "bytes": 20992
+    },
+    "exiftool_files/lib/auto/POSIX/POSIX.xs.dll": {
+      "sha256": "7d7527795436c4b407ce2fdcaf79c8fd0cd2de66a04d872ab95ee3d08b25dade",
+      "bytes": 132096
+    },
+    "exiftool_files/lib/auto/re/re.xs.dll": {
+      "sha256": "42ca12eaaaae8763b58865a0d91e51983fddbafec726aac9467ff44c073b25ac",
+      "bytes": 768512
+    },
+    "exiftool_files/lib/auto/Socket/Socket.xs.dll": {
+      "sha256": "8d40a3a5ee3e4bc4007c26c6cef240bc087e4ab3c271d4fcef7c98e233218b2d",
+      "bytes": 42496
+    },
+    "exiftool_files/lib/auto/Storable/Storable.xs.dll": {
+      "sha256": "2f533b64eb84c360466dde89b7c795b05c487e3cb1a706778f1dc1ccdbc47214",
+      "bytes": 125952
+    },
+    "exiftool_files/lib/auto/Time/HiRes/HiRes.xs.dll": {
+      "sha256": "ac430a48020982e15d65b7bf7b0cd42600046a33386284c248b18eb0a25d54bc",
+      "bytes": 28672
+    },
+    "exiftool_files/lib/auto/Time/Piece/Piece.xs.dll": {
+      "sha256": "f2ad5834793f4962b3215c52f030a14b187a99db17ade36d13dcaf8e55676ac5",
+      "bytes": 50176
+    },
+    "exiftool_files/lib/auto/Unicode/LineBreak/LineBreak.xs.dll": {
+      "sha256": "f7f366274b3ac891a5dbc609a75edb85eb68d40dfa85bdc83de347dd3c1d3bd0",
+      "bytes": 192512
+    },
+    "exiftool_files/lib/auto/Win32/API/API.xs.dll": {
+      "sha256": "e224356a2318a636fb61eaedb8f5ccba9b3db78e5f743391dc88a02c4eeb7aa5",
+      "bytes": 30720
+    },
+    "exiftool_files/lib/auto/Win32/FindFile/FindFile.xs.dll": {
+      "sha256": "570366ff7c5c120d28d8d2719b76b91a08925ec77d18cf91986e832ad5b08d79",
+      "bytes": 48640
+    },
+    "exiftool_files/lib/auto/Win32/Win32.xs.dll": {
+      "sha256": "aeb506447fb43806403c7817febf15d33a97a75caf88208bdd0ccf6186941cb9",
+      "bytes": 73216
+    },
+    "exiftool_files/lib/auto/Win32API/File/File.xs.dll": {
+      "sha256": "b6423fa9e675642402c1311cf79c40d81793630d6e750a20fc74da13c103418b",
+      "bytes": 75776
+    },
+    "exiftool_files/lib/AutoLoader.pm": {
+      "sha256": "9a3bd486186b8a4a910b88bd8a503ee4f077b3c36fdc8e450fda74f899bacbc8",
+      "bytes": 15797
+    },
+    "exiftool_files/lib/autouse.pm": {
+      "sha256": "338a7e39931d89ed0c77ee2240b158badc06fd47e6506da2edb72625c3ba62f2",
+      "bytes": 4238
+    },
+    "exiftool_files/lib/B/Deparse.pm": {
+      "sha256": "099ab82c3cbec8d2c60e755c4bb72b75482c7c64ba13918111f86ceaab08c21f",
+      "bytes": 210212
+    },
+    "exiftool_files/lib/B.pm": {
+      "sha256": "d9d2008a1e0bb35a353c8740a745e555d86b8e5c1d01bc9f6c4d2b9d05c1e52a",
+      "bytes": 29474
+    },
+    "exiftool_files/lib/base.pm": {
+      "sha256": "4f8b2f1898bbcc9c481481798d113617d46a9f73d87bcdcbef5fe26044b2fa6c",
+      "bytes": 10961
+    },
+    "exiftool_files/lib/Benchmark.pm": {
+      "sha256": "4d0a4cb8fe54efa4f5e4d842e73ed6fe7a31e5a0d5d0f995c720144e60941b9a",
+      "bytes": 31026
+    },
+    "exiftool_files/lib/bytes.pm": {
+      "sha256": "808eaaa305c6a0c64026b1ae824f39c5ad75a451e8c178a934bd86d1360fdbf8",
+      "bytes": 3740
+    },
+    "exiftool_files/lib/bytes_heavy.pl": {
+      "sha256": "c7def62cbf7d031c4fe319e414117043f2a273885bff93bd18e11935d00a6677",
+      "bytes": 758
+    },
+    "exiftool_files/lib/Carp.pm": {
+      "sha256": "89ce58db6934387bcbab17a4972b75c0d0153335291cd8a762f8341af0bef5ae",
+      "bytes": 35959
+    },
+    "exiftool_files/lib/Class/Struct.pm": {
+      "sha256": "1a7d8e92492d3fb7efbe4eadcb275691bdee70d74ed8c89b3b49b9c710a1ed12",
+      "bytes": 20319
+    },
+    "exiftool_files/lib/Compress/Raw/Bzip2.pm": {
+      "sha256": "fe96044cd77d60b2400ba5112e11384ab5f80a47304340219d1c3578db4fba02",
+      "bytes": 10996
+    },
+    "exiftool_files/lib/Compress/Raw/Lzma.pm": {
+      "sha256": "9cdffb9e4ab5b5f8df1f75312628bc82125186222df7d0f54d1520e773f76836",
+      "bytes": 24792
+    },
+    "exiftool_files/lib/Compress/Raw/Zlib.pm": {
+      "sha256": "90d1885cd4f0e91017e1392f0b164e88c4c254c89168bfcec3debf1c7380366e",
+      "bytes": 47387
+    },
+    "exiftool_files/lib/Compress/Zlib.pm": {
+      "sha256": "423cef2b8e47b60426c51c6d2e49ab2762f62725cacded7eb39f8dc5395ecd5e",
+      "bytes": 43956
+    },
+    "exiftool_files/lib/Config.pm": {
+      "sha256": "93c10f23c7432f1ab3d4575507be944d9d5d19e47ad65b66e9736c0ee2be379f",
+      "bytes": 3412
+    },
+    "exiftool_files/lib/Config_git.pl": {
+      "sha256": "3a32b99bfc9b3d6d353dd0c873e483a31823e99f5d84f847cc7ced9c759ad913",
+      "bytes": 421
+    },
+    "exiftool_files/lib/Config_heavy.pl": {
+      "sha256": "1bc2ec293f64aa5971abee71e5dc8c2df0b7602ad1ffa02ed3db6578f309b03f",
+      "bytes": 40029
+    },
+    "exiftool_files/lib/constant.pm": {
+      "sha256": "e67cdfa533d42cbe5265bcf3c270f055620cba38a9295b5d584b7efc37a0c156",
+      "bytes": 14724
+    },
+    "exiftool_files/lib/CPAN/Config.pm": {
+      "sha256": "e8899ca1418c990dca0d1d6856c870eace143b21fb4a2ba94f1344433606dc3e",
+      "bytes": 4252
+    },
+    "exiftool_files/lib/CryptX.pm": {
+      "sha256": "05ccd28143ab9ac6f7b91d7a5eaabc72d67ebc2c7cbcd332f50b7fccb2bd04a0",
+      "bytes": 1317
+    },
+    "exiftool_files/lib/Cwd.pm": {
+      "sha256": "692c30595c2e11e9276d816133972a08a2b4cf50a772b6f5b8f646147aeeff00",
+      "bytes": 21942
+    },
+    "exiftool_files/lib/Data/Dumper.pm": {
+      "sha256": "fa21074814598d34519ee83d4bbd66bca64b9b7291ff4d36a7453122bc21333f",
+      "bytes": 45838
+    },
+    "exiftool_files/lib/Digest/base.pm": {
+      "sha256": "06367faa5fb46a5794d3d7603d52075ab1533ad848184a5309a1cfac1058281a",
+      "bytes": 1984
+    },
+    "exiftool_files/lib/Digest/MD5.pm": {
+      "sha256": "368b6f3003ef61705e7b7d462db1fec5ab7d2c4e30f39937819a53a40af0caad",
+      "bytes": 10946
+    },
+    "exiftool_files/lib/Digest/Perl/MD5.pm": {
+      "sha256": "8e93e40931074921ec03116afe69e5895e39b9e0d0bb93ff5dc1a7e7a3b0401c",
+      "bytes": 7925
+    },
+    "exiftool_files/lib/Digest/SHA.pm": {
+      "sha256": "15efed6020da9028a7a5b2d41d7e6d8e6b1719aeae365bc592ffb4025f76d33d",
+      "bytes": 22174
+    },
+    "exiftool_files/lib/DynaLoader.pm": {
+      "sha256": "cb3ba6d6c2979f32fad45226a8812e767c67b13d7bdfc662a5700649d1a47803",
+      "bytes": 26014
+    },
+    "exiftool_files/lib/Encode/Alias.pm": {
+      "sha256": "9ec57c436578d4c67b269c53dcb70db64bf845b7ba294da2b8fb998bc00a45ea",
+      "bytes": 12545
+    },
+    "exiftool_files/lib/Encode/Config.pm": {
+      "sha256": "a15072cf84ac4a431b91b1a893a7c8d4c4dd48adefa077cd3a9b271cf0aba3bf",
+      "bytes": 6065
+    },
+    "exiftool_files/lib/Encode/Encoding.pm": {
+      "sha256": "1daaf4400c4462c24d785b7eb91fbebc6eb868192aad410df48019fe7af6e39d",
+      "bytes": 9063
+    },
+    "exiftool_files/lib/Encode/MIME/Name.pm": {
+      "sha256": "1cabed37ee26cfd763999649f9ac9a5f1e5a81cbc5125b8d85ff19d60b72f906",
+      "bytes": 3821
+    },
+    "exiftool_files/lib/Encode.pm": {
+      "sha256": "1a4417338fb360ea847148571ee90e7eb7b115e431d3596bd1b7109dffae46b1",
+      "bytes": 32083
+    },
+    "exiftool_files/lib/Errno.pm": {
+      "sha256": "433da824b64ed3aa95479b5d2302bc1a01e34953737f3e52b51a9cafc59d3614",
+      "bytes": 94908
+    },
+    "exiftool_files/lib/Exporter/Heavy.pm": {
+      "sha256": "3f85172a45788d079fd08451fb47f71bf0648c94a7eebc198661d83d1f9b59b8",
+      "bytes": 6561
+    },
+    "exiftool_files/lib/Exporter.pm": {
+      "sha256": "f089e9898900df4d0f4901d8c1a2e5ae6fed990ecdf724f7ea5654791ef891f3",
+      "bytes": 18805
+    },
+    "exiftool_files/lib/ExtUtils/Command/MM.pm": {
+      "sha256": "bbf2a19234dd24193315abedcde99f303f0ae161c5ac703dc050f7976d9b23fc",
+      "bytes": 7704
+    },
+    "exiftool_files/lib/ExtUtils/Command.pm": {
+      "sha256": "414f1dd3c493783b94112a26d9ddd0cdc62702c5d96eefaf1dc00c988e35c290",
+      "bytes": 7811
+    },
+    "exiftool_files/lib/Fcntl.pm": {
+      "sha256": "02cce578326ffb0393234fd16f4d4d2ce62deec827a6e62454df27e5a2d3d22a",
+      "bytes": 4044
+    },
+    "exiftool_files/lib/feature.pm": {
+      "sha256": "00327dd2e86d6d38e3fab84f2cb6e00538de061d759bb0b26829e86fa2deed47",
+      "bytes": 19003
+    },
+    "exiftool_files/lib/File/Basename.pm": {
+      "sha256": "43b664feca2c9d14cfc90d3527fc0bf6931c75000cf941d1f8c914e83dfb21ba",
+      "bytes": 11194
+    },
+    "exiftool_files/lib/File/Copy.pm": {
+      "sha256": "ce385b06148312ae21687857667c828367f5291580e41793826655c35564cb95",
+      "bytes": 16254
+    },
+    "exiftool_files/lib/File/Find.pm": {
+      "sha256": "ab0f497bb24790ec6e667831ffc8bde9ba1ef4f01ffd16338390fe34929b69d2",
+      "bytes": 33091
+    },
+    "exiftool_files/lib/File/Glob.pm": {
+      "sha256": "ff854e2cccfcd78e6c22278c843ea61fda1d0164704b1aa8941fe05ff9dbbfe8",
+      "bytes": 12712
+    },
+    "exiftool_files/lib/File/GlobMapper.pm": {
+      "sha256": "1fc0b84c8fa4fc5b3cad7ae0a638a8fd3736efd5416c31afcc8ae58a03d525b3",
+      "bytes": 15683
+    },
+    "exiftool_files/lib/File/HomeDir/Darwin/Carbon.pm": {
+      "sha256": "c6acf27183e2dbf94f1f8ba10d2f9ca8632e888524b0b326f1d2d9f50fbee97a",
+      "bytes": 3599
+    },
+    "exiftool_files/lib/File/HomeDir/Darwin/Cocoa.pm": {
+      "sha256": "b945353fb15203a7c96c81d7d9daa4c3547621fc07d9289516e058df8111d449",
+      "bytes": 2638
+    },
+    "exiftool_files/lib/File/HomeDir/Darwin.pm": {
+      "sha256": "b81507f638a70f7154573254d39113022d3626130e75c47e1899fae1324ea601",
+      "bytes": 2285
+    },
+    "exiftool_files/lib/File/HomeDir/Driver.pm": {
+      "sha256": "e91a5dd043e80864f3f41232f19a60d71086d34042954bb86de210bfbeed1e1d",
+      "bytes": 357
+    },
+    "exiftool_files/lib/File/HomeDir/FreeDesktop.pm": {
+      "sha256": "9762b2c871f37f65f9fb9e4ad9cb5d5e18ab33bc77c4e3dbaf4110c9484384f6",
+      "bytes": 2504
+    },
+    "exiftool_files/lib/File/HomeDir/MacOS9.pm": {
+      "sha256": "1a103b83327bd8d2421fb98efec418e9b6fbed3207cfdf63b2f30b64bde804aa",
+      "bytes": 2249
+    },
+    "exiftool_files/lib/File/HomeDir/Test.pm": {
+      "sha256": "f1d8918e69e751acc180265ef9c890a318a1eb0f60234f85f1037dbb29633512",
+      "bytes": 2025
+    },
+    "exiftool_files/lib/File/HomeDir/Unix.pm": {
+      "sha256": "1d2041b3827132359810ebd3962c97e411f61ef2fd944aef8c66657d0b30175d",
+      "bytes": 2544
+    },
+    "exiftool_files/lib/File/HomeDir/Windows.pm": {
+      "sha256": "2d27608f5468541e1dfa072832557f09de62ebcf539ca07308ab140127973a09",
+      "bytes": 4342
+    },
+    "exiftool_files/lib/File/HomeDir.pm": {
+      "sha256": "018a077229896f18f6e4c2a0a69d1882a2a5c1a84199c553bc90eb3537bb16bf",
+      "bytes": 7653
+    },
+    "exiftool_files/lib/File/Path.pm": {
+      "sha256": "a1aa35a2f08a57e1b2684733c32e435cadbcac7be6652b0a5a528a6a122211aa",
+      "bytes": 43254
+    },
+    "exiftool_files/lib/File/RandomAccess.pm": {
+      "sha256": "ff5558d3986b91b112131b21039d918146220b5d690202b334f8a2123dacd341",
+      "bytes": 15595
+    },
+    "exiftool_files/lib/File/RandomAccess.pod": {
+      "sha256": "5f94785866ecc726d952c59c411b28bd1abbe3462f833eaf5ec36665dad86663",
+      "bytes": 4255
+    },
+    "exiftool_files/lib/File/Spec/Unix.pm": {
+      "sha256": "a8450ef045de09ea86053f6940d100655109493ce1eb55eeccceb760f6d5ab9a",
+      "bytes": 15889
+    },
+    "exiftool_files/lib/File/Spec/Win32.pm": {
+      "sha256": "d9185351ff4e0d1259c4573db77ad46f5d2fe3be094af5236fd16f9975421ff4",
+      "bytes": 10766
+    },
+    "exiftool_files/lib/File/Spec.pm": {
+      "sha256": "b5d318dd22fee9c82313bb5ed5e183c1ee07422bc4839cea6726c4e083765b90",
+      "bytes": 10571
+    },
+    "exiftool_files/lib/File/stat.pm": {
+      "sha256": "f948a9536c09e2bed3472c23b940cdec1907c9e695d041bc53320e1144562c8e",
+      "bytes": 10302
+    },
+    "exiftool_files/lib/File/Temp.pm": {
+      "sha256": "6d8149ddd738ccf19b694f5d8efb6ba5d85a943b6ee4de7a96c1991f3ac089c1",
+      "bytes": 118877
+    },
+    "exiftool_files/lib/File/Which.pm": {
+      "sha256": "e85169a84a82918a5eca355a5ca7b662468bd460df54642f9d189fbbe4f7e80f",
+      "bytes": 3672
+    },
+    "exiftool_files/lib/FileHandle.pm": {
+      "sha256": "7a3643abdef1bba6bd7f41d47dec02402b5a0136b84f7c782de93ad9fc1fc063",
+      "bytes": 6784
+    },
+    "exiftool_files/lib/Image/ExifTool/7Z.pm": {
+      "sha256": "241e0bae7f6f4122d1c4c5b5c47a8b698957834d50815a88308a9b0807bcf9c2",
+      "bytes": 22502
+    },
+    "exiftool_files/lib/Image/ExifTool/AAC.pm": {
+      "sha256": "64c89d4cf173c2c8fa0734332e6a61f797fe7b61e5727f798f4b19524768e742",
+      "bytes": 5204
+    },
+    "exiftool_files/lib/Image/ExifTool/AES.pm": {
+      "sha256": "1bbbe290b3249794f60d0d2e34d6b77c0660a701b9310c1a197a7a3861f13aea",
+      "bytes": 19103
+    },
+    "exiftool_files/lib/Image/ExifTool/AFCP.pm": {
+      "sha256": "599549d51adbf4bf329675b8014c896755928066e4e46d4c0b6e59c433e509fc",
+      "bytes": 10646
+    },
+    "exiftool_files/lib/Image/ExifTool/AIFF.pm": {
+      "sha256": "272b54b9edbb29113924b1176b8cf117a78603fb84d05145e861b25e1dbb59a4",
+      "bytes": 10035
+    },
+    "exiftool_files/lib/Image/ExifTool/APE.pm": {
+      "sha256": "b6f35d4394c361fca87ebb82b2a848974e64fc7f165aecd8ff4ba491880395e0",
+      "bytes": 9268
+    },
+    "exiftool_files/lib/Image/ExifTool/APP12.pm": {
+      "sha256": "1ae45cc85310f6b386353638fcca9205a1b4c19b3e57f12e6c7242868c6f38e9",
+      "bytes": 10770
+    },
+    "exiftool_files/lib/Image/ExifTool/Apple.pm": {
+      "sha256": "9c0f11dc4757d36e165b9e161ecc8faa88038d1581643faafa6d96209f88311b",
+      "bytes": 14564
+    },
+    "exiftool_files/lib/Image/ExifTool/ASF.pm": {
+      "sha256": "78cb59e4644520fd05e445e02ef8d2a141850dc2db120786b59302d4853e55be",
+      "bytes": 31103
+    },
+    "exiftool_files/lib/Image/ExifTool/Audible.pm": {
+      "sha256": "45d2e0d1b28e14413cf90497daf75dceb853f990f61369da8f89172e17bf6acd",
+      "bytes": 11801
+    },
+    "exiftool_files/lib/Image/ExifTool/BigTIFF.pm": {
+      "sha256": "35a05bef8d973cd7c437fadae862eaba499750dce27ec88547df19f533ef2f24",
+      "bytes": 11819
+    },
+    "exiftool_files/lib/Image/ExifTool/BMP.pm": {
+      "sha256": "8fa6def298ba60a9854b2e75b3b7de4141d2e7277407928f0997f9fd5fe6f1a1",
+      "bytes": 10699
+    },
+    "exiftool_files/lib/Image/ExifTool/BPG.pm": {
+      "sha256": "abcc8a5e822bb2a179eb45f7a521b8979e09cb025959d53d7d4989ad9a6d5fae",
+      "bytes": 7715
+    },
+    "exiftool_files/lib/Image/ExifTool/BuildTagLookup.pm": {
+      "sha256": "55064f2f0f610e3798428556d7e7173d632b40002d8a1fc08286f935a7d1b014",
+      "bytes": 128538
+    },
+    "exiftool_files/lib/Image/ExifTool/BZZ.pm": {
+      "sha256": "dd0c0317a1d2826d6c9d2ac7163fbd8a38b4afa45556915493fd3482be8afd72",
+      "bytes": 17877
+    },
+    "exiftool_files/lib/Image/ExifTool/Canon.pm": {
+      "sha256": "02b1a5d01dc98047b10c19e02892e0e83b36d7122bce356a667e9d816915bc5d",
+      "bytes": 408308
+    },
+    "exiftool_files/lib/Image/ExifTool/CanonCustom.pm": {
+      "sha256": "463a499bc380ac3e852eae8830c4cb5decca6d018ce10ac47e88c1610f76feb9",
+      "bytes": 86340
+    },
+    "exiftool_files/lib/Image/ExifTool/CanonRaw.pm": {
+      "sha256": "a216fd532d352c881a8191c115525097c2e421e3a8d45898e3ca880cfda7a5e6",
+      "bytes": 30869
+    },
+    "exiftool_files/lib/Image/ExifTool/CanonVRD.pm": {
+      "sha256": "715675aa6b52f1bc3d28226802066a36727b12e0ec301fc1810b1db0d4e2860e",
+      "bytes": 78184
+    },
+    "exiftool_files/lib/Image/ExifTool/CaptureOne.pm": {
+      "sha256": "ef75cb925bd7b1a2e3a90d7ae723fabcd968baa2ecf6a752370529bc1ae443ab",
+      "bytes": 8045
+    },
+    "exiftool_files/lib/Image/ExifTool/Casio.pm": {
+      "sha256": "747b81f2f6149e4dfe7014ab0ffc34567a2be885da7c1efcc69e7c80b59344c5",
+      "bytes": 63705
+    },
+    "exiftool_files/lib/Image/ExifTool/CBOR.pm": {
+      "sha256": "f3df3ef84617e3794b64697ee4c6f43c5cc95c4146e542c15c719f45afa5d780",
+      "bytes": 13067
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Arabic.pm": {
+      "sha256": "90625d5c7ff09c976f9768ae36dd19d99f66faf742a6d9cef35b1c1af16348bf",
+      "bytes": 1913
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Baltic.pm": {
+      "sha256": "c02c01046099116a116780de5ca822c69cdf986a83d75eaf3603911241ce21a3",
+      "bytes": 1731
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Cyrillic.pm": {
+      "sha256": "39bf8e08e3ba0f6e63fe42eb07a4df28cddbaf8559c6b16f38252fd6d3f00f13",
+      "bytes": 2361
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/DOSCyrillic.pm": {
+      "sha256": "09a00893c948759aa2807e9b23503f535aa3b7e7e2de68cade5557630b98bc11",
+      "bytes": 2629
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/DOSLatin1.pm": {
+      "sha256": "ce2bca149aeb40d376a5d3e596ad3acc7fa5ce1244736a827de6521a05dcc089",
+      "bytes": 2619
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/DOSLatinUS.pm": {
+      "sha256": "55d28e289e3b10bbd60dde97e72d8baa54cfbdae55f21c80722a9b3842b3e55d",
+      "bytes": 2621
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Greek.pm": {
+      "sha256": "5200b436582e79eab7a6424124e4481ec619c1784ae48265f90d8421cc9a6b9b",
+      "bytes": 1993
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Hebrew.pm": {
+      "sha256": "b43457e1b50a7180592fc627eb5dd84e415d3e5c28e7e4ce74ea2fee4c210bcd",
+      "bytes": 1759
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/JIS.pm": {
+      "sha256": "1094fb6d5bc9ea792f9d68ddab277e6aa80b3f5335d2c1c6bfd8c1c5babe5411",
+      "bytes": 127692
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Latin.pm": {
+      "sha256": "2112fc60915466d29e54afba64bf3ffb586158a5cda6339b5e2f89f5216e9d7e",
+      "bytes": 953
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Latin2.pm": {
+      "sha256": "52f17a32169da0141f9a653d6b81e08eb697d238fd026a5b390be70d44e8ef1d",
+      "bytes": 1731
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacArabic.pm": {
+      "sha256": "15aedb3d69b0770bfd8b0322b31985adb0488506cccd24e060a17ed3f52ae951",
+      "bytes": 2559
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacChineseCN.pm": {
+      "sha256": "42af87d918a3eece920344be0b2f4bb97cd236860e2debd3224f664a8e089075",
+      "bytes": 129364
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacChineseTW.pm": {
+      "sha256": "d1b6d89e0f6c102132fc5b5183506c777b3b3500f9b2d3e28a0f674125b7ba15",
+      "bytes": 231400
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacCroatian.pm": {
+      "sha256": "2a573cf416ce3282a6dc1960103f9d4600726cf3db02e56ed603335c69c37381",
+      "bytes": 2406
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacCyrillic.pm": {
+      "sha256": "ec49c4e79bf7fc5a18f5a4eb77d48fad40209f92c4e5f3d167c61d3f9587bbde",
+      "bytes": 2544
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacGreek.pm": {
+      "sha256": "d0833ab250f51f99d2c7d172a7628c98537117a3dca22a4fe980c85ed824bdd0",
+      "bytes": 2502
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacHebrew.pm": {
+      "sha256": "bb3229736d486a4614ccd3be57afa29728dca939b51073eac85773fa8c253a85",
+      "bytes": 2569
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacIceland.pm": {
+      "sha256": "28f0ac1102478079afb329096ac317954febdb120c924147b033ad28d2db98ba",
+      "bytes": 2358
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacJapanese.pm": {
+      "sha256": "36b9819d02c5aafd1fc4ab5616dadf7a6e3d5de8d026bdbdf3d46cd1189fa4e1",
+      "bytes": 125371
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacKorean.pm": {
+      "sha256": "f90c20ebacae587e8e9c8b57b95f64c10053da5afd2d83e0a3527232c412c676",
+      "bytes": 171931
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacLatin2.pm": {
+      "sha256": "1e216c769557eb927cd6eee2ac4121f5df5caf052fdc058c08719b4a16484d3d",
+      "bytes": 2526
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacRoman.pm": {
+      "sha256": "243a84e50839abbcee96ce4b72c115fbf8d6f0fd755d2e7ff796da6dcf42c1be",
+      "bytes": 2374
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacRomanian.pm": {
+      "sha256": "14d9d15c357acc6388bb95bcb08d00d9cc12895c73378d2351a50200074466f5",
+      "bytes": 2394
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacRSymbol.pm": {
+      "sha256": "9d8bd0c20775120c71c5e3b5996c6a076e0b62b96f84038964fb407c73eca58d",
+      "bytes": 129227
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacThai.pm": {
+      "sha256": "6f11db69e246cfc46df92af3f5f4280da07e2b8831a7b311c8f00894c42e194b",
+      "bytes": 2692
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/MacTurkish.pm": {
+      "sha256": "9bfc65e53ed2666feecfe0cb27b1e940f836b64fd79e02ebd752ebd78a5ee6a3",
+      "bytes": 2382
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/PDFDoc.pm": {
+      "sha256": "5571e74cd68b89afbf47dda2fd59da90d86fd026477383d41b5db51aacf0d4a6",
+      "bytes": 1264
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/ShiftJIS.pm": {
+      "sha256": "757bc7e41b0b9f8db6ac31c4e9cb99964dda73a84ec9e10c9f63ac5990502001",
+      "bytes": 119258
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Symbol.pm": {
+      "sha256": "463b9e12e4736fee4fbe504111251b2c90f0ff77afb832f37f3996a22201c916",
+      "bytes": 3000
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Thai.pm": {
+      "sha256": "71ac8d56facacd91d3a3ac0cba11ebc11944dd3e10a95373e4a22fd505a7b4c1",
+      "bytes": 2087
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Turkish.pm": {
+      "sha256": "97a40026b0cfe77f8186470085d8e51c2cee956f3d1719ae8151c35ce021cba5",
+      "bytes": 1023
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset/Vietnam.pm": {
+      "sha256": "8ed317390f76295db70067231020a176d9c85f29e9030662ef7ed3de4665a4cc",
+      "bytes": 1123
+    },
+    "exiftool_files/lib/Image/ExifTool/Charset.pm": {
+      "sha256": "70e7f651ca7bc2e284dd9758854466260139b118498f0a9de7bd1312a02af212",
+      "bytes": 16397
+    },
+    "exiftool_files/lib/Image/ExifTool/DarwinCore.pm": {
+      "sha256": "dd053f73662cdf7bf6129b95ec256d04eef3d1b48bb5d246592e083da0e1b3b7",
+      "bytes": 17626
+    },
+    "exiftool_files/lib/Image/ExifTool/DICOM.pm": {
+      "sha256": "a82abb8761b4fb2c9bf533ad4749ee7c9e1f8dbda8341ee9d80f4f40ba81016d",
+      "bytes": 250975
+    },
+    "exiftool_files/lib/Image/ExifTool/DJI.pm": {
+      "sha256": "5339eb40a06cac1c1738d5c1d71ae7f8d2e96198309ed2b99b858c7ea27ea1d9",
+      "bytes": 27574
+    },
+    "exiftool_files/lib/Image/ExifTool/DjVu.pm": {
+      "sha256": "3e4c37a1895dc2a9ae3b2e259220e3ef7430818c0d3c7738c452f94ed3394151",
+      "bytes": 12758
+    },
+    "exiftool_files/lib/Image/ExifTool/DNG.pm": {
+      "sha256": "30c24fd00f7be49efd3c8270e07e7f4691783d6dc1b8d2d9fbfcb2a22a3b164c",
+      "bytes": 33853
+    },
+    "exiftool_files/lib/Image/ExifTool/DPX.pm": {
+      "sha256": "187ea53e38c0ba54e71dcc693a62ef7cac5da8a13dee2131d34a02381c5d950c",
+      "bytes": 9742
+    },
+    "exiftool_files/lib/Image/ExifTool/DSF.pm": {
+      "sha256": "0ab375c18a489ff77405d96df4fb19a710ec80badee8cf27c108651039d88cc8",
+      "bytes": 3969
+    },
+    "exiftool_files/lib/Image/ExifTool/DV.pm": {
+      "sha256": "48a94187ec68c895791b6d04bd6076cfe63ae3afa759532787e409496dc4eaec",
+      "bytes": 9991
+    },
+    "exiftool_files/lib/Image/ExifTool/EXE.pm": {
+      "sha256": "e114b1aa5f4f370f1c8eb90c06d242e3284e3105c9cfd941a716c07a01b17d16",
+      "bytes": 59242
+    },
+    "exiftool_files/lib/Image/ExifTool/Exif.pm": {
+      "sha256": "96d473ea0f2e8a98945df5742d0cfaf60c9dfff15c4d4433c64a6874f54ad5ba",
+      "bytes": 268725
+    },
+    "exiftool_files/lib/Image/ExifTool/FITS.pm": {
+      "sha256": "3e7385a84e508867c412eecaee1f04e26828483850d899d7ad185b2a6bf13a33",
+      "bytes": 5855
+    },
+    "exiftool_files/lib/Image/ExifTool/Fixup.pm": {
+      "sha256": "271eed0c66a2a003ebe9ba72ea480a4cbc5894fbeded0fbd376d0aced1f861c6",
+      "bytes": 12732
+    },
+    "exiftool_files/lib/Image/ExifTool/FLAC.pm": {
+      "sha256": "27268e1aa97d3de11d9ac56246466b3a21a8f45821fcfc67538d346845d44e2f",
+      "bytes": 10527
+    },
+    "exiftool_files/lib/Image/ExifTool/Flash.pm": {
+      "sha256": "8ff2d14ec71144a6a08d2507f657a8ce4a5d5e0a3e2842ce357e20940a91bd15",
+      "bytes": 28161
+    },
+    "exiftool_files/lib/Image/ExifTool/FlashPix.pm": {
+      "sha256": "a880de0428810091ce540c542707d7d5583551f047c93e315f3d2c7f8d187a2e",
+      "bytes": 91223
+    },
+    "exiftool_files/lib/Image/ExifTool/FLIF.pm": {
+      "sha256": "e8f03d98ab423233e108c901bcd13e3e40338dd133f9482706c1fe7be7e9218b",
+      "bytes": 11924
+    },
+    "exiftool_files/lib/Image/ExifTool/FLIR.pm": {
+      "sha256": "1f97460a6f5c1079439f3cf6997bc3ec3949af36bb6cb7af686d4d497c75ff2c",
+      "bytes": 61163
+    },
+    "exiftool_files/lib/Image/ExifTool/Font.pm": {
+      "sha256": "c4f609e08971c1091d2173676807e9038a21473679a81d882800f023cccd614d",
+      "bytes": 28468
+    },
+    "exiftool_files/lib/Image/ExifTool/FotoStation.pm": {
+      "sha256": "90d9cf564aa6703cc186c471862005ffdd71af92a54afac9ef158289184bae41",
+      "bytes": 8162
+    },
+    "exiftool_files/lib/Image/ExifTool/FujiFilm.pm": {
+      "sha256": "0dc0aac01153ac7c3ecbb80cf0bbce282821992442f221109c2eb9961028f9a8",
+      "bytes": 69421
+    },
+    "exiftool_files/lib/Image/ExifTool/GE.pm": {
+      "sha256": "2996059413e95327f74acb2c730602d4593a0439a051b7fb161a73a63071fb14",
+      "bytes": 2046
+    },
+    "exiftool_files/lib/Image/ExifTool/Geolocation.dat": {
+      "sha256": "408c123ab6cf06c8f1bb0416ab942ac39185a41e146b1846f1e4b71eb63071ed",
+      "bytes": 3207490
+    },
+    "exiftool_files/lib/Image/ExifTool/Geolocation.pm": {
+      "sha256": "481c3b421e27f4ff6da6f98825f5130bfdc1d4f9bf51c5961639ad442060796c",
+      "bytes": 38488
+    },
+    "exiftool_files/lib/Image/ExifTool/Geotag.pm": {
+      "sha256": "5e3a2fdc20e4958b4438963688dcbf56d5ae6943ea970c6bd52fbdc66e4e7846",
+      "bytes": 71994
+    },
+    "exiftool_files/lib/Image/ExifTool/GeoTiff.pm": {
+      "sha256": "7aff7127db35b14b307d1d9f25239f3d9c5beaf17464918af1f0197336a25fd5",
+      "bytes": 89614
+    },
+    "exiftool_files/lib/Image/ExifTool/GIF.pm": {
+      "sha256": "254805ee497f587b64bfe843ca67df53872bb7bdf78694765f66a374208e9b2a",
+      "bytes": 25071
+    },
+    "exiftool_files/lib/Image/ExifTool/GIMP.pm": {
+      "sha256": "2dee27d14363a194beb272ac3c31bdd3a05022785fc8515a2bd0294194b3b658",
+      "bytes": 8576
+    },
+    "exiftool_files/lib/Image/ExifTool/GM.pm": {
+      "sha256": "1f444b35a60ca85cd6c7548bfda7af25386da7f5b0d393f4b2d5d63ff52a280b",
+      "bytes": 21072
+    },
+    "exiftool_files/lib/Image/ExifTool/Google.pm": {
+      "sha256": "f56f913fbdd07085be184c9cac7f5c397d4134ac9db5cf114e5a13e98d531fc2",
+      "bytes": 33141
+    },
+    "exiftool_files/lib/Image/ExifTool/GoPro.pm": {
+      "sha256": "d81a7e00175c950c208e501ece1a7c1b57c74d4021578fc6bdcd00bda179b9cd",
+      "bytes": 35523
+    },
+    "exiftool_files/lib/Image/ExifTool/GPS.pm": {
+      "sha256": "895abc3c9bb7ab01fbf50805ba473345672775c2ff2df2b30cc9754b22189cee",
+      "bytes": 21480
+    },
+    "exiftool_files/lib/Image/ExifTool/H264.pm": {
+      "sha256": "0d896bfe7fdf0749575aeccd09829152e3f2d197acf9026975c64ba386b974cf",
+      "bytes": 40241
+    },
+    "exiftool_files/lib/Image/ExifTool/HP.pm": {
+      "sha256": "f89a38f0503bbf0ae99d878abc86c6e1561aa7319e90134e76f4a0f6d063a34f",
+      "bytes": 8197
+    },
+    "exiftool_files/lib/Image/ExifTool/HTML.pm": {
+      "sha256": "b471abe81d5e1dfd51bf032a95d7b40f3bbbcedc9e34569fb127a742f64875d9",
+      "bytes": 22634
+    },
+    "exiftool_files/lib/Image/ExifTool/HtmlDump.pm": {
+      "sha256": "989da1b9edac7f18aa008e3eb3ea54d792b5f09b0bba06b0f55498fb3a6593e4",
+      "bytes": 33758
+    },
+    "exiftool_files/lib/Image/ExifTool/ICC_Profile.pm": {
+      "sha256": "31bffa0ffe1b5a8be97dadd44b9bbe830892531e9ef4c20221891ee2a80db4b3",
+      "bytes": 49795
+    },
+    "exiftool_files/lib/Image/ExifTool/ICO.pm": {
+      "sha256": "8379f326c475fa9aae376cbbe74443fdf8a886bb7c2065f25b18756ca6d553e6",
+      "bytes": 3730
+    },
+    "exiftool_files/lib/Image/ExifTool/ID3.pm": {
+      "sha256": "87df332a3c3f12da9126d1f0d0722840e04e0af860efc1fe22cf6d2b6582ffb8",
+      "bytes": 61698
+    },
+    "exiftool_files/lib/Image/ExifTool/Import.pm": {
+      "sha256": "c4a89f1e3917fa18160cc18cc933ecd063dfffd969fac3cbf0a2b8480bc11574",
+      "bytes": 13623
+    },
+    "exiftool_files/lib/Image/ExifTool/InDesign.pm": {
+      "sha256": "17b08a42f39929c1f0c319e9ee8c0660f15b25eb8c5e190d93785784dbfc7544",
+      "bytes": 11455
+    },
+    "exiftool_files/lib/Image/ExifTool/InfiRay.pm": {
+      "sha256": "0d7ac601e041d27e2b1ad0cb6faca6400771219cafe9cb6bf50f7de673ff9a59",
+      "bytes": 10374
+    },
+    "exiftool_files/lib/Image/ExifTool/IPTC.pm": {
+      "sha256": "b13683644863a2fd3ac1972aba25a87747e36d00c090d28334a8ea4f1a6bd904",
+      "bytes": 41081
+    },
+    "exiftool_files/lib/Image/ExifTool/ISO.pm": {
+      "sha256": "ed69665ac34aefde6b59319b55c9e34f8d2ad67f96831c0e2160fcb69e59c72d",
+      "bytes": 6970
+    },
+    "exiftool_files/lib/Image/ExifTool/ITC.pm": {
+      "sha256": "c5430e72916faed27b4d3b232b49614041218a7bac133476c3e4d969da40ec5f",
+      "bytes": 6792
+    },
+    "exiftool_files/lib/Image/ExifTool/iWork.pm": {
+      "sha256": "c10d502d78ce2c8979858f44449dfd3d862911631e4d111c5bc1a4f18e04ccfa",
+      "bytes": 7982
+    },
+    "exiftool_files/lib/Image/ExifTool/JPEG.pm": {
+      "sha256": "389592fd6dd6e8ff23e18473297dd203a50e456e1f6684300094b0652919c5ba",
+      "bytes": 28877
+    },
+    "exiftool_files/lib/Image/ExifTool/Jpeg2000.pm": {
+      "sha256": "922d4fb0d34eb3eb227765b8cb8e3a11143c6b2f721aadc670e0b7d5d01eefdf",
+      "bytes": 65553
+    },
+    "exiftool_files/lib/Image/ExifTool/JPEGDigest.pm": {
+      "sha256": "623beda5023641e487a8919407c4f8adcdc7a8007b3f772eb48f89b4e2427cb6",
+      "bytes": 217476
+    },
+    "exiftool_files/lib/Image/ExifTool/JSON.pm": {
+      "sha256": "72c22bb3b3ee9edfbdd1a8bd6aa0690be55a47e6114465a06ced4c4ad5248d94",
+      "bytes": 6839
+    },
+    "exiftool_files/lib/Image/ExifTool/JVC.pm": {
+      "sha256": "47118522de8622583a4ed0d5cd47a0f3706f28450ebe155b799b5d3fbf8c8f90",
+      "bytes": 3638
+    },
+    "exiftool_files/lib/Image/ExifTool/Kodak.pm": {
+      "sha256": "a504883485d37c640768a28bd8fe5b29a8479ab2b13d662be185820223b6ee68",
+      "bytes": 123475
+    },
+    "exiftool_files/lib/Image/ExifTool/KyoceraRaw.pm": {
+      "sha256": "afb10e2a5d036d5a345ad4a24b289c36316eb427c20b0119a19a5f42e666df86",
+      "bytes": 4411
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/cs.pm": {
+      "sha256": "8ec552aa7b1d8a798b36c1de380e929604d55724c305a4327ff75c97b1e817c8",
+      "bytes": 46699
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/de.pm": {
+      "sha256": "52d8c0ad7589b7c39eccf7a22a744b58162f685e712d2f8719258f100473f7f0",
+      "bytes": 299939
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/en_ca.pm": {
+      "sha256": "64223efa43c21770841f34d62797faff160c2ec074d7826f2af60af5fa513c5d",
+      "bytes": 38532
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/en_gb.pm": {
+      "sha256": "24a5c9607b63c983b8374ffd1765f110f3640ba590ee826408b523f8816cf4aa",
+      "bytes": 40449
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/es.pm": {
+      "sha256": "44ac6495daf353ca57fdb83d72460e7f48bfe087023a1d4cccb6a91c1f65a38b",
+      "bytes": 123030
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/fi.pm": {
+      "sha256": "9d35022ce67f551bde2cc099e553a943c13e2e3fc17198321ce3096bd2e35381",
+      "bytes": 112353
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/fr.pm": {
+      "sha256": "3207c09101243af8f4f0312fd8d3a33ce6dc6dc252128f2869681fb3b9ab6a70",
+      "bytes": 435759
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/it.pm": {
+      "sha256": "8c7093c40c13f7f58e7294899363747ded16c37c52aa48eca413f9b067f78075",
+      "bytes": 250790
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/ja.pm": {
+      "sha256": "2e371e2b03324038a9d4c4a2adaf5b918455ba21636e2827f0c335998fd6f628",
+      "bytes": 209798
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/ko.pm": {
+      "sha256": "f32fb5367b23c29389906e6a6411c30c2032662d3a07ee688cee0e629b1163e3",
+      "bytes": 68220
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/nl.pm": {
+      "sha256": "e4e60cf6164406a431771f59c470711734eb17a51286f1440a2dfeacc49e85d4",
+      "bytes": 91681
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/pl.pm": {
+      "sha256": "fc0e1fddfadcb69feeb4576db0c3abf19cde4465f5708b4e73424e6d7b3100cd",
+      "bytes": 46517
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/ru.pm": {
+      "sha256": "36d20e87cc130dc26d2549fe72e96ea7c048d692ee61340dbd37010469d73285",
+      "bytes": 321153
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/sk.pm": {
+      "sha256": "0b55b702148b29ecbb92c8c284bd2807795cd187d0b4c10d3ef11fe99e349360",
+      "bytes": 78976
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/sv.pm": {
+      "sha256": "b92ef02aa2392c9865fd9a4b1bd966e44cbe714f5e520d2128338b5028db47c6",
+      "bytes": 21686
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/tr.pm": {
+      "sha256": "15768c6f4d036fd32a985de0aa88ba8073f3c5b4adaf5e85f563b18e402b15e6",
+      "bytes": 19207
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/zh_cn.pm": {
+      "sha256": "e428bc5784bbb4b1ab65d5162188652588158b2979fdd59aab372ffddef56b71",
+      "bytes": 37627
+    },
+    "exiftool_files/lib/Image/ExifTool/Lang/zh_tw.pm": {
+      "sha256": "412e439e70fcd82923397727f0047397ae7e1129c7bbfaf287cf06a27af31126",
+      "bytes": 27478
+    },
+    "exiftool_files/lib/Image/ExifTool/Leaf.pm": {
+      "sha256": "99a38978f0d1b5965403e66a2ed5de816b5690164f428bfe71b6dc0a92940d9b",
+      "bytes": 16715
+    },
+    "exiftool_files/lib/Image/ExifTool/LIF.pm": {
+      "sha256": "ae1b7b1247dd92312e0b751167c15b53eaa6e04ab8ac1bbdae2ce3f22da2a0ab",
+      "bytes": 5108
+    },
+    "exiftool_files/lib/Image/ExifTool/LigoGPS.pm": {
+      "sha256": "2d9e7ac8f628dac8b674915a13193b40244a98b26c3a8932ff7aac1830f8b128",
+      "bytes": 18849
+    },
+    "exiftool_files/lib/Image/ExifTool/LNK.pm": {
+      "sha256": "72e337e15063e86a569762e54cce4df615a445cb439329c5e94fc1c21fc48985",
+      "bytes": 23754
+    },
+    "exiftool_files/lib/Image/ExifTool/Lytro.pm": {
+      "sha256": "8a65b4dfa41162b5c30d1e7e9fa8bf43cc1f72208c1caef7526811ed783453b8",
+      "bytes": 7766
+    },
+    "exiftool_files/lib/Image/ExifTool/M2TS.pm": {
+      "sha256": "cf77f1a8d772e75c6cbee4b2244ec518b2febe5944748f61ff568cfca87f7244",
+      "bytes": 48901
+    },
+    "exiftool_files/lib/Image/ExifTool/MacOS.pm": {
+      "sha256": "b6c7fc22501e1dc32db54f1302aada128ae39a5838399e8c6176b58dd9601718",
+      "bytes": 31978
+    },
+    "exiftool_files/lib/Image/ExifTool/MakerNotes.pm": {
+      "sha256": "19ff9f4911aae69895aabab6623c6da084f83102442fd40e30bd61d68a5bf68d",
+      "bytes": 72056
+    },
+    "exiftool_files/lib/Image/ExifTool/Matroska.pm": {
+      "sha256": "2bc0e43f715ae00aee5fb89d24fdcb2486ef9759a90fe37e45bf1e9da95ec136",
+      "bytes": 47478
+    },
+    "exiftool_files/lib/Image/ExifTool/Microsoft.pm": {
+      "sha256": "5ad186d7ef4be820228c2a5afe799721701d343fad32dbbf4927cc29c98c6470",
+      "bytes": 59587
+    },
+    "exiftool_files/lib/Image/ExifTool/MIE.pm": {
+      "sha256": "fadf3051a880e43e904c0871806b75db29feb88c84256a04df7c6927e97529ea",
+      "bytes": 105281
+    },
+    "exiftool_files/lib/Image/ExifTool/MIEUnits.pod": {
+      "sha256": "2c92d171ae7503b4886c261af475d61c416b2362be157eae8cc35df1722cd366",
+      "bytes": 14005
+    },
+    "exiftool_files/lib/Image/ExifTool/MIFF.pm": {
+      "sha256": "cc3baf80075b5f0aa86399dfb1be1d7a1cc141731343d9b11d58a7aa3f9df7f0",
+      "bytes": 9263
+    },
+    "exiftool_files/lib/Image/ExifTool/Minolta.pm": {
+      "sha256": "62b81597fecb2680dd99372b7f18aa42a38476e79ee9dcb0f61e704b0c9ff2f4",
+      "bytes": 102220
+    },
+    "exiftool_files/lib/Image/ExifTool/MinoltaRaw.pm": {
+      "sha256": "22520b84334c0692b7aacf9f2847c689420845cabd927197abcee844a9b9ee87",
+      "bytes": 16946
+    },
+    "exiftool_files/lib/Image/ExifTool/MISB.pm": {
+      "sha256": "d729eceda7859768c1f931bd9125ad54cccbf50680069d9d43a0688246c96bfa",
+      "bytes": 23383
+    },
+    "exiftool_files/lib/Image/ExifTool/MNG.pm": {
+      "sha256": "89e7329483344b058f5bf07dd7fe0a8704afd73c8bf2f1f81c2551209889c9bd",
+      "bytes": 16606
+    },
+    "exiftool_files/lib/Image/ExifTool/MOI.pm": {
+      "sha256": "2f48f1f807ca22c4bc853b1336ad66477dd3a788b72feb520d4d9bef101cd2f9",
+      "bytes": 4241
+    },
+    "exiftool_files/lib/Image/ExifTool/Motorola.pm": {
+      "sha256": "9e0ed4ed3b967a86a4ef4d589f8ed9a7d8fc39d9de9b468287c84eec83c26836",
+      "bytes": 5672
+    },
+    "exiftool_files/lib/Image/ExifTool/MPC.pm": {
+      "sha256": "bdc7ac40917bb1101075ec51924f258e468efb657b861dec2774b94afd723bd5",
+      "bytes": 4152
+    },
+    "exiftool_files/lib/Image/ExifTool/MPEG.pm": {
+      "sha256": "206fa7ae5d61eb6f0cca8bc278a2b60a3efc9f0c1e89c89ed4cb3dc131ef8894",
+      "bytes": 22859
+    },
+    "exiftool_files/lib/Image/ExifTool/MPF.pm": {
+      "sha256": "26e4b5f8e57541f5888b8ead6ae42dda23f8eb3d335e82339075ba7a9c96e217",
+      "bytes": 9446
+    },
+    "exiftool_files/lib/Image/ExifTool/MRC.pm": {
+      "sha256": "976e0b223617d56554238f0b418d95a4c27b287ac8d29ff495ee3f400ccd2a47",
+      "bytes": 18835
+    },
+    "exiftool_files/lib/Image/ExifTool/MWG.pm": {
+      "sha256": "5e719020f60ca30153a03a771e2f1ca621c9734d5dc4fbfafb7416ee22f98da5",
+      "bytes": 31464
+    },
+    "exiftool_files/lib/Image/ExifTool/MXF.pm": {
+      "sha256": "2d3235f0f5a9f1b6db6b7b8da43a5388bab76aaa37e088e5f749fdf8e0adde0a",
+      "bytes": 258707
+    },
+    "exiftool_files/lib/Image/ExifTool/Nikon.pm": {
+      "sha256": "eac6e94fbe21381fb6402a58924caaa4e349bd222dfc6153949385846540ff65",
+      "bytes": 559376
+    },
+    "exiftool_files/lib/Image/ExifTool/NikonCapture.pm": {
+      "sha256": "05f2526e904dd9f438d112c76dcb90bf2ac707c61a6afc956d7b171c74fb49e1",
+      "bytes": 28807
+    },
+    "exiftool_files/lib/Image/ExifTool/NikonCustom.pm": {
+      "sha256": "d1e24d5a11f8b12ae02f4b75ed20600cba2811d596de36e9182ea067ce83c49d",
+      "bytes": 360196
+    },
+    "exiftool_files/lib/Image/ExifTool/NikonSettings.pm": {
+      "sha256": "992c8b9ae5e79dc37751ed230de782a137f2203f1f74ced10b83b077faa08a38",
+      "bytes": 75338
+    },
+    "exiftool_files/lib/Image/ExifTool/Nintendo.pm": {
+      "sha256": "b59313b5f0b0a20246aa87dd4284747e5560aaedb9caf111d5149acc353b3b00",
+      "bytes": 3322
+    },
+    "exiftool_files/lib/Image/ExifTool/Ogg.pm": {
+      "sha256": "6329fe438e57ac08c838050feb428f2d8be233c388842744f164425c4e2cc4d3",
+      "bytes": 9063
+    },
+    "exiftool_files/lib/Image/ExifTool/Olympus.pm": {
+      "sha256": "80955b0cdf21fb2c1109cfa89612ed22e7bffef97c2aae7d34127197f27bca9b",
+      "bytes": 157719
+    },
+    "exiftool_files/lib/Image/ExifTool/OOXML.pm": {
+      "sha256": "a9e37aabac572b0079bea74cfc52e3812863a9fbb6a329473a991a5c3dcee497",
+      "bytes": 14045
+    },
+    "exiftool_files/lib/Image/ExifTool/OpenEXR.pm": {
+      "sha256": "0805a67691f42f1b0cf56499cc6aa439a32d89396c7a5b28604a4a74be8aa7b8",
+      "bytes": 12157
+    },
+    "exiftool_files/lib/Image/ExifTool/Opus.pm": {
+      "sha256": "9067eca087a59b8c154f42b6ec71976335d6f2cae5ae6c12e10df56640f336cf",
+      "bytes": 2270
+    },
+    "exiftool_files/lib/Image/ExifTool/Other.pm": {
+      "sha256": "c3477e8d39e12cdabd3bd73def5c7f65e7ed1c10b875a7d641ce9a912757d330",
+      "bytes": 2700
+    },
+    "exiftool_files/lib/Image/ExifTool/Palm.pm": {
+      "sha256": "3eb57f43c7ca714e2cd6268b2aa7b6dc37b6580465aeb411aa785487d4e86e7e",
+      "bytes": 12184
+    },
+    "exiftool_files/lib/Image/ExifTool/Panasonic.pm": {
+      "sha256": "9f07dd0fc253a498a4897f2e8c60cdaa0d78ef31d3f461bd235bc77b24cb80a5",
+      "bytes": 102717
+    },
+    "exiftool_files/lib/Image/ExifTool/PanasonicRaw.pm": {
+      "sha256": "6d715149edb4af04d1211484505a9a53f583587faf2d87b20f565e564a697bef",
+      "bytes": 34923
+    },
+    "exiftool_files/lib/Image/ExifTool/Parrot.pm": {
+      "sha256": "d98a879fcc6b3ce01818705cf461dcd21dae73a441d75cee99f6a3db4012060e",
+      "bytes": 26245
+    },
+    "exiftool_files/lib/Image/ExifTool/PCAP.pm": {
+      "sha256": "7461892a34bae2c33c4a1064a209120c3b60d1a028c8561da729b1e9637faa59",
+      "bytes": 15840
+    },
+    "exiftool_files/lib/Image/ExifTool/PCX.pm": {
+      "sha256": "5219908cc55044ca55c49c5901ea3065092ab58ddac13c73ef26fc87a518c323",
+      "bytes": 3810
+    },
+    "exiftool_files/lib/Image/ExifTool/PDF.pm": {
+      "sha256": "b030aa1188e956d281d1e9adc417472469dacc99e8ef8137f6f7a4f5e9ffc74b",
+      "bytes": 97655
+    },
+    "exiftool_files/lib/Image/ExifTool/Pentax.pm": {
+      "sha256": "0bf0fa860cc133e0998d058cfbc3fa56654c1be6b48ebe9ba6f089ecc33b42fe",
+      "bytes": 252757
+    },
+    "exiftool_files/lib/Image/ExifTool/PGF.pm": {
+      "sha256": "31381df4e8604b4a0cccd90ae0d86c1be816771644ca676c91dbd9f999883f9e",
+      "bytes": 4135
+    },
+    "exiftool_files/lib/Image/ExifTool/PhaseOne.pm": {
+      "sha256": "e3e0d4921154d16aa82463893df0d8153017a60bffadbaaaaf9755feda8f173d",
+      "bytes": 27408
+    },
+    "exiftool_files/lib/Image/ExifTool/PhotoCD.pm": {
+      "sha256": "26521b1086a8d7d5b0c7520cf16603c5d0e661a2a8eaa865d37a97b197124ebb",
+      "bytes": 18688
+    },
+    "exiftool_files/lib/Image/ExifTool/PhotoMechanic.pm": {
+      "sha256": "058c201f5c66871ef017426323eea2b4cc48f6c3dc3d297684c398aca36fc8bb",
+      "bytes": 8325
+    },
+    "exiftool_files/lib/Image/ExifTool/Photoshop.pm": {
+      "sha256": "db4c4f89d8ed10b4ad1a9ee712fc1af308e1b31442d42d4982480bc8052bf245",
+      "bytes": 48000
+    },
+    "exiftool_files/lib/Image/ExifTool/PICT.pm": {
+      "sha256": "6f95c131ffcb0e3f9d7691ed1935185c67cba3d863d6f8de84e984181c35aa78",
+      "bytes": 33998
+    },
+    "exiftool_files/lib/Image/ExifTool/PLIST.pm": {
+      "sha256": "14b630e885b2fec6fc0dd2170afa409a12915a7297cdd9cf73b2ed441b22fe75",
+      "bytes": 20790
+    },
+    "exiftool_files/lib/Image/ExifTool/Plot.pm": {
+      "sha256": "8e2f7c43788c648fdbfdfb32b402016dd46253d431c1b47c8bd4a168fbe35c1b",
+      "bytes": 29322
+    },
+    "exiftool_files/lib/Image/ExifTool/PLUS.pm": {
+      "sha256": "afa6a163ca319a2188f6f2a3943e969b9a36b3e77bcb8e1d07c743bcf3a245c0",
+      "bytes": 152122
+    },
+    "exiftool_files/lib/Image/ExifTool/PNG.pm": {
+      "sha256": "6f9728eb58549d34a7e0e319f038e569a942d7c2372d6b4079e2b007b325480f",
+      "bytes": 67518
+    },
+    "exiftool_files/lib/Image/ExifTool/PostScript.pm": {
+      "sha256": "e8a208b4d98d780e5f66611c2b9eab8c11726a49f025672228c9395737d839ad",
+      "bytes": 29588
+    },
+    "exiftool_files/lib/Image/ExifTool/PPM.pm": {
+      "sha256": "ea83f31f932087f928614297f96aa7e2c6b40d25495a423299c7fb1a3a03037f",
+      "bytes": 5492
+    },
+    "exiftool_files/lib/Image/ExifTool/PrintIM.pm": {
+      "sha256": "b8145293c39328c3d2e24f9c358a2c2db46b64579b5dd933fc75689c61256c62",
+      "bytes": 3521
+    },
+    "exiftool_files/lib/Image/ExifTool/Protobuf.pm": {
+      "sha256": "d6bf30ef9757530e3d012692b9f5cdf15c40ed7dd139f7f62b8ca21f8aa621fb",
+      "bytes": 10802
+    },
+    "exiftool_files/lib/Image/ExifTool/PSP.pm": {
+      "sha256": "543f304402dfc38eb40e6aa5d9531ba78a7a12507fd27c93d05c734f101983bc",
+      "bytes": 9235
+    },
+    "exiftool_files/lib/Image/ExifTool/Qualcomm.pm": {
+      "sha256": "d8c91bf12676225d04e3fdf82b139b6f282482080cc888db3eefa1c1eac2763d",
+      "bytes": 47818
+    },
+    "exiftool_files/lib/Image/ExifTool/QuickTime.pm": {
+      "sha256": "c45706d8b767a1b76ae43a26d7da28d201976a2d04470aab93ef38e56f59bedb",
+      "bytes": 459437
+    },
+    "exiftool_files/lib/Image/ExifTool/QuickTimeStream.pl": {
+      "sha256": "7ea3773c21c0609ee9f1ef858b2d6bc71b51502803a0f71945a7da467124229e",
+      "bytes": 176464
+    },
+    "exiftool_files/lib/Image/ExifTool/Radiance.pm": {
+      "sha256": "0b7104f6ba02ba19127ad6c1960ad4ec1fef7c4dc65e6a299412b1be741f7846",
+      "bytes": 4665
+    },
+    "exiftool_files/lib/Image/ExifTool/Rawzor.pm": {
+      "sha256": "bc343f3bd62a9aa8dfa98575c7cfbc87e7b5e6e11b4e10fa0162fc261e6c9e24",
+      "bytes": 6322
+    },
+    "exiftool_files/lib/Image/ExifTool/README": {
+      "sha256": "7e644675567131769408395d0728e371695dbcb6d5a86ca0e36ca55702f99650",
+      "bytes": 70527
+    },
+    "exiftool_files/lib/Image/ExifTool/Real.pm": {
+      "sha256": "4a16ba4ef067e6bc8f04778965d26ebd15c60d4eea63a5e29e0342b3c47ccc54",
+      "bytes": 27549
+    },
+    "exiftool_files/lib/Image/ExifTool/Reconyx.pm": {
+      "sha256": "bb60b515f781a7995e6c537ef878fa3bfd874d99108b46cfc162fdf970a65208",
+      "bytes": 25101
+    },
+    "exiftool_files/lib/Image/ExifTool/Red.pm": {
+      "sha256": "ef555d4b1bbb7ac4e231d2e5db6515876448cc09254f30f646315ed72357407a",
+      "bytes": 11084
+    },
+    "exiftool_files/lib/Image/ExifTool/Ricoh.pm": {
+      "sha256": "1baabd4a1ae2c6d0971de27dd691e58818e68a8ce4f41e5d39e968d8e16cbf03",
+      "bytes": 41991
+    },
+    "exiftool_files/lib/Image/ExifTool/RIFF.pm": {
+      "sha256": "55f4ddc4767ee67504367673e8568de2977d97df57b25d98b78c7f0985ed14b6",
+      "bytes": 80827
+    },
+    "exiftool_files/lib/Image/ExifTool/RSRC.pm": {
+      "sha256": "1cbac6cac16c92ed5343aabafbe3249f7c00d43b35f5e4175e2a0ba40fd5a34f",
+      "bytes": 9814
+    },
+    "exiftool_files/lib/Image/ExifTool/RTF.pm": {
+      "sha256": "aaa0d8ad2ee40a6f80d9e1a70e1e784538c5429d3bfb6216aab568e116fe33a0",
+      "bytes": 13776
+    },
+    "exiftool_files/lib/Image/ExifTool/Samsung.pm": {
+      "sha256": "70d95708ab379802a26ee769b7cb9a6b64be67dd0a6227b320d5d1b76a6b30c0",
+      "bytes": 67711
+    },
+    "exiftool_files/lib/Image/ExifTool/Sanyo.pm": {
+      "sha256": "16c25af7cff52e616ac60bed00cf0f77883c302b9edc78b12bd17965a8b4603c",
+      "bytes": 12116
+    },
+    "exiftool_files/lib/Image/ExifTool/Scalado.pm": {
+      "sha256": "aa923d8a8e366b23e657649f3d7d1bfec7744d45663c2db942788f578b421f90",
+      "bytes": 4006
+    },
+    "exiftool_files/lib/Image/ExifTool/Shift.pl": {
+      "sha256": "faa8aaaac79bc9ec84bcb602953428f25c14f2a7c5c9b51878ceca087a8cf878",
+      "bytes": 23773
+    },
+    "exiftool_files/lib/Image/ExifTool/Shortcuts.pm": {
+      "sha256": "f08a0f5b1e03862db33414abbe925cb3ec0986c19c672992e261735fb2e1f69b",
+      "bytes": 10303
+    },
+    "exiftool_files/lib/Image/ExifTool/Sigma.pm": {
+      "sha256": "4eb6fad7e8dbaf1348ed1d7d8593a1b7a924776c6e84c3e276c2e6b701db5908",
+      "bytes": 35879
+    },
+    "exiftool_files/lib/Image/ExifTool/SigmaRaw.pm": {
+      "sha256": "5806962ff15738e15eb1dad5f024b5cccaa2f16b0665a083278f8f930dce700f",
+      "bytes": 25684
+    },
+    "exiftool_files/lib/Image/ExifTool/Sony.pm": {
+      "sha256": "2662dae3d98a4ade9888d262ca112a39ea99d6edce6d0fca59a1bca702bef451",
+      "bytes": 473978
+    },
+    "exiftool_files/lib/Image/ExifTool/SonyIDC.pm": {
+      "sha256": "94ee7c775528018e486fe5fe23250e9fb3ef5e1e4b001f5bbcc51fefb733e6a8",
+      "bytes": 12237
+    },
+    "exiftool_files/lib/Image/ExifTool/Stim.pm": {
+      "sha256": "4d97e3691d13467db5866633d4a7b1137ffedc3b90ea7fe576e311272227cc07",
+      "bytes": 4640
+    },
+    "exiftool_files/lib/Image/ExifTool/TagInfoXML.pm": {
+      "sha256": "87be09e0e14e7e0f0ce3eb973318fea56d6f44b83d6e7ddbdbdd3bde0709e5ee",
+      "bytes": 34455
+    },
+    "exiftool_files/lib/Image/ExifTool/TagLookup.pm": {
+      "sha256": "fd6b5b5d93a6b8120f028ad397147c4811bae0802c068033dff3600a0242fa60",
+      "bytes": 748175
+    },
+    "exiftool_files/lib/Image/ExifTool/TagNames.pod": {
+      "sha256": "d85464ccc236df67fc34fda139a748c9cdefa71b45334b81aba36873d240e41d",
+      "bytes": 2066698
+    },
+    "exiftool_files/lib/Image/ExifTool/Text.pm": {
+      "sha256": "5e0fb97acbfc217c6454241afe1e4ef14ab3ab7b11331a98fc3190c55dfcdaf8",
+      "bytes": 8387
+    },
+    "exiftool_files/lib/Image/ExifTool/Theora.pm": {
+      "sha256": "120af7442296723c946e2bfb0a1147cf7c8fda3abcf68044f70d34a93a47b4ca",
+      "bytes": 3496
+    },
+    "exiftool_files/lib/Image/ExifTool/TNEF.pm": {
+      "sha256": "b9d06f3618152847f980722729dfcc7349e1fb6c473116e77658e96125a408d9",
+      "bytes": 18329
+    },
+    "exiftool_files/lib/Image/ExifTool/Torrent.pm": {
+      "sha256": "1fe8fc2d4571c6f6bfd7a698875c229dc2ed0e35a6933f5184dd7047039b05a5",
+      "bytes": 11848
+    },
+    "exiftool_files/lib/Image/ExifTool/Trailer.pm": {
+      "sha256": "f0880142ec2f7b7c7c3921f2480a43524dcf580849664e89ce8f7dce5905bc3e",
+      "bytes": 12586
+    },
+    "exiftool_files/lib/Image/ExifTool/Unknown.pm": {
+      "sha256": "3e56b04165fe06a74ce73cbe47cbcef8eb8d25328e4cb4877c6c55592be7cee0",
+      "bytes": 1731
+    },
+    "exiftool_files/lib/Image/ExifTool/Validate.pm": {
+      "sha256": "175e7861373d0842b56e1c7c756ec9f9025cb89ec4635473960c30f98f14c1a9",
+      "bytes": 31424
+    },
+    "exiftool_files/lib/Image/ExifTool/VCard.pm": {
+      "sha256": "88ac8ce3061eb5c26bb4210c76a6159fd95b2812c7d4c06c7b757db029984e6b",
+      "bytes": 18242
+    },
+    "exiftool_files/lib/Image/ExifTool/Vorbis.pm": {
+      "sha256": "1639c4b5996a1851d8861fa0428459a38564d74868ea513e2f8a3b322e32244e",
+      "bytes": 8321
+    },
+    "exiftool_files/lib/Image/ExifTool/WavPack.pm": {
+      "sha256": "91cef3e4cb25cb0b417da9ed4bf6a72dc8254e7bb1fc81a461f3e74e0b2dc8e8",
+      "bytes": 3869
+    },
+    "exiftool_files/lib/Image/ExifTool/WPG.pm": {
+      "sha256": "2bc36b55a50299c79230837d674ca0201c6235c7b60075f7a6f5f93170f9b259",
+      "bytes": 9939
+    },
+    "exiftool_files/lib/Image/ExifTool/WriteCanonRaw.pl": {
+      "sha256": "f94c8762f4c14743bd37a2bf533a0c773882b993550a52667d2fc2a33bae6261",
+      "bytes": 25152
+    },
+    "exiftool_files/lib/Image/ExifTool/WriteExif.pl": {
+      "sha256": "718570537c4e8c68f3748bb57c7133d8267c7b4b8a2cc880e447d2343c992c08",
+      "bytes": 143519
+    },
+    "exiftool_files/lib/Image/ExifTool/WriteIPTC.pl": {
+      "sha256": "321b2c24c69f936a1528ba2c2b1ba635a2479392525b8c1c74ae8bb7913a3b8a",
+      "bytes": 30224
+    },
+    "exiftool_files/lib/Image/ExifTool/WritePDF.pl": {
+      "sha256": "38a58cd58bab838fcd9b55ae9ecc6c86e35acb92743659263b984c886f12935d",
+      "bytes": 30776
+    },
+    "exiftool_files/lib/Image/ExifTool/WritePhotoshop.pl": {
+      "sha256": "bdbedbf8426d3065ae454a7e3b91c14138d7bd76a6a612e1f177d37bf471203f",
+      "bytes": 11172
+    },
+    "exiftool_files/lib/Image/ExifTool/WritePNG.pl": {
+      "sha256": "6adcf3cfa00be41800458e939781cbe4e6da7dc47475c96ed2aea1b42bccc539",
+      "bytes": 16453
+    },
+    "exiftool_files/lib/Image/ExifTool/WritePostScript.pl": {
+      "sha256": "6e75565c9d03dd76f289880b4463e3ea41681934455dccf088b6022dc2b94f3e",
+      "bytes": 27353
+    },
+    "exiftool_files/lib/Image/ExifTool/WriteQuickTime.pl": {
+      "sha256": "c6e546f4eb313a52030ff40150d575c9b9a7bb74c1c5f14ddc01968b96ad5afa",
+      "bytes": 108021
+    },
+    "exiftool_files/lib/Image/ExifTool/Writer.pl": {
+      "sha256": "a0c89484aa8a114d699eb9ccf6f79f9f772a3fb7cc8cbd56a6cff620a0cbac9c",
+      "bytes": 327285
+    },
+    "exiftool_files/lib/Image/ExifTool/WriteRIFF.pl": {
+      "sha256": "f304cad6d43d4c213ba485c3d3d85a3f29c22506b8c58add2ad1f52d945f637d",
+      "bytes": 16549
+    },
+    "exiftool_files/lib/Image/ExifTool/WriteXMP.pl": {
+      "sha256": "794b0bd8a3dab23af95643c34d89bebf629482cb388254fdc7b1a9fcba37510b",
+      "bytes": 73604
+    },
+    "exiftool_files/lib/Image/ExifTool/WTV.pm": {
+      "sha256": "bf2ea3b94a1d88dc50ef5d7b0ca9c0eff8b38d7baf1bc11fea152058a55fb190",
+      "bytes": 13291
+    },
+    "exiftool_files/lib/Image/ExifTool/XISF.pm": {
+      "sha256": "6c9f2a0ab5018e8b19a70236e2ac680b61b4f514be7e8d75f39727837335b596",
+      "bytes": 5715
+    },
+    "exiftool_files/lib/Image/ExifTool/XMP.pm": {
+      "sha256": "aabe55b6feef2c4b1601a5735da99447ebf6c0f8586d3e0383da18bdbb18411c",
+      "bytes": 193054
+    },
+    "exiftool_files/lib/Image/ExifTool/XMP2.pl": {
+      "sha256": "7eeac498d5048930c8f1633b54ec65e4edc120df07b2d6f6c2451306786a18de",
+      "bytes": 75103
+    },
+    "exiftool_files/lib/Image/ExifTool/XMPStruct.pl": {
+      "sha256": "9c47fca2a20d709a08fa020b19df1dc31682d30bf366d1c14f9b70e844d6343f",
+      "bytes": 40986
+    },
+    "exiftool_files/lib/Image/ExifTool/ZIP.pm": {
+      "sha256": "503eba05715c87e3b30009bdc27a405ce40824f161e6a70f7a79bd21966042a9",
+      "bytes": 33459
+    },
+    "exiftool_files/lib/Image/ExifTool/ZISRAW.pm": {
+      "sha256": "c3f241816d176b3992251d6325fe4f5ec6a149bc38c092943368538ae2578c2e",
+      "bytes": 8043
+    },
+    "exiftool_files/lib/Image/ExifTool.pm": {
+      "sha256": "4dedca3fae3d4cca30dfdd3133db34a3e1d770db7a7d87a9e18bd321391d7f39",
+      "bytes": 445580
+    },
+    "exiftool_files/lib/Image/ExifTool.pod": {
+      "sha256": "7108f71dab9880d9e0b477411e43696fa6feac0f64372a24e346899c606c5b14",
+      "bytes": 117656
+    },
+    "exiftool_files/lib/integer.pm": {
+      "sha256": "eb62cc3ee22a592bc673e07158927d1a6536075d33258fc67ff91e3f720cf463",
+      "bytes": 3254
+    },
+    "exiftool_files/lib/IO/Compress/Adapter/Bzip2.pm": {
+      "sha256": "3ec38a0b2db5bc9d9e5ba9b227d08b716fa3465b9669bcec793ae269062cba4c",
+      "bytes": 2564
+    },
+    "exiftool_files/lib/IO/Compress/Adapter/Deflate.pm": {
+      "sha256": "99dfb2bd6e4ff9705d1570bed1c37776a3ede90f085b33ca37e9eecbd433fd55",
+      "bytes": 3041
+    },
+    "exiftool_files/lib/IO/Compress/Base/Common.pm": {
+      "sha256": "bd2b124b1d8f71be1b295421eee7d40b70dde9e7bf32ad2b5887b75956d37d24",
+      "bytes": 22774
+    },
+    "exiftool_files/lib/IO/Compress/Base.pm": {
+      "sha256": "729ebaa5527cca3ee9a234dce2aef0c7e2991bea83ed8d297ca65d75ad8b1b26",
+      "bytes": 24024
+    },
+    "exiftool_files/lib/IO/Compress/Brotli.pm": {
+      "sha256": "17e532d793cba0158af32dd3e1be132db42e67a79a910c2f82607dfc570548d7",
+      "bytes": 3445
+    },
+    "exiftool_files/lib/IO/Compress/Bzip2.pm": {
+      "sha256": "8bf20117fa4079ab1baa954a720ae10f8e081acedc6e114af0cccc6bfbcceaf5",
+      "bytes": 21305
+    },
+    "exiftool_files/lib/IO/Compress/Gzip/Constants.pm": {
+      "sha256": "6cb5febcf22a0d6ababd9db5bf562d605935c901b58e0f79ea8d7819819c1f99",
+      "bytes": 3883
+    },
+    "exiftool_files/lib/IO/Compress/Gzip.pm": {
+      "sha256": "14e2a1bb28068bec7c99cbe79c447b192b6b0b2d3b5bf3638805ad796adfab08",
+      "bytes": 35164
+    },
+    "exiftool_files/lib/IO/Compress/RawDeflate.pm": {
+      "sha256": "ef0d517f54ebae860e741438b0c2d422639100a5cf7c63ec6d379ec7936adf95",
+      "bytes": 26901
+    },
+    "exiftool_files/lib/IO/Compress/Zlib/Extra.pm": {
+      "sha256": "67587e1cef0793aa27b29c35d8b061a71279d8f4e366fecc8f943ad80a464cf3",
+      "bytes": 5647
+    },
+    "exiftool_files/lib/IO/Dir.pm": {
+      "sha256": "2b0617bc261954c37f54133afa694ba47063937114f20d83e4fec9835c64490b",
+      "bytes": 5326
+    },
+    "exiftool_files/lib/IO/File.pm": {
+      "sha256": "997417bcda6ba4fb23ec8038c3d844bf2417c1681c354e90b09242d4ddd2a8aa",
+      "bytes": 4872
+    },
+    "exiftool_files/lib/IO/Handle.pm": {
+      "sha256": "ba0cc59021f01c16c15225bea01603270b8b7dc318ac4c13751e499f2ab8a982",
+      "bytes": 16641
+    },
+    "exiftool_files/lib/IO/Pipe.pm": {
+      "sha256": "30c2a6cdaba7b560ee3d2589187c1908b8498f8a69c6067072639d179a8cc511",
+      "bytes": 5461
+    },
+    "exiftool_files/lib/IO/Seekable.pm": {
+      "sha256": "27d7071cd0daaef64ea3b7890719dec0301a6fe8de2bca2ad3bd247797b31230",
+      "bytes": 2891
+    },
+    "exiftool_files/lib/IO/Select.pm": {
+      "sha256": "be68d9d9a1694c26bb3f0e64a11fd1123f304afdb639b499e3fbf9e5b8986078",
+      "bytes": 9263
+    },
+    "exiftool_files/lib/IO/Socket/INET.pm": {
+      "sha256": "1a5c9fcc761b518aaf58b01edb337803e2062bece2342e15819cad5dc6e63966",
+      "bytes": 12759
+    },
+    "exiftool_files/lib/IO/Socket/UNIX.pm": {
+      "sha256": "7b6dc231293f108e86cc58a1a18c2addded3a34284be645a6a252b8e5e3b3406",
+      "bytes": 3950
+    },
+    "exiftool_files/lib/IO/Socket.pm": {
+      "sha256": "d8a2953fc9fadaf58d6c9c4e3288c6bceea2a96712c10c178b6815ee91ef6083",
+      "bytes": 28361
+    },
+    "exiftool_files/lib/IO/String.pm": {
+      "sha256": "01c8d19c6fe9b0819e34fad73df4670ca904a69a5c519c361e06c73074f83a71",
+      "bytes": 7802
+    },
+    "exiftool_files/lib/IO/Uncompress/Adapter/Inflate.pm": {
+      "sha256": "f2820ebcde81b35d34aa96e060ec72ce87cf1c24bfea83a2d7204c93f1e5322e",
+      "bytes": 3259
+    },
+    "exiftool_files/lib/IO/Uncompress/Base.pm": {
+      "sha256": "9f229d9467a12165ac6a0962ce2aa09969b0b9f43b809f6caf0a563a4338ebfd",
+      "bytes": 38337
+    },
+    "exiftool_files/lib/IO/Uncompress/Brotli.pm": {
+      "sha256": "e5236b28d5dee30e99fee9d4cdd4379ed34c91872ca388aef7b33704abc8c24a",
+      "bytes": 2692
+    },
+    "exiftool_files/lib/IO/Uncompress/Gunzip.pm": {
+      "sha256": "cab56049a7e88a4919189a82089f38e341892a3fc1ef09be11dc98e8884211b8",
+      "bytes": 32152
+    },
+    "exiftool_files/lib/IO/Uncompress/RawInflate.pm": {
+      "sha256": "bc37f9ccc51077a2c048d32f64631896bcc7cec6931c4190f39c647ecddc9775",
+      "bytes": 31841
+    },
+    "exiftool_files/lib/IO.pm": {
+      "sha256": "fcd37074a677be88768f400f04d6d66a7e9797d48cbf78a26a472df5896d5ae3",
+      "bytes": 1456
+    },
+    "exiftool_files/lib/List/Util.pm": {
+      "sha256": "0d3135c14b4d4156a0de8156f2d33f54c6f0b6233b2f6fe5d4b9122e9fef1a5a",
+      "bytes": 24055
+    },
+    "exiftool_files/lib/locale.pm": {
+      "sha256": "2b21c1ea5095b62d18db3278ce9f4d486ca8c9572f4485a9ae8012e161adaa2d",
+      "bytes": 4855
+    },
+    "exiftool_files/lib/Math/BigFloat/Trace.pm": {
+      "sha256": "785045d2f3b1251d71b65021f04c5c013a99d2baf276c3606e3608064ef6f134",
+      "bytes": 1269
+    },
+    "exiftool_files/lib/Math/BigFloat.pm": {
+      "sha256": "7ad595a24c18e5e83c8f98f24bf452611dd5b78829af56df1236fcbe4e7b849d",
+      "bytes": 199342
+    },
+    "exiftool_files/lib/Math/BigInt/Calc.pm": {
+      "sha256": "d6833448f33582bcc736558b07e5a72541780cdc740e3e8a2e09e84a3b536e23",
+      "bytes": 73554
+    },
+    "exiftool_files/lib/Math/BigInt/FastCalc.pm": {
+      "sha256": "ba4c6959b14456116641dd5f91c73f8aa6071a469f5cdce03a60b2c7c83c17d3",
+      "bytes": 4111
+    },
+    "exiftool_files/lib/Math/BigInt/GMP.pm": {
+      "sha256": "27de490ad31eb995d59a7c0413c7baaced3127b63a4da321250a1fd379fc8669",
+      "bytes": 1058
+    },
+    "exiftool_files/lib/Math/BigInt/Lib.pm": {
+      "sha256": "f97917769970f72ab0e72f96580ee9cee76a0a3ba1622cda1b033ff4ad1bfefe",
+      "bytes": 70864
+    },
+    "exiftool_files/lib/Math/BigInt/LTM.pm": {
+      "sha256": "75d60d24d7828d918be73fc9542f03865c2111ed8ceeaedec08bd2035df6aa4c",
+      "bytes": 25685
+    },
+    "exiftool_files/lib/Math/BigInt/Trace.pm": {
+      "sha256": "aa299dac386f4b79d2c242361e4fde7490e1c7b8d33e7da63de09e8b0715b3da",
+      "bytes": 991
+    },
+    "exiftool_files/lib/Math/BigInt.pm": {
+      "sha256": "41ec57f420ae6a9da9cc9536585581d8163e790efade6bcd2339facc0a81e14a",
+      "bytes": 217779
+    },
+    "exiftool_files/lib/Math/Complex.pm": {
+      "sha256": "eccc422301a14b62a75fbb63978e80fb57f693ea5d4ff5d2dea347f891f9ce82",
+      "bytes": 50065
+    },
+    "exiftool_files/lib/MIME/Base64.pm": {
+      "sha256": "dfb1e3876b3e7f3cf9a3f23123c37464617e551802e618e54cabd7890c986cc8",
+      "bytes": 5433
+    },
+    "exiftool_files/lib/MIME/Charset/_Compat.pm": {
+      "sha256": "a21d8963b81203ea0db0caf51f539590d8a59902063168c711e47ac321f7565e",
+      "bytes": 3243
+    },
+    "exiftool_files/lib/MIME/Charset.pm": {
+      "sha256": "906c39d7641644551bf995aeca673530c387c6854ca2d664a15f25eb87666175",
+      "bytes": 36611
+    },
+    "exiftool_files/lib/mro.pm": {
+      "sha256": "4a12e17a9e8e41d3edef2e79d158d0e4ef4a3d8e346bbf2e24ebbc851e03891d",
+      "bytes": 9892
+    },
+    "exiftool_files/lib/overload/numbers.pm": {
+      "sha256": "482f02bdf621f7e7656311666a4f1caa6b329d2ec3a197b3672ad92855794f1e",
+      "bytes": 1951
+    },
+    "exiftool_files/lib/overload.pm": {
+      "sha256": "36d4c0844259013579e3e41d1a3cb7002bcf135ea5f5bb9aa036287f7ed67ccd",
+      "bytes": 53302
+    },
+    "exiftool_files/lib/overloading.pm": {
+      "sha256": "5bba56c0acdcc449ca3b73500862a5750c907d97d652978038dbc7809c4fcd07",
+      "bytes": 1808
+    },
+    "exiftool_files/lib/parent.pm": {
+      "sha256": "046169e129cfb7d4b302567de268409f175652192914abd33245cb9939f16626",
+      "bytes": 2702
+    },
+    "exiftool_files/lib/PerlIO/scalar.pm": {
+      "sha256": "d633e2e16110bd09fa6e261b5f5f653f3bdadb729691590de40b28b6d5317406",
+      "bytes": 959
+    },
+    "exiftool_files/lib/PerlIO.pm": {
+      "sha256": "183d8cc5992cd8197bd0621f0ac1c2346104327ecc4e7ccb53c26145481822b6",
+      "bytes": 14441
+    },
+    "exiftool_files/lib/Portable/Config.pm": {
+      "sha256": "56386d5b362aff25fa68554e8b33520d8fa2439c55a57ff954c476180e832b37",
+      "bytes": 2196
+    },
+    "exiftool_files/lib/Portable/CPAN.pm": {
+      "sha256": "4a5bc2cf9cb536a880286b73b6d2b1fe49488aeebb8d1b4b11959890095da555",
+      "bytes": 2084
+    },
+    "exiftool_files/lib/Portable/FileSpec.pm": {
+      "sha256": "e7297a7527f32605025d4d685d505bc3f0cc9f1842a619b97de001456d8428a3",
+      "bytes": 4987
+    },
+    "exiftool_files/lib/Portable/HomeDir.pm": {
+      "sha256": "03d5be559e9727c4f983ef7998e59a4cd0280edff09cf9515ba8e0a1e92a6f71",
+      "bytes": 2004
+    },
+    "exiftool_files/lib/Portable/LoadYaml.pm": {
+      "sha256": "af6638600e39df46dd6fa1455798fffbc18a73010e625763b3bfd90bbae12935",
+      "bytes": 13149
+    },
+    "exiftool_files/lib/Portable/minicpan.pm": {
+      "sha256": "ff8960ba5017eab8e31bd5cf7dc6ff327f9524eb0b79a776b9a268931f68bfe3",
+      "bytes": 1369
+    },
+    "exiftool_files/lib/Portable.pm": {
+      "sha256": "2b8fdfbc9a928b5b9f725ae259259db4a797aa7fa4b6921017a80a3806537c13",
+      "bytes": 4897
+    },
+    "exiftool_files/lib/POSIX.pm": {
+      "sha256": "c3ac3494b7f7e61396e4d500c93032dc00631a6d0cba6b36ab35af564740d83c",
+      "bytes": 20347
+    },
+    "exiftool_files/lib/re.pm": {
+      "sha256": "a19cba44e51203f71a22731d18d96e8bb7caf6c8f060ffe6d2b9118ff7b293eb",
+      "bytes": 25394
+    },
+    "exiftool_files/lib/Scalar/Util.pm": {
+      "sha256": "9ba58fcbefc535a73d3fc0da949d0fb1e524411dea4e8bee97529700607a98a4",
+      "bytes": 10189
+    },
+    "exiftool_files/lib/SelectSaver.pm": {
+      "sha256": "b951b99c894f701eac08b79265ff2ccbede0954f97a537d03fb78801ed645861",
+      "bytes": 1076
+    },
+    "exiftool_files/lib/Socket.pm": {
+      "sha256": "700800decc75e5ed003ec3832846bf4fd69416089109d74ed337e23d1d0099ed",
+      "bytes": 37027
+    },
+    "exiftool_files/lib/Storable.pm": {
+      "sha256": "b1c10d3135bbbbb967a9594056cdd5e908b3577ca06e77c12d83603d3af81799",
+      "bytes": 49924
+    },
+    "exiftool_files/lib/strict.pm": {
+      "sha256": "89a96f0a1a1ed78e0e9c525434b5779b2e2baa8f976dfa2f78771282fa08d88d",
+      "bytes": 4738
+    },
+    "exiftool_files/lib/Symbol.pm": {
+      "sha256": "219ec21cc059ecfeb3bc7c6e349734dd0344a06a724781a54c17811d69ed77da",
+      "bytes": 4799
+    },
+    "exiftool_files/lib/TAP/Base.pm": {
+      "sha256": "6c7a868589f2547c68e1542606729eb510b2a5091663ae3a2c00a486b062673a",
+      "bytes": 2301
+    },
+    "exiftool_files/lib/TAP/Formatter/Base.pm": {
+      "sha256": "2f3a2306725283f3fb3eb299565a8534b29d52fe9495870c0fc98ad3e2b1ad76",
+      "bytes": 11870
+    },
+    "exiftool_files/lib/TAP/Formatter/Color.pm": {
+      "sha256": "6528e3b11f157fb8803ab9499894e368224174ebbbf3abc02c3d5494e4479bcf",
+      "bytes": 2321
+    },
+    "exiftool_files/lib/TAP/Formatter/Console/ParallelSession.pm": {
+      "sha256": "2ad00543a66e4ba0eeb2cb8deb8cd0af5080c9a37e43d28f3a7df43fa56edc0c",
+      "bytes": 4183
+    },
+    "exiftool_files/lib/TAP/Formatter/Console/Session.pm": {
+      "sha256": "2fb36a942462f0d7e4e01f8dcd457e560a88f1c61b678d654c945cc7ff03733a",
+      "bytes": 5527
+    },
+    "exiftool_files/lib/TAP/Formatter/Console.pm": {
+      "sha256": "a4ae4ddf50298c9e00115f0ecbe7977c34171941226f8e28b35e5500d341ad30",
+      "bytes": 1995
+    },
+    "exiftool_files/lib/TAP/Formatter/File/Session.pm": {
+      "sha256": "64b6348dd3f5c24710694eb79d022cf1d95e599dd60e048a6157461661e6fec2",
+      "bytes": 2217
+    },
+    "exiftool_files/lib/TAP/Formatter/File.pm": {
+      "sha256": "8624178af78141eb4c10dc465f4574188223dd0fcd70c2ada1e1fff2cb0754d1",
+      "bytes": 850
+    },
+    "exiftool_files/lib/TAP/Formatter/Session.pm": {
+      "sha256": "af5a8b29350bddc35c187b0529804468a048bd3db6a478104e619a21a116d6ef",
+      "bytes": 4988
+    },
+    "exiftool_files/lib/TAP/Harness/Beyond.pod": {
+      "sha256": "da2dedd348b7747c5ca2cf106b0eb87390324ceab00df7948e98d7ff18bc17f0",
+      "bytes": 15581
+    },
+    "exiftool_files/lib/TAP/Harness/Env.pm": {
+      "sha256": "16c31b12a380ef5b83d85723f0795ca13142dd25bbb96eb2841de2722e9afe62",
+      "bytes": 5416
+    },
+    "exiftool_files/lib/TAP/Harness.pm": {
+      "sha256": "4097e5f4cfa71e7a7860ca830895a5d4963bcf92362fcb89ecc67a7f2dc56b88",
+      "bytes": 29006
+    },
+    "exiftool_files/lib/TAP/Object.pm": {
+      "sha256": "121dddea3c7df21a51303c793bd919d1f1a8706c281256ff8218d60a2a93546b",
+      "bytes": 2696
+    },
+    "exiftool_files/lib/TAP/Parser/Aggregator.pm": {
+      "sha256": "7af8c5bfe2b275bdb71e3d6706cf419ba06c1dfc14055422db2505c97867acdc",
+      "bytes": 9243
+    },
+    "exiftool_files/lib/TAP/Parser/Grammar.pm": {
+      "sha256": "a4cfb237b2ba5985ba350c069738989c4c4f8d0887dcde9bc401faa1e8f9b79a",
+      "bytes": 15666
+    },
+    "exiftool_files/lib/TAP/Parser/Iterator/Array.pm": {
+      "sha256": "193aaa5c0da3202614a6148919ba333b7262a4e00854752da9859acaca3b9098",
+      "bytes": 1696
+    },
+    "exiftool_files/lib/TAP/Parser/Iterator/Process.pm": {
+      "sha256": "898391be1b2c994d4980894f07476f03d414b9f4c39d38d3dda47aeb7375a00b",
+      "bytes": 9116
+    },
+    "exiftool_files/lib/TAP/Parser/Iterator/Stream.pm": {
+      "sha256": "32a3bdbd55340c2ba65d7a0caaa2b4a817209949cefe54955a91392699775fac",
+      "bytes": 1925
+    },
+    "exiftool_files/lib/TAP/Parser/Iterator.pm": {
+      "sha256": "ab47673c49170fce89e4a4527ada166a1c6041633da252afcb60cda75823e64c",
+      "bytes": 2998
+    },
+    "exiftool_files/lib/TAP/Parser/IteratorFactory.pm": {
+      "sha256": "1c5901a52e8bbe245e9992f5cf0be234c1f2ab618149e40d3bd5a34b9336e6af",
+      "bytes": 8307
+    },
+    "exiftool_files/lib/TAP/Parser/Multiplexer.pm": {
+      "sha256": "7bf4129bd7ba393e001ef9b4ef60563f30bfdf8256681ce819a16d98c89dd034",
+      "bytes": 4265
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Bailout.pm": {
+      "sha256": "6d28cbe3a94fdff329567d89cce52a0e1b30ca3f59245903c20d64c910c20831",
+      "bytes": 1148
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Comment.pm": {
+      "sha256": "fe043357510e64550cc72b7a6618a43e4e74ee33d980dc332660105ec4ef91a2",
+      "bytes": 986
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Plan.pm": {
+      "sha256": "1fb1f58610b8d71b4735f95d9748936b0f52e85d014517d3a6425c84a25d9296",
+      "bytes": 2048
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Pragma.pm": {
+      "sha256": "14609bc970407dae154098439bf44e1d102b66afd4b8a5a0ced7f3199656699a",
+      "bytes": 946
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Test.pm": {
+      "sha256": "7f5629a4d514c2f52a901ad45d8c828d68689bda55e455e2091be51b1263c729",
+      "bytes": 6078
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Unknown.pm": {
+      "sha256": "a65b97e1499df488828b62547154b0eff53d8c6549b72b3df80145a3493e7f61",
+      "bytes": 734
+    },
+    "exiftool_files/lib/TAP/Parser/Result/Version.pm": {
+      "sha256": "21ec38f085d83a9a583672e46a0d9c74050dd6e7ac8ef0aaad25baa96d0cb54b",
+      "bytes": 946
+    },
+    "exiftool_files/lib/TAP/Parser/Result/YAML.pm": {
+      "sha256": "96e7dae598bf749642c1faf675e1009649bd3f5bd0d85d8f46797f44866f0ca1",
+      "bytes": 880
+    },
+    "exiftool_files/lib/TAP/Parser/Result.pm": {
+      "sha256": "3d4739c3e504851cff6ee1fefb1db4aaca99ee9063d1bce20cb1fbbabe6bf613",
+      "bytes": 6145
+    },
+    "exiftool_files/lib/TAP/Parser/ResultFactory.pm": {
+      "sha256": "9ab0de32fec9429b0ad2bbc6181d1cd8bb9fec3ff851a8987843b98e53c8c880",
+      "bytes": 4065
+    },
+    "exiftool_files/lib/TAP/Parser/Scheduler/Job.pm": {
+      "sha256": "15fd7e093c58e199c602f45a3a82be7189094070c31ac298a8bfa8f916d6547b",
+      "bytes": 2201
+    },
+    "exiftool_files/lib/TAP/Parser/Scheduler/Spinner.pm": {
+      "sha256": "fb072da532ebb5df2eadb188058f9f3aea7235609a674ae9c6093150127dc19f",
+      "bytes": 990
+    },
+    "exiftool_files/lib/TAP/Parser/Scheduler.pm": {
+      "sha256": "6e9dce1b4aee701e6182117273f9b850d617483e32ae6f9ef5ed548ba646c612",
+      "bytes": 11543
+    },
+    "exiftool_files/lib/TAP/Parser/Source.pm": {
+      "sha256": "bb897086e55d3c5b7abc36660a0465fd7d3305dc086d4b771d7d8f1af8c65925",
+      "bytes": 9551
+    },
+    "exiftool_files/lib/TAP/Parser/SourceHandler/Executable.pm": {
+      "sha256": "4ddee089d5d9172fb43de35e4574eeae02d5818a4711a56caf8f3c9babb8e6a2",
+      "bytes": 4045
+    },
+    "exiftool_files/lib/TAP/Parser/SourceHandler/File.pm": {
+      "sha256": "6287b80e6e9263a744e0954f3bbde7498267723aa630d23a0d39082265813ff0",
+      "bytes": 2993
+    },
+    "exiftool_files/lib/TAP/Parser/SourceHandler/Handle.pm": {
+      "sha256": "30ec25cf2b5878dd8cbe44e1212a606e1d8b94ceabafbe4dfd58847870c1a353",
+      "bytes": 2651
+    },
+    "exiftool_files/lib/TAP/Parser/SourceHandler/Perl.pm": {
+      "sha256": "09e8afc6fc8e07cd1ff2c6242d5db495520dfdd1b35c49172156eb6ca3dc5df0",
+      "bytes": 9447
+    },
+    "exiftool_files/lib/TAP/Parser/SourceHandler/RawTAP.pm": {
+      "sha256": "019eee578f770da6b503247954390580e47ff4eee772ad9d933e703389ec91da",
+      "bytes": 2842
+    },
+    "exiftool_files/lib/TAP/Parser/SourceHandler.pm": {
+      "sha256": "5039d0b877ad31acd17fbce2afacd4e87315325738e2d39f2a5f5d4931b182ca",
+      "bytes": 5154
+    },
+    "exiftool_files/lib/TAP/Parser/YAMLish/Reader.pm": {
+      "sha256": "43f6fa1ee45644044d546bd8163b0be1353cedd3b84ba51475c7f1ff25285d44",
+      "bytes": 7603
+    },
+    "exiftool_files/lib/TAP/Parser/YAMLish/Writer.pm": {
+      "sha256": "c5ba1f0fa70212262c2ddbce739fcb22086cf055f6a7ea29b4e63e3c0f553a7f",
+      "bytes": 5235
+    },
+    "exiftool_files/lib/TAP/Parser.pm": {
+      "sha256": "bc5da1b719684d0aa54ab974b27a08465b9251038c544113095429c7d7aebbe6",
+      "bytes": 52145
+    },
+    "exiftool_files/lib/Term/Cap.pm": {
+      "sha256": "7d12f7d11646fe7a6cf76aa6d090e90769752573222bc3a331df371657cdeb92",
+      "bytes": 19774
+    },
+    "exiftool_files/lib/Test/Builder/Formatter.pm": {
+      "sha256": "6dff97cdd3f8b2634bf1cbd3fd27a58e7f537d0a51377f135362a42c680b00c0",
+      "bytes": 2122
+    },
+    "exiftool_files/lib/Test/Builder/IO/Scalar.pm": {
+      "sha256": "256e5f5393ff2e1d74531878207f265421fcab42dff41fa187e4113c90c181af",
+      "bytes": 13640
+    },
+    "exiftool_files/lib/Test/Builder/Module.pm": {
+      "sha256": "24f760abf8cc78be974300f51e1915a4b9c00251c01c49d7e003ba4ae5a1e2cd",
+      "bytes": 4079
+    },
+    "exiftool_files/lib/Test/Builder/Tester/Color.pm": {
+      "sha256": "1f95ed24054149d365fd5e1380fb8d2aa85ef6c5955656e83574d625f913b80d",
+      "bytes": 973
+    },
+    "exiftool_files/lib/Test/Builder/Tester.pm": {
+      "sha256": "b21b6213fe9489b32dd7373e7f6b38ea12abe9212f23c7ec07e7171e53cd5c61",
+      "bytes": 18035
+    },
+    "exiftool_files/lib/Test/Builder/TodoDiag.pm": {
+      "sha256": "83855bd511d32db788f1b1604f3757dadea8fea9d2f83317b1cfcc7ae41cfe2d",
+      "bytes": 1081
+    },
+    "exiftool_files/lib/Test/Builder.pm": {
+      "sha256": "18fecec89482d91104ddc27f61a30076ba00c95dac7fe670d25572541e9ea39b",
+      "bytes": 65114
+    },
+    "exiftool_files/lib/Test/Harness.pm": {
+      "sha256": "a1e5aff43ff7571d06e00ae751fc0e8115a12d250fb08fcee64ced04f9bfc1bc",
+      "bytes": 16649
+    },
+    "exiftool_files/lib/Test/More.pm": {
+      "sha256": "b34e7d0f41c1bfd186d745abf7d87b51b29c55d08a7cded88ea20779c7c0eaf3",
+      "bytes": 52697
+    },
+    "exiftool_files/lib/Test/Simple.pm": {
+      "sha256": "1817f63c44acfce66ebb0438a632f8ee8d2de2863c7161a4006e77cf6bc3cb5e",
+      "bytes": 6492
+    },
+    "exiftool_files/lib/Test/Tester/Capture.pm": {
+      "sha256": "599d83aab70329f77b5ed8dce479777df44e51bee3fcbe42af406dcb75c8dd4a",
+      "bytes": 4424
+    },
+    "exiftool_files/lib/Test/Tester/CaptureRunner.pm": {
+      "sha256": "bdfe923b0b15d78ba583fff6560c9172697c236a65f80175bb326f5d50a878e1",
+      "bytes": 1302
+    },
+    "exiftool_files/lib/Test/Tester/Delegate.pm": {
+      "sha256": "e87f5bec156b53d30fcdd98e5458c1a11e5d80134abccd586a2f8d962533b51a",
+      "bytes": 571
+    },
+    "exiftool_files/lib/Test/Tester.pm": {
+      "sha256": "2539fcbe58f3a775cec9db594c798cd8107a1b4ba6d7d9304ee8e0cf4592b55b",
+      "bytes": 18333
+    },
+    "exiftool_files/lib/Test/Tutorial.pod": {
+      "sha256": "c75ca5da3e428bc9ffd1a520d559cde2762dd275244be7924d2b819d30fe8c89",
+      "bytes": 19346
+    },
+    "exiftool_files/lib/Test/use/ok.pm": {
+      "sha256": "94dc00825ce4f68d67b079c4d1dba0f036543793ffbbeb36b022c0d91e2b46fe",
+      "bytes": 1360
+    },
+    "exiftool_files/lib/Text/ParseWords.pm": {
+      "sha256": "8a33df070a25ea3fe4e1decc3de808e6c186805fd068b02792ee01523bc9df57",
+      "bytes": 8144
+    },
+    "exiftool_files/lib/Tie/Handle.pm": {
+      "sha256": "a15263f2fbaab6927932fbdf5dc7be936cc2e577120783a36a4992c15314f0aa",
+      "bytes": 4202
+    },
+    "exiftool_files/lib/Tie/Hash.pm": {
+      "sha256": "12e565ea59a4a3a332d8fefa40a654f9482014c145f165bef3d065a59daee55a",
+      "bytes": 7639
+    },
+    "exiftool_files/lib/Tie/StdHandle.pm": {
+      "sha256": "fdeb719785a2e0213af711681c21ba9f2c9067a531fece87386ea1ff3d3f8ec0",
+      "bytes": 1389
+    },
+    "exiftool_files/lib/Time/HiRes.pm": {
+      "sha256": "e2a8fac68a3dd894c5876b1aebe4eacf5d7c58e5b1156ac627622a542d61db66",
+      "bytes": 25689
+    },
+    "exiftool_files/lib/Time/Local.pm": {
+      "sha256": "277be62ed2520a35e94a5acb8f8e4cadd6fff682b8fbcefc34648884988d3a7c",
+      "bytes": 16312
+    },
+    "exiftool_files/lib/Time/Piece.pm": {
+      "sha256": "fa366587ed15038e0717adb0a30584035fb906133d2f03281942b722975f29cc",
+      "bytes": 32204
+    },
+    "exiftool_files/lib/Time/Seconds.pm": {
+      "sha256": "fe05c1e5e516859d6d32354db8afb9b9aaf1ca38d179ca1c51a355218439fe95",
+      "bytes": 5351
+    },
+    "exiftool_files/lib/Unicode/GCString.pm": {
+      "sha256": "2442c349e9808be07d007d7c1a7be98f9690d5726446d1eee9f60db94179c2fe",
+      "bytes": 956
+    },
+    "exiftool_files/lib/Unicode/LineBreak/Constants.pm": {
+      "sha256": "bb11b9d586bda231dfdfb17f1a5132c61078e9af7b354faa2ec1072dd7491daa",
+      "bytes": 2411
+    },
+    "exiftool_files/lib/Unicode/LineBreak.pm": {
+      "sha256": "93c0f47c958521f9a2d634a9b4faac25fe0cb89a28b06dcd01a2e011dfa01032",
+      "bytes": 6432
+    },
+    "exiftool_files/lib/UNIVERSAL.pm": {
+      "sha256": "899d9399b809be16d0797decabe63cc647f7985a605ae60de860be1a439c3056",
+      "bytes": 6594
+    },
+    "exiftool_files/lib/utf8.pm": {
+      "sha256": "f29ceaa8053199d3f6ccdadd327a54c252e881507ee02701daa2b7ebd99fdc13",
+      "bytes": 10423
+    },
+    "exiftool_files/lib/vars.pm": {
+      "sha256": "84de23fb5d39572d2b0dc5d4e1cd6363017fae8f54eff90d4c8121eb1edeeb57",
+      "bytes": 2458
+    },
+    "exiftool_files/lib/warnings/register.pm": {
+      "sha256": "ce25ec34358642703ff05b546b2ac42b4f2081ab7610d8373dd94c6b78040cf4",
+      "bytes": 759
+    },
+    "exiftool_files/lib/warnings.pm": {
+      "sha256": "749cb1f346323d833651e8b5632e1454864583598a89e880e16868b6fc715538",
+      "bytes": 50537
+    },
+    "exiftool_files/lib/Win32/API/Struct.pm": {
+      "sha256": "efe2ade6974af03deb228ba0799b90dedf3a436e075d861cf61d0ca926d49c59",
+      "bytes": 18231
+    },
+    "exiftool_files/lib/Win32/API/Type.pm": {
+      "sha256": "8d182b4963ff05be524154f8541bd0053338393d6a5bf9802a11d13cd89a97fa",
+      "bytes": 12749
+    },
+    "exiftool_files/lib/Win32/API.pm": {
+      "sha256": "55ad522673bf7604ba44b0ea4d13c8491f566cdc177296f6cad560684cb58bd8",
+      "bytes": 21873
+    },
+    "exiftool_files/lib/Win32/FindFile.pm": {
+      "sha256": "ea69829059f53a269ab37a7cc5841e7e2e06d059fadf0873002030e6ae885433",
+      "bytes": 1697
+    },
+    "exiftool_files/lib/Win32.pm": {
+      "sha256": "ce8ebdc60b1a2f74602101b9067122d0e960cb07e535b0fe039b17f6cc5b3eee",
+      "bytes": 58652
+    },
+    "exiftool_files/lib/Win32API/File/cFile.pc": {
+      "sha256": "e13ca08e0feb6eb65adb072a8482ae894ffe636e6177f5ff768e5f585d142bd9",
+      "bytes": 6272
+    },
+    "exiftool_files/lib/Win32API/File.pm": {
+      "sha256": "96366abaf7a7a666a2d96690700c919324c8eb2142f4e9edfde6a0496b139d43",
+      "bytes": 97834
+    },
+    "exiftool_files/lib/XSLoader.pm": {
+      "sha256": "e1cdf1774fe9dae249d2ab70ef5b500ec09bc3f666a1853230ffd63b9e981ae1",
+      "bytes": 11647
+    },
+    "exiftool_files/libgcc_s_seh-1.dll": {
+      "sha256": "5c67505c405f717d59ff2c583a11f54300dc9bf1577713b5dbbd00588c957325",
+      "bytes": 76288
+    },
+    "exiftool_files/liblzma-5__.dll": {
+      "sha256": "f8863edc9c330456f1914ab054ef1ec839042ca3e5f172019c53760880d550e0",
+      "bytes": 154319
+    },
+    "exiftool_files/libstdc++-6.dll": {
+      "sha256": "03ad55828067fad4d24932ebb7a5b45e40c96255238775a6e02b1478e3b31d87",
+      "bytes": 1424384
+    },
+    "exiftool_files/libwinpthread-1.dll": {
+      "sha256": "0d9f9c09d4219d6c74930de38e35c454add54ba7117748f8b4f65f8eac624a96",
+      "bytes": 52224
+    },
+    "exiftool_files/LICENSE": {
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "bytes": 35149
+    },
+    "exiftool_files/Licenses_Strawberry_Perl.zip": {
+      "sha256": "8bd5fc8dc0ef3b96881ddad0974b79e86f4043f76ab318a730b084adf0890bd0",
+      "bytes": 481025
+    },
+    "exiftool_files/perl.exe": {
+      "sha256": "4d61ebe19311dbf7b9710ac2c6c402e3cba3e23b63e8b82be88e471343bed52d",
+      "bytes": 39936
+    },
+    "exiftool_files/perl532.dll": {
+      "sha256": "cfb80cfad6b868dab14f6a12083e4f3cb5714ac23b1b0e5a96f09144b116ab4c",
+      "bytes": 3423232
+    },
+    "exiftool_files/readme_windows.txt": {
+      "sha256": "a28e6c55c8cf5bfa14458cea8ffa106a54a52dd937624bdc36ed12a178239e0f",
+      "bytes": 789
+    },
+    "exiftool_files/windows_exiftool.txt": {
+      "sha256": "455b3621d4cbb7d7a7388fc6cd325485319dc151030e0c8c528abdccc5b8640c",
+      "bytes": 158810
+    },
+    "README.txt": {
+      "sha256": "eec0ce771ffebfe45f443585232bd0d1f4c2f3896fd60095471ab532a6f20386",
+      "bytes": 507
+    }
+  },
+  "license_files": {
+    "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "Licenses_Strawberry_Perl.zip": "8bd5fc8dc0ef3b96881ddad0974b79e86f4043f76ab318a730b084adf0890bd0",
+    "readme_windows.txt": "a28e6c55c8cf5bfa14458cea8ffa106a54a52dd937624bdc36ed12a178239e0f",
+    "README.txt": "eec0ce771ffebfe45f443585232bd0d1f4c2f3896fd60095471ab532a6f20386"
+  }
+}

@@ -1,5 +1,6 @@
 """Progressive previews, sustained input, bounded RAM and honest cover marks."""
 from pathlib import Path
+from fractions import Fraction
 from types import SimpleNamespace
 import shutil
 import tempfile
@@ -270,6 +271,45 @@ class RealPreviewTests(unittest.TestCase):
             self.assertGreater(positions[0].confidence, .9)
             session.close()
             self.assertTrue(session.wait(3))
+
+    def test_exact_marker_requires_matching_image_identifier_else_visual_fallback(self):
+        from livegallery.live_photo_image import build_cover_exif
+        from livegallery.live_photo_movie import rewrite_live_photo_movie
+        path, still = self.folder / 'marked.MOV', self.folder / 'marked.jpg'
+        rewrite_live_photo_movie(FIXTURES / 'VFR_PAIR.MOV', path, 'known-pair', Fraction(11, 25))
+        # Image pixels intentionally match frame 1, distinct from marker frame4.
+        with FrameReader(path) as reader:
+            frame = reader.export(1)
+        for image_id, expected, approximate in (('known-pair', 4, False), ('other-pair', 1, True), (None, 1, True)):
+            with self.subTest(image_id=image_id):
+                frame.save(still, 'JPEG', quality=95)
+                if image_id is not None:
+                    frame.save(still, 'JPEG', quality=95, exif=build_cover_exif(still, image_id, frame.size))
+                positions, found = [], threading.Event()
+                session = self.session(path, image_path=still,
+                                       on_position=lambda value: (positions.append(value), found.set()))
+                self.assertTrue(found.wait(5), session.preload_error)
+                self.assertEqual(positions[0].index, expected)
+                self.assertEqual(positions[0].approximate, approximate)
+                session.close()
+                self.assertTrue(session.wait(3))
+
+    def test_exact_marker_does_not_ignore_changed_still_signature(self):
+        from livegallery.live_photo_image import build_cover_exif
+        from livegallery.live_photo_movie import rewrite_live_photo_movie
+        path, still = self.folder / 'marked.MOV', self.folder / 'marked.jpg'
+        rewrite_live_photo_movie(FIXTURES / 'VFR_PAIR.MOV', path, 'known-pair', Fraction(11, 25))
+        frame = Image.new('RGB', (120, 90), 'blue')
+        frame.save(still)
+        frame.save(still, exif=build_cover_exif(still, 'known-pair', frame.size))
+        with FrameReader(path) as reader:
+            info = reader.metadata
+        positions = []
+        session = PreviewSession(path, info, image_path=still, on_position=positions.append)
+        self.addCleanup(session.close)
+        Image.new('RGB', (40, 30), 'red').save(still)
+        session._match_position()
+        self.assertEqual(positions, [])
 
     def test_unmatched_cover_does_not_silently_mark_frame_zero(self):
         still = self.folder / 'other.jpg'

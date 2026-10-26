@@ -13,5 +13,6 @@ portable.flag
 tools/
 vendor/
 work/
+/outputs/
 LiveViewer Cache/
 .LiveViewer-work/

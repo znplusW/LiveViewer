@@ -1,7 +1,7 @@
 """Native auxiliary windows and dock chrome; media stays in the one viewer."""
 from __future__ import annotations
 
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 from shiboken6 import isValid
@@ -49,8 +49,8 @@ class AuxiliaryWindow(QWidget):
                     self.restoreGeometry(QByteArray.fromHex(saved.encode('ascii')))
                 except (ValueError, UnicodeError):
                     pass
-            # Restoring a previous fullscreen state must never reopen pure mode
-            # without an ordinary title bar on the next explicit detach.
+            # Restore an ordinary geometry first so the requested mode can use
+            # the saved screen without persisting a transient fullscreen size.
             self.setWindowState(self.windowState() & ~Qt.WindowState.WindowFullScreen)
             self.recover_to_screens()
         finally:
@@ -63,10 +63,6 @@ class AuxiliaryWindow(QWidget):
             screen = self.screen() or QApplication.primaryScreen()
             if screen is not None:
                 self.setGeometry(screen.geometry())
-            return
-        if self.isMaximized():
-            # The window manager owns its maximized geometry. Applying a
-            # screen-sized rect here would overwrite the normal restore rect.
             return
         target = accessible_geometry(self.geometry(), [s.availableGeometry() for s in QApplication.screens()])
         if target.isValid() and target != self.geometry():
@@ -103,17 +99,14 @@ class AuxiliaryWindow(QWidget):
 
 class PreviewWindow(AuxiliaryWindow):
     returnRequested = Signal()
-    initialGeometryReady = Signal()
 
     def __init__(self):
         super().__init__('LiveViewer · 独立预览窗')
         self.setMinimumSize(320, 240)
-        self._fullscreen_normal_geometry = None
-        self._fullscreen_maximized = False
-        self._initial_show_pending = False
-        self._initial_geometry_timer = QTimer(self)
-        self._initial_geometry_timer.setSingleShot(True)
-        self._initial_geometry_timer.timeout.connect(self._initial_geometry_ready)
+        self._fullscreen_geometry = None
+        self._return_after_fullscreen = QTimer(self)
+        self._return_after_fullscreen.setSingleShot(True)
+        self._return_after_fullscreen.timeout.connect(self._return_if_windowed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.content = QStackedWidget()
@@ -151,31 +144,6 @@ class PreviewWindow(AuxiliaryWindow):
         self.content.setCurrentWidget(viewer)
         viewer.show()
 
-    def show_initial_maximized(self, preferred_screen=''):
-        """Every explicit detach starts framed and maximized, never pure mode."""
-        self._initial_show_pending = True
-        self.setWindowState(Qt.WindowState.WindowNoState)
-        screen = next((screen for screen in QApplication.screens() if screen.name() == preferred_screen), None)
-        if screen is not None:
-            self.setScreen(screen)
-            self.setGeometry(accessible_geometry(self.geometry(), [screen.availableGeometry()]))
-        else:
-            self.recover_to_screens()
-        self.showMaximized()
-
-    @Slot()
-    def _initial_geometry_ready(self):
-        if not self._shutdown and isValid(self):
-            self.initialGeometryReady.emit()
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self._initial_show_pending:
-            self._initial_show_pending = False
-            # Native maximization can resize the viewport after the initial
-            # show's zero timer. Restore the photo once at its presented size.
-            self._initial_geometry_timer.start(0)
-
     def take_viewer(self):
         viewer, self.viewer = self.viewer, None
         if viewer is not None:
@@ -195,20 +163,20 @@ class PreviewWindow(AuxiliaryWindow):
 
     def toggle_fullscreen(self):
         if self.isFullScreen():
-            if self._fullscreen_maximized:
-                # Avoid a transient normal state: its asynchronous native
-                # resize can replace the remembered restore rect with the
-                # maximized size after the next state change.
-                self.showMaximized()
-            else:
-                self.showNormal()
-                if self._fullscreen_normal_geometry is not None:
-                    self.setGeometry(accessible_geometry(self._fullscreen_normal_geometry,
-                        [screen.availableGeometry() for screen in QApplication.screens()]))
+            self.returnRequested.emit()
         else:
-            self._fullscreen_normal_geometry = self.normalGeometry()
-            self._fullscreen_maximized = self.isMaximized()
+            self._fullscreen_geometry = self.saveGeometry()
+            self.geometryRemembered.emit(bytes(self._fullscreen_geometry.toHex()).decode('ascii'),
+                                         self.screen().name() if self.screen() else '')
             self.showFullScreen()
+            # Apply the chosen screen's extent before the shared viewer's
+            # queued transform restore; an asynchronous native resize must not
+            # move that restored centre a second time.
+            self.recover_to_screens()
+
+    def _return_if_windowed(self):
+        if not self._shutdown and self.isVisible() and not self.isFullScreen() and not self.isMinimized():
+            self.returnRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -216,6 +184,15 @@ class PreviewWindow(AuxiliaryWindow):
 
     def changeEvent(self, event):
         super().changeEvent(event)
+        if (event.type() == QEvent.Type.WindowStateChange and not self._shutdown
+                and self._fullscreen_geometry is not None
+                and not self.isFullScreen() and not self.isMinimized()):
+            # Only a session that entered fullscreen may return this way.
+            # Restoring the initially maximized preview for a title-bar drag
+            # must keep it detached. After fullscreen, native restore actions
+            # have the same meaning as Escape/F11.
+            # Reparent the viewer only after the window-state event completes.
+            self._return_after_fullscreen.start(0)
         if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
             QTimer.singleShot(0, self._fit_badge)
 
@@ -255,18 +232,18 @@ class TouchMapPanel(QFrame):
         for text, value in (('右侧', 'right'), ('左侧', 'left'), ('底部', 'bottom'), ('独立窗口', 'floating')):
             self.location.addItem(text, value)
         self.location.activated.connect(self._location_selected)
-        top.addWidget(QLabel('触控区'))
+        top.addWidget(QLabel('触控板'))
         top.addWidget(self.location, 1)
         self.hide_button = QPushButton('×')
-        self.hide_button.setToolTip('关闭触控区，保留独立预览')
+        self.hide_button.setToolTip('关闭触控板，保留独立预览')
         self.hide_button.clicked.connect(self.hideRequested)
         top.addWidget(self.hide_button)
         body.addLayout(top)
         actions = QHBoxLayout()
-        self.redock_button = QPushButton('收回触控区')
+        self.redock_button = QPushButton('收回触控板')
         self.redock_button.clicked.connect(self.redockRequested)
         actions.addWidget(self.redock_button)
-        self.return_button = QPushButton('收回预览窗')
+        self.return_button = QPushButton('返回主窗口')
         self.return_button.clicked.connect(self.returnPreviewRequested)
         actions.addWidget(self.return_button)
         body.addLayout(actions)
@@ -317,7 +294,7 @@ class FloatingMapWindow(AuxiliaryWindow):
     hideRequested = Signal()
 
     def __init__(self):
-        super().__init__('LiveViewer · 触控区')
+        super().__init__('LiveViewer · 触控板')
         self.setMinimumSize(280, 240)
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)

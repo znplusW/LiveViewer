@@ -36,13 +36,16 @@ int main(int argc, char** argv) {
       std::printf("LiveViewer.HeicEncoder libheif %s / Kvazaar\n", heif_get_version());
       return 0;
     }
-    if (argc != 4 && argc != 5) throw std::runtime_error("Expected width height quality and RGB stdin");
+    if (argc != 4 && argc != 5)
+      throw std::runtime_error("Expected width height quality [EXIF byte count] and RGB stdin");
     const int width = std::stoi(argv[1]), height = std::stoi(argv[2]), quality = std::stoi(argv[3]);
+    size_t parsed = 0;
+    const int exif_size = argc == 5 ? std::stoi(argv[4], &parsed) : 0;
+    if (argc == 5 && (parsed != std::strlen(argv[4]) || exif_size < 14 || exif_size > 60 * 1024))
+      throw std::runtime_error("Invalid EXIF byte count");
     if (width < 1 || height < 1 || width > 32768 || height > 32768 ||
         static_cast<long long>(width) * height > 100000000 || quality < 1 || quality > 100)
       throw std::runtime_error("Invalid image dimensions or quality");
-    const int exif_size = argc == 5 ? std::stoi(argv[4]) : 0;
-    if (exif_size < 0 || exif_size > 1048576) throw std::runtime_error("Invalid EXIF size");
     check(heif_init(nullptr));
     initialized = true;
     context = heif_context_alloc();
@@ -56,16 +59,20 @@ int main(int argc, char** argv) {
     for (int row = 0; row < height; ++row)
       if (std::fread(pixels + static_cast<size_t>(row) * stride, 1, row_size, stdin) != row_size)
         throw std::runtime_error("Incomplete RGB input");
+    std::vector<unsigned char> exif(static_cast<size_t>(exif_size));
+    if (exif_size) {
+      if (std::fread(exif.data(), 1, exif.size(), stdin) != exif.size())
+        throw std::runtime_error("Incomplete EXIF input");
+      if (std::memcmp(exif.data(), "Exif\0\0", 6) ||
+          (std::memcmp(exif.data() + 6, "II*\0", 4) && std::memcmp(exif.data() + 6, "MM\0*", 4)))
+        throw std::runtime_error("Invalid EXIF header");
+    }
     check(heif_context_get_encoder_for_format(context, heif_compression_HEVC, &encoder));
     check(heif_encoder_set_lossy_quality(encoder, quality));
     check(heif_encoder_set_logging_level(encoder, 0));
     check(heif_context_encode_image(context, image, encoder, nullptr, &handle));
-    if (exif_size) {
-      std::vector<unsigned char> exif(exif_size);
-      if (std::fread(exif.data(), 1, exif.size(), stdin) != exif.size())
-        throw std::runtime_error("Incomplete EXIF input");
+    if (exif_size)
       check(heif_context_add_exif_metadata(context, handle, exif.data(), exif_size));
-    }
     heif_writer writer{};
     writer.writer_api_version = 1;
     writer.write = write_data;

@@ -1,428 +1,318 @@
-"""Native input observations are evidence, never guesses about physical input."""
+"""Permission state, scoped source ABI, and observer lifetime without native GUI."""
 import ctypes as C
+from dataclasses import FrozenInstanceError
 import os
 import struct
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-
-from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QMouseEvent
-from PySide6.QtWidgets import QApplication, QWidget
-
-from livegallery import native_pointer_input as n
+from livegallery import native_pointer_input as m
 
 
-def cap(usage=1, *, high=None, report=3, page=9, link=0, absolute=True, alias=False):
-    result = n._HidButtonCaps()
-    result.page, result.report_id, result.link = page, report, link
-    result.absolute, result.alias = absolute, alias
-    result.is_range = high is not None
-    result.values[0] = usage
-    result.values[1] = usage if high is None else high
-    return result
+def source(kind=16, origin=1):
+    return m.SourceEvidence(kind, origin, True, True, True, 'ok')
 
 
-def packet(reports=(b'\x03\x00',), device=42, kind=2):
-    payload = b''.join(reports)
-    size = C.sizeof(n._RawHeader) + 8 + len(payload)
-    header = n._RawHeader(kind, size, device, 0)
-    return bytes(header) + struct.pack('<II', len(reports[0]), len(reports)) + payload
+def packet(device=51, report=b'\x54\x00', count=1):
+    body=struct.pack('<II',len(report),count)+report*count
+    return struct.pack('<IIQQ',2,24+len(body),device,0)+body
 
 
-class LedgerTests(unittest.TestCase):
+class ScopeTests(unittest.TestCase):
+    def test_scope_pair_and_query_are_exactly_once(self):
+        calls=[]
+        def register(enabled):calls.append(('register',enabled));return True
+        def query():calls.append(('query',));return 16,1
+        result=m.scoped_source(register,query)
+        self.assertEqual(calls,[('register',True),('query',),('register',False)])
+        self.assertEqual(result,source())
+
+    def test_query_exception_still_releases_scope(self):
+        calls=[]
+        def query():raise RuntimeError('failure')
+        result=m.scoped_source(lambda v:calls.append(v)or True,query)
+        self.assertEqual(calls,[True,False]);self.assertFalse(result.query_succeeded)
+        self.assertTrue(result.scope_restored)
+
+    def test_failed_enter_does_not_query_or_unbalance_scope(self):
+        calls=[]
+        result=m.scoped_source(lambda v:calls.append(v)or False,lambda:self.fail('query'))
+        self.assertEqual(calls,[True]);self.assertFalse(result.scope_entered)
+
+    def test_restore_failure_discards_source(self):
+        result=m.scoped_source(lambda enabled:enabled,lambda:(2,1))
+        self.assertFalse(result.scope_restored);self.assertFalse(result.query_succeeded)
+        self.assertIsNone(result.device_type)
+
+    def test_query_unavailable_still_balanced(self):
+        calls=[];r=m.scoped_source(lambda e:calls.append(e)or True,lambda:None)
+        self.assertEqual(calls,[True,False]);self.assertEqual(r.reason,'source_query_failed')
+
+
+class PermissionTests(unittest.TestCase):
     def setUp(self):
-        self.now = 10.0
-        self.ledger = n.EvidenceLedger(lambda: self.now)
-        self.field = n.ButtonField(3, 0, frozenset({1}))
-        self.descriptor = n.HidDescriptor(b'pretend-preparsed', 2, (self.field,))
-        self.ledger.set_devices({42: self.descriptor})
+        self.now=10.0;self.p=m.PressPermissions(clock=lambda:self.now)
 
-    @staticmethod
-    def parse(descriptor, field, report):
-        return {1} if report[1] else set()
+    def test_real09_single_mouse_press_with_button_up_cannot_play(self):
+        # No first mouse click exists in the recorded hardware sequence.
+        self.p.update_ptp(51,False)
+        token=self.p.press(8,18465390,source())
+        self.assertIs(token.allow_hold,False)
+        self.assertEqual(token.reason,'mechanical_button_up')
+        self.assertIs(self.p.permission_for(8,18465390),token)
 
-    def observe(self, down=False, timestamp=100):
-        self.ledger.observe_report(42, bytes((3, int(down))), self.parse, timestamp=timestamp)
+    def test_button_down_permits_immediate_mechanical_hold(self):
+        self.p.update_ptp(51,True);token=self.p.press(8,100,source())
+        self.assertIs(token.allow_hold,True);self.assertTrue(self.p.is_current(token))
 
-    def record(self, source=n.IMDT_TOUCHPAD, timestamp=100, action='press', root=50, position=(10., 20.)):
-        self.ledger.record_mouse(timestamp=timestamp, action=action, root=root, position=position, source=source)
+    def test_mouse_is_independent_of_concurrent_touchpad_finger(self):
+        self.p.update_ptp(51,False);token=self.p.press(8,100,source(2))
+        self.assertIs(token.allow_hold,True);self.assertEqual(token.source,'mouse')
+        self.p.update_ptp(51,None);self.now+=10
+        self.assertTrue(self.p.is_current(token))
 
-    def lookup(self, timestamp=100, action='press', root=50, position=(10., 20.)):
-        return self.ledger.lookup(timestamp=timestamp, action=action, root=root, position=position)
+    def test_touch_source_does_not_authorize_mouse_hold(self):
+        token=self.p.press(8,100,source(4))
+        self.assertIsNone(token.allow_hold);self.assertEqual(token.source,'touch')
 
-    def test_raw_hid_uses_64_bit_windows_header_and_validates_full_packet(self):
-        self.assertEqual(C.sizeof(n._RawHeader), 24)
-        self.assertEqual(n.unpack_raw_hid(packet((b'\x03\x00', b'\x03\x01'))),
-                         (42, (b'\x03\x00', b'\x03\x01')))
-        for bad in (b'', packet()[:-1], packet() + b'\0', packet(device=0), packet(kind=0)):
-            self.assertIsNone(n.unpack_raw_hid(bad))
-        malformed = bytearray(packet())
-        struct.pack_into('<II', malformed, 24, 0xFFFFFFFF, 0xFFFFFFFF)
-        self.assertIsNone(n.unpack_raw_hid(bytes(malformed)))
+    def test_missing_stale_and_failed_hid_are_unknown(self):
+        for button,age in ((None,0),(True,.251),(False,.251)):
+            self.p.cancel();self.p.update_ptp(51,button);self.now+=age
+            token=self.p.press(8,self.p.sequence+100,source())
+            self.assertIsNone(token.allow_hold)
 
-    def test_button_caps_windows_abi_and_primary_mapping(self):
-        self.assertEqual(C.sizeof(n._HidCaps), 64)
-        self.assertEqual(C.sizeof(n._HidButtonCaps), 72)
-        self.assertEqual(n._HidButtonCaps.values.offset, 56)
-        self.assertEqual(C.sizeof(n._RawRegistration), 16)
-        fields = n.primary_button_fields([cap(), cap(2), cap(3), cap(1, high=3, report=4),
-                                          cap(page=13), cap(link=1), cap(absolute=False), cap(alias=True)])
-        self.assertEqual(fields, (n.ButtonField(3, 0, frozenset({1, 2})),
-                                  n.ButtonField(4, 0, frozenset({1, 2}))))
+    def test_exact_freshness_boundary(self):
+        self.p.update_ptp(51,False);self.now+=.25
+        self.assertIs(self.p.press(8,100,source()).allow_hold,False)
 
-    def test_missing_optional_buttons_and_no_report_are_unknown(self):
-        self.assertIsNone(self.ledger.physical_button())
-        self.ledger.set_devices({42: n.HidDescriptor(b'', 2, ())})
-        self.observe()
-        self.assertIsNone(self.ledger.physical_button())
+    def test_ambiguous_two_pad_devices_never_grant(self):
+        self.p.update_ptp(51,True);self.p.update_ptp(52,False)
+        token=self.p.press(8,100,source())
+        self.assertIsNone(token.allow_hold);self.assertEqual(token.reason,'ambiguous_touchpad_devices')
 
-    def test_fresh_explicit_touchpad_source_can_use_declared_button_state(self):
-        for down in (False, True):
-            self.observe(down)
-            self.record()
-            self.assertEqual(self.lookup(), n.PointerEvidence('touchpad', down))
-            self.ledger.events.clear()
+    def test_false_and_unknown_cannot_upgrade_with_later_button_down(self):
+        for initial in (False,None):
+            self.p.cancel();self.p.update_ptp(51,initial)
+            token=self.p.press(8,self.p.sequence+100,source())
+            self.p.update_ptp(51,True)
+            self.assertIs(token.allow_hold,initial)
+            with self.assertRaises(FrozenInstanceError):token.allow_hold=True
 
-    def test_generic_mouse_is_not_inferred_to_be_touchpad_from_recent_hid(self):
-        self.observe(False)
-        self.record(source=n.IMDT_MOUSE)
-        self.assertEqual(self.lookup(), n.PointerEvidence())
-        self.record(source=n.IMDT_MOUSE, timestamp=101)
-        self.assertIsNone(self.lookup(timestamp=101).physical_press)
+    def test_current_button_up_or_unknown_revokes_allowed_pad_hold(self):
+        for subsequent in (False,None):
+            self.p.cancel();self.p.update_ptp(51,True)
+            token=self.p.press(8,self.p.sequence+100,source())
+            self.p.update_ptp(51,subsequent)
+            self.assertFalse(self.p.is_current(token))
+            self.p.update_ptp(51,True)
+            self.assertFalse(self.p.is_current(token))
 
-    def test_touchscreen_never_inherits_touchpad_buttons(self):
-        self.observe(True)
-        self.record(source=n.IMDT_TOUCH)
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchscreen'))
+    def test_report_gap_or_second_device_cannot_revive_granted_press(self):
+        self.p.update_ptp(51,True);token=self.p.press(8,100,source())
+        self.now+=.251;self.p.update_ptp(51,True)
+        self.assertFalse(self.p.is_current(token))
+        token=self.p.press(8,101,source());self.assertTrue(self.p.is_current(token))
+        self.p.update_ptp(52,True);self.assertFalse(self.p.is_current(token))
+        self.p.update_ptp(51,True);self.assertFalse(self.p.is_current(token))
 
-    def test_stale_buttons_are_unknown_while_source_remains_known(self):
-        self.observe(False)
-        self.now += n.BUTTON_TTL + .001
-        self.record()
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchpad'))
+    def test_failed_parse_cannot_later_revive_granted_press(self):
+        self.p.update_ptp(51,True);token=self.p.press(8,100,source())
+        self.p.invalidate_ptp();self.p.update_ptp(51,True)
+        self.assertFalse(self.p.is_current(token))
 
-    def test_fresh_previous_button_up_cannot_suppress_new_physical_press(self):
-        self.observe(False, timestamp=99)
-        self.record(timestamp=100)
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchpad'))
-        # The packet belonging to this new press arrives after the mouse
-        # message; don't retroactively relabel that already-dispatched event.
-        self.observe(True, timestamp=100)
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchpad'))
+    def test_stale_allowed_pad_report_no_longer_grants(self):
+        self.p.update_ptp(51,True);token=self.p.press(8,100,source());self.now+=.251
+        self.assertFalse(self.p.is_current(token))
 
-    def test_timestamp_missing_or_mismatched_raw_report_never_means_unpressed(self):
-        self.observe(False, timestamp=None)
-        self.record()
-        self.assertIsNone(self.lookup().physical_press)
+    def test_cancel_keeps_invalid_exact_tombstone(self):
+        token=self.p.press(8,100,source(2));self.p.cancel()
+        self.assertIs(self.p.permission_for(8,100),token)
+        self.assertFalse(self.p.is_current(token))
+        self.assertEqual(self.p.ptp,{})
 
-    def test_multiple_ptp_devices_are_ambiguous(self):
-        self.ledger.set_devices({42: self.descriptor, 43: self.descriptor})
-        self.observe(False)
-        self.record()
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchpad'))
+    def test_release_keeps_invalid_exact_tombstone(self):
+        token=self.p.press(8,100,source(2));self.p.release()
+        self.assertIs(self.p.permission_for(8,100),token)
+        self.assertFalse(self.p.is_current(token))
 
-    def test_invalid_report_clears_prior_button_observation(self):
-        self.observe(False)
-        self.ledger.observe_report(42, b'\x03', self.parse)
-        self.assertIsNone(self.ledger.physical_button())
-        self.observe(False)
-        def fail(*args):
-            raise ValueError('bad-HID')
-        self.ledger.observe_report(42, b'\x03\0', fail)
-        self.assertIsNone(self.ledger.physical_button())
+    def test_next_press_cannot_reuse_previous_permission(self):
+        first=self.p.press(8,100,source(2));second=self.p.press(9,101,source(2))
+        self.assertFalse(self.p.is_current(first));self.assertTrue(self.p.is_current(second))
 
-    def test_other_reports_do_not_assume_button_released(self):
-        self.observe(True)
-        self.ledger.observe_report(42, b'\x04\x00', self.parse)
-        self.assertTrue(self.ledger.physical_button())
+    def test_lookup_matches_hwnd_timestamp_and_button(self):
+        token=self.p.press(8,100,source(2))
+        for args in ((9,100,1),(8,101,1),(8,100,2)):
+            self.assertIsNone(self.p.permission_for(*args))
+        self.assertIs(self.p.permission_for(8,100),token)
 
-    def test_split_button_reports_require_all_primary_fields_fresh(self):
-        other = n.ButtonField(4, 0, frozenset({2}))
-        self.ledger.set_devices({42: n.HidDescriptor(b'', 2, (self.field, other))})
-        self.observe(False)
-        self.assertIsNone(self.ledger.physical_button())
-        self.ledger.observe_report(42, b'\x04\0', self.parse)
-        self.assertFalse(self.ledger.physical_button())
+    def test_duplicate_timestamp_is_ambiguous(self):
+        first=self.p.press(8,100,source(2));second=self.p.press(8,100,source(2))
+        self.assertIsNone(second.allow_hold);self.assertFalse(self.p.is_current(first))
 
-    def test_message_match_requires_timestamp_action_window_and_position(self):
-        self.observe(False)
-        self.record()
-        for args in ({'timestamp': 0}, {'timestamp': 101}, {'root': 51},
-                     {'action': 'release'}, {'position': (14., 20.)}):
-            self.assertEqual(self.lookup(**args), n.PointerEvidence())
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchpad', False))
-        self.now += n.EVIDENCE_TTL + .001
-        self.assertEqual(self.lookup(), n.PointerEvidence())
+    def test_scoped_failure_never_treats_mouse_as_physical(self):
+        for s in (m.SourceEvidence(),m.SourceEvidence(2,1,False,True,True),
+                  m.SourceEvidence(2,1,True,False,True),source(0),source(2,4)):
+            self.assertIsNone(self.p.press(8,self.p.sequence+100,s).allow_hold)
 
-    def test_conflicting_same_tick_events_are_unknown_not_last_event_wins(self):
-        self.observe(False)
-        self.record()
-        self.record(source=n.IMDT_MOUSE)
-        self.assertEqual(self.lookup(), n.PointerEvidence())
+    def test_unknown_missing_match_and_validity_are_distinct(self):
+        self.assertIsNone(self.p.permission_for(8,100));self.assertFalse(self.p.is_current(None))
+        token=self.p.press(8,100,m.SourceEvidence())
+        self.assertIsNotNone(self.p.permission_for(8,100));self.assertIsNone(token.allow_hold)
 
-    def test_timestamp_wrap_and_bounded_queue(self):
-        self.record(timestamp=(1 << 32) + 100)
-        self.assertEqual(self.lookup(), n.PointerEvidence('touchpad'))
-        for i in range(100):
-            self.record(timestamp=200 + i)
-        self.assertEqual(len(self.ledger.events), 48)
+    def test_record_capacity_is_bounded(self):
+        for t in range(200):self.p.press(8,t,source(2))
+        self.assertEqual(len(self.p.records),128)
 
-
-class Function:
-    def __init__(self, callback):
-        self.callback = callback
-    def __call__(self, *args):
-        return self.callback(*args)
-
-
-class FakeApi:
-    def __init__(self):
-        self.registrations = []
-        self.registration_calls = []
-        self.last_error = 0
-        self.caps = n._HidCaps()
-        self.caps.page, self.caps.usage, self.caps.input_bytes, self.caps.input_buttons = 13, 5, 2, 1
-        self.button_caps = [cap()]
-        self.GetRegisteredRawInputDevices = Function(self.get_registrations)
-        self.RegisterRawInputDevices = Function(self.register)
-        self.GetRawInputDeviceList = Function(lambda *args: 0)
-        self.GetRawInputDeviceInfoW = Function(self.get_info)
-        self.GetRawInputData = Function(lambda *args: n.UINT_ERROR)
-        self.GetCurrentInputMessageSource = Function(lambda *args: 0)
-        self.GetAncestor = Function(lambda hwnd, kind: hwnd)
-        self.ClientToScreen = Function(lambda *args: 1)
-        self.ScreenToClient = Function(lambda *args: 1)
-        self.HidP_GetCaps = Function(self.get_caps)
-        self.HidP_GetButtonCaps = Function(self.get_buttons)
-        self.HidP_GetUsages = Function(self.get_usages)
-
-    def get_registrations(self, rows, count, size):
-        C.cast(count, C.POINTER(C.c_uint32))[0] = len(self.registrations)
-        if rows is not None:
-            for i, row in enumerate(self.registrations):
-                rows[i] = row
-            return len(self.registrations)
-        self.last_error = n.ERROR_INSUFFICIENT_BUFFER
-        return n.UINT_ERROR
-
-    def register(self, row, count, size):
-        actual = C.cast(row, C.POINTER(n._RawRegistration))[0]
-        self.registration_calls.append((actual.page, actual.usage, actual.flags, actual.target))
-        self.registrations = ([] if actual.flags == n.RIDEV_REMOVE else
-                              [n._RawRegistration(actual.page, actual.usage, actual.flags, actual.target)])
-        return 1
-
-    def get_info(self, device, command, data, size):
-        if command == n.RIDI_DEVICEINFO:
-            info = C.cast(data, C.POINTER(n._RawDeviceInfo))[0]
-            info.kind = 2
-            info.data[3] = 13 | (5 << 16)
-            C.cast(size, C.POINTER(C.c_uint32))[0] = C.sizeof(info)
-            return C.sizeof(info)
-        C.cast(size, C.POINTER(C.c_uint32))[0] = 4
-        if data is not None:
-            C.memmove(data, b'HID!', 4)
-            return 4
-        return 0
-
-    def get_caps(self, parsed, caps):
-        C.memmove(caps, C.byref(self.caps), C.sizeof(self.caps))
-        return n.HIDP_SUCCESS
-
-    def get_buttons(self, kind, rows, count, data):
-        for i, row in enumerate(self.button_caps):
-            rows[i] = row
-        C.cast(count, C.POINTER(C.c_uint16))[0] = len(self.button_caps)
-        return n.HIDP_SUCCESS
-
-    def get_usages(self, kind, page, link, usages, count, parsed, report, length):
-        down = C.string_at(report, length)[1]
-        C.cast(count, C.POINTER(C.c_uint32))[0] = int(bool(down))
-        if down:
-            usages[0] = 1
-        return n.HIDP_SUCCESS
-
-
-class BackendTests(unittest.TestCase):
-    def setUp(self):
-        self.api = FakeApi()
-        self.backend = n.WindowsInputBackend(self.api, self.api,
-                                             get_last_error=lambda: self.api.last_error)
-
-    def test_null_registration_query_accepts_only_documented_size_error(self):
-        self.api.registrations = [n._RawRegistration(13, 5, n.RIDEV_DEVNOTIFY, 999)]
-        rows = self.backend.registrations()
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].target, 999)
-        self.assertEqual(self.api.last_error, n.ERROR_INSUFFICIENT_BUFFER)
-
-    def test_registration_query_real_failure_never_overwrites_other_owner(self):
-        def failed_query(rows, count, size):
-            C.cast(count, C.POINTER(C.c_uint32))[0] = 1
-            self.api.last_error = 5  # ERROR_ACCESS_DENIED is not a size query.
-            return n.UINT_ERROR
-        self.api.GetRegisteredRawInputDevices.callback = failed_query
-        with self.assertRaisesRegex(OSError, 'raw-registration-query-failed'):
-            self.backend.register(100)
-        self.assertEqual(self.api.registration_calls, [])
-
-    def test_registration_buffer_growth_between_queries_fails_closed(self):
-        def growing_query(rows, count, size):
-            C.cast(count, C.POINTER(C.c_uint32))[0] = 1 if rows is None else 2
-            self.api.last_error = n.ERROR_INSUFFICIENT_BUFFER
-            return n.UINT_ERROR
-        self.api.GetRegisteredRawInputDevices.callback = growing_query
-        with self.assertRaisesRegex(OSError, 'raw-registration-query-failed'):
-            self.backend.register(100)
-        self.assertEqual(self.api.registration_calls, [])
-
-    def test_registration_is_front_only_nonexclusive_and_owner_checked(self):
-        self.assertTrue(self.backend.register(100))
-        self.assertEqual(self.api.registration_calls, [(13, 5, n.RIDEV_DEVNOTIFY, 100)])
-        self.assertFalse(self.backend.register(101))
-        self.backend.unregister(101)
-        self.assertEqual(len(self.api.registration_calls), 1)
-        self.backend.unregister(100)
-        self.assertEqual(self.api.registration_calls[-1], (13, 5, n.RIDEV_REMOVE, None))
-
-    def test_existing_whole_digitizer_page_registration_is_not_overwritten(self):
-        self.api.registrations = [n._RawRegistration(13, 0, n.RIDEV_PAGEONLY, 999)]
-        self.assertFalse(self.backend.register(100))
-        self.assertEqual(self.api.registration_calls, [])
-
-    def test_real_ctypes_descriptor_and_hid_parser_boundaries(self):
-        descriptor = self.backend.descriptor(42)
-        self.assertEqual(descriptor.preparsed, b'HID!')
-        self.assertEqual(descriptor.fields, (n.ButtonField(3, 0, frozenset({1})),))
-        self.assertEqual(self.backend.usages(descriptor, descriptor.fields[0], b'\x03\x00'), set())
-        self.assertEqual(self.backend.usages(descriptor, descriptor.fields[0], b'\x03\x01'), {1})
-
-    def test_wrong_collection_and_missing_buttons_do_not_enable_gating(self):
-        self.api.caps.usage = 4
-        self.assertIsNone(self.backend.descriptor(42))
-        self.api.caps.usage, self.api.caps.input_buttons = 5, 0
-        self.assertEqual(self.backend.descriptor(42).fields, ())
-
-    def test_failed_hid_parse_does_not_become_button_up(self):
-        descriptor = self.backend.descriptor(42)
-        self.api.HidP_GetUsages.callback = lambda *args: -1
-        with self.assertRaises(ValueError):
-            self.backend.usages(descriptor, descriptor.fields[0], b'\x03\0')
-
-    def test_unreadable_second_ptp_descriptor_still_counts_as_device(self):
-        def listing(rows, count, size):
-            C.cast(count, C.POINTER(C.c_uint32))[0] = 2
-            if rows is not None:
-                rows[0], rows[1] = n._RawDevice(42, 2), n._RawDevice(43, 2)
-                return 2
-            return 0
-        self.api.GetRawInputDeviceList.callback = listing
-        original = self.backend.descriptor
-        with patch.object(self.backend, 'descriptor', side_effect=lambda device: original(device) if device == 42 else None):
-            devices = self.backend.devices()
-        self.assertEqual(set(devices), {42, 43})
-        self.assertFalse(devices[43].fields)
-        ledger = n.EvidenceLedger()
-        ledger.set_devices(devices)
-        self.assertIsNone(ledger.physical_button())
+    def test_backward_clock_does_not_make_report_fresh(self):
+        self.p.update_ptp(51,True);self.now-=1
+        self.assertIsNone(self.p.press(8,100,source()).allow_hold)
 
 
 class FakeBackend:
-    def __init__(self, registered=True):
-        self.registered = registered
-        self.calls = []
-        self.source_type = n.IMDT_TOUCHPAD
-        self.raw = packet()
-    def register(self, target):
-        self.calls.append(('register', target))
-        return self.registered
-    def unregister(self, target):
-        self.calls.append(('unregister', target))
-    def devices(self):
-        return {42: n.HidDescriptor(b'', 2, (n.ButtonField(3, 0, frozenset({1})),))}
-    def raw_data(self, handle):
-        return self.raw
-    def usages(self, descriptor, field, report):
-        return {1} if report[1] else set()
-    def source(self):
-        return self.source_type
-    def root_position(self, message):
-        return int(message.hwnd), 30, 40
+    def __init__(self):
+        self.entries=[];self.calls=[];self.foreground=True;self.own=True
+        self.source=source();self.button=False;self.fail=None
+    def registrations(self):
+        if self.fail=='query':raise OSError('registrations')
+        return list(self.entries)
+    def register(self,hwnd):
+        if self.fail=='register':raise OSError('register')
+        self.calls.append(('register',hwnd));self.entries=[(13,5,0,hwnd)]
+    def remove(self):
+        if self.fail=='remove':raise OSError('unregister')
+        self.calls.append('remove');self.entries=[]
+    def own_window(self,hwnd):return self.own
+    def foreground_is_ours(self):return self.foreground
+    def current_source(self):
+        self.calls.append('source')
+        if self.fail=='source':raise OSError('source')
+        return self.source
+    def restore_source_scope(self):self.calls.append('restore');return self.fail!='restore'
+    def root_window(self,hwnd):return hwnd
+    def header(self,handle):self.calls.append('header');return dict(kind=2,size=34,device=51,wparam=0)
+    def descriptor(self,device):return {}
+    def packet(self,handle,size):return packet()
+    def decode(self,descriptor,data):
+        if self.fail=='decode':raise ValueError('bad report')
+        return dict(button1=self.button,button_status='ok')
 
 
-class NativeServiceTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.app = QApplication.instance() or QApplication([])
-
+class ObserverTests(unittest.TestCase):
     def setUp(self):
-        self.canvas = QWidget()
-        self.canvas.resize(300, 200)
-        self.canvas.show()
-        self.app.processEvents()
-        self.backend = FakeBackend()
-        self.service = n.PointerInputService(self.app, self.backend)
-        self.monitor = n.PointerInputMonitor(self.canvas, self.service)
+        self.b=FakeBackend();self.now=10.
+        self.m=m.NativePointerInput(backend=self.b,clock=lambda:self.now)
+        self.assertTrue(self.m.start())
+    def tearDown(self):self.m.close()
+    def msg(self,kind,t=100,wparam=0):
+        return SimpleNamespace(message=kind,hwnd=8,wParam=wparam,lParam=55,time=t)
+    def test_target_null_foreground_registration_and_close(self):
+        self.assertEqual(self.b.entries,[(13,5,0,0)]);self.m.close()
+        self.assertEqual(self.b.entries,[]);self.assertEqual(self.b.calls.count('remove'),1)
+        self.m.close();self.assertEqual(self.b.calls.count('remove'),1)
+    def test_existing_registration_not_overwritten(self):
+        b=FakeBackend();b.entries=[(13,5,0,99)]
+        manager=m.NativePointerInput(backend=b)
+        self.assertFalse(manager.start());manager.close()
+        self.assertEqual(b.entries,[(13,5,0,99)]);self.assertEqual(b.calls,[])
+    def test_failed_registration_still_installs_and_correlates_native_press(self):
+        for failure in ('query','register'):
+            b=FakeBackend();b.fail=failure;installed=[]
+            manager=m.NativePointerInput(backend=b)
+            manager.application=SimpleNamespace(
+                installNativeEventFilter=lambda f:installed.append('native'),
+                installEventFilter=lambda f:installed.append('qt'),
+                removeNativeEventFilter=lambda f:None,removeEventFilter=lambda f:None,
+                aboutToQuit=SimpleNamespace(connect=lambda f:None))
+            self.assertFalse(manager.start());self.assertTrue(manager.started)
+            self.assertEqual(installed,['native','qt'])
+            manager.observe_message(self.msg(m.WM_LBUTTONDOWN))
+            token=manager.permission_for(8,100)
+            self.assertIsNotNone(token);self.assertIsNone(token.allow_hold)
+            manager.close()
+    def test_source_query_failure_uses_root_hwnd_for_tombstone(self):
+        self.b.root_window=lambda hwnd:88;self.b.fail='source'
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN))
+        token=self.m.permission_for(88,100)
+        self.assertIsNotNone(token);self.assertIsNone(token.allow_hold)
+        self.assertEqual(token.reason,'native_query_error')
+    def test_changed_registration_not_removed(self):
+        self.b.entries=[(13,5,0,99)];self.m.close()
+        self.assertEqual(self.b.entries,[(13,5,0,99)])
+    def test_close_failure_remains_visible(self):
+        self.b.fail='remove';self.m.close()
+        self.assertTrue(self.m.registered);self.assertEqual(self.m.summary()['registration_status'],'unregister_failed')
+    def test_raw_report_false_then_exact_native_press_is_denied(self):
+        self.m.observe_message(self.msg(m.WM_INPUT));self.m.observe_message(self.msg(m.WM_LBUTTONDOWN))
+        auth=self.m.authorize(SimpleNamespace(timestamp=lambda:100,button=lambda:1),8)
+        self.assertIs(auth.allow_hold,False);self.assertEqual(self.m.counters['reports'],1)
+    def test_source_is_queried_only_on_left_press(self):
+        self.m.observe_message(self.msg(m.WM_INPUT));self.m.observe_message(self.msg(m.WM_LBUTTONUP))
+        self.m.observe_message(self.msg(0x200));self.assertNotIn('source',self.b.calls)
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN));self.assertEqual(self.b.calls.count('source'),1)
+    def test_foreign_or_background_input_is_not_parsed(self):
+        self.b.own=False;self.m.observe_message(self.msg(m.WM_INPUT))
+        self.b.own=True;self.b.foreground=False;self.m.observe_message(self.msg(m.WM_INPUT))
+        self.b.foreground=True;self.m.observe_message(self.msg(m.WM_INPUT,wparam=1))
+        self.assertNotIn('header',self.b.calls)
+    def test_background_cancels_token_and_hid_state(self):
+        self.b.source=source(2);self.m.observe_message(self.msg(m.WM_LBUTTONDOWN))
+        auth=self.m.permission_for(8,100);self.b.foreground=False
+        self.m.observe_message(self.msg(m.WM_INPUT));self.assertFalse(self.m.is_current(auth))
+        self.assertIs(self.m.permission_for(8,100),auth)
+    def test_parse_failure_invalidates_allowed_pad_token(self):
+        self.b.button=True;self.m.observe_message(self.msg(m.WM_INPUT))
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN));auth=self.m.permission_for(8,100)
+        self.assertTrue(self.m.is_current(auth));self.b.fail='decode'
+        self.m.observe_message(self.msg(m.WM_INPUT));self.assertFalse(self.m.is_current(auth))
+    def test_failed_scope_is_unknown_and_not_reentered(self):
+        self.b.source=m.SourceEvidence(scope_entered=True,scope_restored=False)
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN));auth=self.m.permission_for(8,100)
+        self.assertIsNone(auth.allow_hold);self.assertFalse(self.m.scope_healthy)
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN,101));self.assertEqual(self.b.calls.count('source'),1)
+        self.assertEqual(self.m.scope_debt,1);self.m.close()
+        self.assertEqual(self.b.calls.count('restore'),1);self.assertEqual(self.m.scope_debt,0)
+        self.assertEqual(self.m.summary()['scope_cleanup_status'],'restored')
+        self.m.close();self.assertEqual(self.b.calls.count('restore'),1)
+    def test_failed_scope_cleanup_keeps_debt_visible(self):
+        self.b.source=m.SourceEvidence(scope_entered=True,scope_restored=False)
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN));self.b.fail='restore';self.m.close()
+        self.assertEqual(self.m.scope_debt,1)
+        self.assertEqual(self.m.summary()['scope_cleanup_status'],'restore_failed')
+        self.m.close();self.assertEqual(self.b.calls.count('restore'),1)
+    def test_scope_cleanup_cannot_decrement_another_thread(self):
+        self.b.source=m.SourceEvidence(scope_entered=True,scope_restored=False)
+        self.m.observe_message(self.msg(m.WM_LBUTTONDOWN))
+        with patch.object(m.threading,'get_ident',return_value=-1):self.m.close()
+        self.assertNotIn('restore',self.b.calls);self.assertEqual(self.m.scope_debt,1)
+        self.assertEqual(self.m.summary()['scope_cleanup_status'],'wrong_thread_left_untouched')
+    def test_summary_is_read_only_no_native_queries(self):
+        before=list(self.b.calls);self.m.diagnostic_snapshot();self.m.summary()
+        self.assertEqual(self.b.calls,before)
 
-    def tearDown(self):
-        self.service.close()
-        self.canvas.close()
-        self.canvas.deleteLater()
-        self.app.processEvents()
 
-    def send_native(self, kind, *, hwnd=None, timestamp=123):
-        msg = n._Message(hwnd or int(self.canvas.winId()), kind, 0, 42, timestamp, n._Point(), 0)
-        return self.service.nativeEventFilter(b'windows_generic_MSG', C.addressof(msg))
-
-    def test_observation_never_consumes_input_and_matches_qt_event(self):
-        self.assertEqual(self.send_native(n.WM_INPUT, hwnd=self.service.target), (False, 0))
-        self.assertEqual(self.send_native(n.WM_LBUTTONDOWN), (False, 0))
-        local = QPointF(30, 40) / self.canvas.devicePixelRatioF()
-        event = QMouseEvent(QEvent.Type.MouseButtonPress, local, self.canvas.mapToGlobal(local),
-                            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
-        event.setTimestamp(123)
-        self.assertEqual(self.monitor.mouse_evidence(event), n.PointerEvidence('touchpad', False))
-        event.setTimestamp(124)
-        self.assertEqual(self.monitor.mouse_evidence(event), n.PointerEvidence())
-
-    def test_callback_failure_clears_buttons_but_preserves_input_delivery(self):
-        self.send_native(n.WM_INPUT, hwnd=self.service.target)
-        self.assertFalse(self.service.ledger.physical_button())
-        self.backend.raw_data = lambda handle: (_ for _ in ()).throw(OSError('lost device'))
-        self.assertEqual(self.send_native(n.WM_INPUT, hwnd=self.service.target), (False, 0))
-        self.assertIsNone(self.service.ledger.physical_button())
-        self.assertEqual(self.monitor.diagnostics()['observation_errors'], 1)
-
-    def test_failed_hotplug_scan_cannot_retain_single_device_assumption(self):
-        self.send_native(n.WM_INPUT, hwnd=self.service.target)
-        self.backend.devices = lambda: (_ for _ in ()).throw(OSError('hotplug race'))
-        self.assertEqual(self.send_native(n.WM_INPUT_DEVICE_CHANGE), (False, 0))
-        self.assertEqual(self.service.ledger.descriptors, {})
-        self.assertIsNone(self.service.ledger.physical_button())
-
-    def test_existing_registration_is_not_read_or_unregistered(self):
-        other = n.PointerInputService(self.app, FakeBackend(registered=False))
-        try:
-            self.assertEqual(other.diagnostics()['raw_input'], 'existing-registration')
-            self.assertEqual(other.ledger.descriptors, {})
-        finally:
-            other.close()
-        self.assertEqual(len(other.backend.calls), 1)
-
-    def test_close_is_idempotent_and_retires_input_evidence(self):
-        self.service.close()
-        self.service.close()
-        self.assertEqual([row[0] for row in self.backend.calls], ['register', 'unregister'])
-        self.assertEqual(self.service.ledger.descriptors, {})
-
-    def test_non_native_platform_does_not_register_raw_input(self):
-        if self.app.platformName() != 'windows':
-            with patch.object(n.sys, 'platform', 'win32'), patch.object(n, 'WindowsInputBackend') as backend:
-                self.assertIsNone(n.install_pointer_input_monitor(self.canvas))
-                backend.assert_not_called()
+class AbiAndPacketTests(unittest.TestCase):
+    def test_x64_abi(self):
+        self.assertEqual(m.abi_sizes(),{'RAWINPUTDEVICE':16,'RAWINPUTHEADER':24,'DEVICEINFO':32,
+            'HIDP_CAPS':64,'HIDP_BUTTON_CAPS':72,'HIDP_VALUE_CAPS':72})
+        self.assertEqual(C.sizeof(m.INPUT_MESSAGE_SOURCE),8)
+        self.assertEqual(m.HIDP_VALUE_CAPS.Usages.offset,56)
+    def test_valid_and_bounded_packet(self):
+        self.assertEqual(m.split_hid_packet(packet()),(51,[b'\x54\x00']))
+        for data in (packet()[:-1],packet()+b'x',b'x'*(m.MAX_PACKET+1)):
+            with self.assertRaises(ValueError):m.split_hid_packet(data)
+        data=bytearray(packet());struct.pack_into('<II',data,24,0xffffffff,0xffffffff)
+        with self.assertRaises(ValueError):m.split_hid_packet(bytes(data))
+    def test_wrong_report_cannot_mean_button_up(self):
+        api=m._WinApi.__new__(m._WinApi)
+        descriptor=dict(report_bytes=29,button_reports={84},contact_reports={84})
+        result=api.decode(descriptor,b'\x11\x00')
+        self.assertIsNone(result['button1']);self.assertEqual(result['button_status'],'not_in_report')
+    def test_no_windows_gui_singleton_on_offscreen(self):
+        app=SimpleNamespace(platformName=lambda:'offscreen')
+        self.assertIsNone(m.NativePointerInput.ensure_for_application(app))
+        self.assertIsNone(m.ensure_for_application(app))
 
 
-if __name__ == '__main__':
-    unittest.main()
+if __name__=='__main__':unittest.main()

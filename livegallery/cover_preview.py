@@ -440,7 +440,35 @@ class PreviewSession:
                 self._condition.notify_all()
 
     def _match_position(self):
-        if self.image_path is None or self.on_position is None:
+        if self.on_position is None:
+            return
+        marker = getattr(self.metadata, 'still_image_time', None)
+        identifier = getattr(self.metadata, 'asset_identifier', None)
+        exact = [(frame.index, getattr(frame, 'presentation_time', None)) for frame in self.metadata.frames]
+        if (marker is not None and identifier and self.image_path is not None
+                and exact and all(value is not None for _, value in exact)):
+            try:
+                from .live_photo_image import read_content_identifier
+                self._verify_source()
+                image_identifier = read_content_identifier(self.image_path)
+                if self._file_signature(self.image_path) != self._image_signature:
+                    raise OSError('封面图已发生变化。')
+                last = self.metadata.frames[-1]
+                if image_identifier == identifier and exact[0][1] <= marker <= exact[-1][1] + max(0, getattr(last, 'duration_seconds', 0)):
+                    index = min(exact, key=lambda row: (abs(row[1] - marker), row[0]))[0]
+                    self._callback(self.on_position, CoverPosition(index,
+                        self.metadata.frames[index].pts_seconds, approximate=False, confidence=1.0,
+                        reason='读取视频中的实际封面时间标记。'))
+                    return
+            except FrameCancelled:
+                return
+            except OSError:
+                return
+            except ValueError:
+                # An unreadable or missing image identity cannot authenticate
+                # the movie's marker as the current still image's position.
+                pass
+        if self.image_path is None:
             return
         scores = {}
         try:

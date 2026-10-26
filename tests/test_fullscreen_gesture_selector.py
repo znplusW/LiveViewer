@@ -46,39 +46,46 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(self.selector.menu.isVisible())
 
-    def test_default_left_and_silent_setters_preserve_explicit_empty_and_canonical_order(self):
+    def test_only_top_defaults_enabled_and_silent_setters_migrate_legacy_and_preserve_empty(self):
         changed = QSignalSpy(self.selector.selectionChanged)
-        self.assertEqual(self.selector.selected_gestures(), ['left'])
-        self.selector.set_selected_gestures(['right', 'top', 'top', 'unsupported'])
-        self.assertEqual(self.selector.selected_gestures(), ['top', 'right'])
+        self.assertEqual(self.selector.selected_gestures(), ['top'])
+        self.assertEqual(set(self.selector.checkboxes), {'top'})
+        self.assertEqual(set(self.selector.actions_by_gesture), {'top'})
+        self.assertEqual(len(self.selector.menu.actions()), 1)
+        self.assertEqual(self.selector.checkboxes['top'].text(), '屏幕上沿下滑')
+        for values in (['right', 'top', 'top', 'unsupported'], ['left'], ['right'], None):
+            self.selector.set_selected_gestures(values)
+            self.assertEqual(self.selector.selected_gestures(), ['top'])
+        self.selector.set_selected_gestures(['unsupported', {}, []])
+        self.assertEqual(self.selector.selected_gestures(), [])
         self.selector.set_selected_gestures([])
         self.assertEqual(self.selector.selected_gestures(), [])
         self.assertEqual(self.selector.text(), '不启用退出手势')
         self.assertEqual(changed.count(), 0)
 
-    def test_popup_whole_blank_row_text_and_indicator_click_independently_without_closing(self):
+    def test_popup_whole_blank_row_text_and_indicator_toggle_sole_option_without_closing(self):
         changed = QSignalSpy(self.selector.selectionChanged)
         self.popup()
-        for key, point in (('top', 'blank'), ('right', 'text'), ('left', 'indicator')):
-            box = self.selector.checkboxes[key]
+        for point in ('blank', 'text', 'indicator'):
+            box = self.selector.checkboxes['top']
             self.assertIsInstance(box, TickCheckBox)
             position = QPoint(box.width() - 5, box.height() // 2) if point == 'blank' else QPoint(
                 75 if point == 'text' else 20, box.height() // 2)
             QTest.mouseClick(box, Qt.MouseButton.LeftButton, pos=position)
             self.app.processEvents()
             self.assertTrue(self.selector.menu.isVisible())
-        self.assertEqual(self.selector.selected_gestures(), ['top', 'right'])
+        self.assertEqual(self.selector.selected_gestures(), [])
         self.assertEqual(changed.count(), 3)
-        self.assertEqual(changed.at(2)[0], ['top', 'right'])
+        self.assertEqual([changed.at(index)[0] for index in range(3)], [[], ['top'], []])
 
     def test_space_on_active_menu_action_and_checkbox_keep_popup_open_and_semantics(self):
         self.popup()
         action = self.selector.actions_by_gesture['top']
         self.selector.menu.setActiveAction(action)
         QTest.keyClick(self.selector.menu, Qt.Key.Key_Space)
-        self.assertEqual(self.selector.selected_gestures(), ['top', 'left'])
+        self.assertEqual(self.selector.selected_gestures(), [])
         self.assertTrue(self.selector.menu.isVisible())
-        box = self.selector.checkboxes['left']
+        box = self.selector.checkboxes['top']
         box.setFocus()
         QTest.keyClick(box, Qt.Key.Key_Space)
         self.assertEqual(self.selector.selected_gestures(), ['top'])
@@ -87,7 +94,7 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
 
     def test_actual_window_touch_toggles_once_and_disabled_selector_cannot_change(self):
         self.popup()
-        box = self.selector.checkboxes['right']
+        box = self.selector.checkboxes['top']
         handle = self.selector.menu.windowHandle()
         self.assertIsNotNone(handle)
         point = box.mapTo(self.selector.menu, QPoint(box.width() - 6, box.height() // 2))
@@ -96,22 +103,26 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
         touch = QTest.touchEvent(handle, device, False)
         touch.press(0, point, handle).commit(); touch.release(0, point, handle).commit()
         self.app.processEvents()
-        self.assertEqual(self.selector.selected_gestures(), ['left', 'right'])
+        self.assertEqual(self.selector.selected_gestures(), [])
         self.assertEqual(changed.count(), 1)
         self.assertTrue(self.selector.menu.isVisible())
         self.selector.menu.close()
         self.selector.setEnabled(False)
         QTest.mouseClick(self.selector, Qt.MouseButton.LeftButton)
         self.assertFalse(self.selector.menu.isVisible())
-        self.assertEqual(self.selector.selected_gestures(), ['left', 'right'])
+        self.assertEqual(self.selector.selected_gestures(), [])
 
-    def test_summary_elides_with_full_tooltip_and_both_theme_checkboxes_remain_blue(self):
-        self.selector.set_selected_gestures(['top', 'left', 'right'])
+    def test_top_summary_elides_with_full_tooltip_and_both_themes_remain_blue(self):
+        self.assertEqual(self.selector.text(), '屏幕上沿下滑')
+        self.selector.setMinimumWidth(0)
+        self.selector.setFixedWidth(95)
         self.window.resize(220, 120)
         self.app.processEvents()
         self.assertIn('…', self.selector.text())
-        for label in ('上沿向下滑', '左侧边缘向右滑', '右侧边缘向左滑'):
-            self.assertIn(label, self.selector.toolTip())
+        self.assertIn('屏幕上沿下滑', self.selector.toolTip())
+        self.assertIn('取消勾选', self.selector.toolTip())
+        for obsolete in ('左侧', '右侧', '多选'):
+            self.assertNotIn(obsolete, self.selector.toolTip())
         for mode in ('dark', 'light'):
             self.window.setProperty('liveviewerTheme', mode)
             self.window.setStyleSheet(stylesheet_for(mode))
@@ -139,7 +150,7 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
         selector = TrackedSelector(self.window)
         self.app.processEvents()
         selector.applied_depths.clear()
-        selector.set_selected_gestures(['top', 'right'])
+        selector.set_selected_gestures(['top'])
         for mode in ('light', 'dark', 'light'):
             self.window.setProperty('liveviewerTheme', mode)
             self.window.setStyleSheet(stylesheet_for(mode))
@@ -148,7 +159,7 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
                          'Child QSS was changed inside the parent style propagation stack')
         self.app.processEvents()
         self.assertEqual(selector.applied_depths, [0])
-        self.assertEqual(selector.selected_gestures(), ['top', 'right'])
+        self.assertEqual(selector.selected_gestures(), ['top'])
         self.assertTrue(all('#202833' in box.styleSheet() and '#3b82f6' in box.styleSheet()
                             for box in selector.checkboxes.values()))
 
@@ -213,7 +224,7 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
             dialog.show()
             app.processEvents()
             selector = dialog.fullscreen_exit_gestures
-            selector.set_selected_gestures(['top', 'right'])
+            selector.set_selected_gestures(['top'])
             selector.menu.popup(selector.mapToGlobal(QPoint(0, selector.height())))
             app.processEvents()
             for scheme in ('light', 'dark') * 12:
@@ -221,7 +232,7 @@ class FullscreenGestureSelectorTests(unittest.TestCase):
                 window.theme_controller.refresh_system()
                 app.processEvents()
                 assert selector.menu.isVisible()
-                assert selector.selected_gestures() == ['top', 'right']
+                assert selector.selected_gestures() == ['top']
                 assert all('#3b82f6' in box.styleSheet() for box in selector.checkboxes.values())
             selector.menu.close()
             dialog.close()

@@ -3,6 +3,7 @@ from PySide6.QtCore import QAbstractListModel, Qt, QSize, QRect, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QFont
 from PySide6.QtWidgets import QStyledItemDelegate, QStyle
 from .ui_theme import tokens_for
+from .filename_field import FilenameLayout, filename_tooltip
 
 
 OVERVIEW_DEFAULT_WIDTH = 204
@@ -20,18 +21,19 @@ def _fitted_image_rect(image_area, pixmap):
                  size.width(), size.height())
 
 
-def _live_badge_layout(image_area):
-    """Anchor to the thumbnail frame, using its margins around narrow photos."""
-    if image_area.isEmpty():
+def _live_badge_layout(image_rect, *, frame_rect=None):
+    """Choose compact mode from the photo; anchor inside its thumbnail frame."""
+    bounds = image_rect if frame_rect is None else frame_rect
+    if bounds.isEmpty():
         return 'dot', QRect()
     # Include the four-pixel inset in the space needed by the 47 x 20 label.
-    compact = (55 > image_area.width() * .45 or
-               28 > image_area.height() * .45)
+    compact = (55 > image_rect.width() * .45 or
+               28 > image_rect.height() * .45)
     if not compact:
-        return 'full', QRect(image_area.x() + 4, image_area.y() + 4, 47, 20)
-    diameter = min(10, image_area.width(), image_area.height())
-    inset = min(4, max(0, (min(image_area.width(), image_area.height()) - diameter) // 2))
-    return 'dot', QRect(image_area.x() + inset, image_area.y() + inset, diameter, diameter)
+        return 'full', QRect(bounds.x() + 4, bounds.y() + 4, 47, 20)
+    diameter = min(10, bounds.width(), bounds.height())
+    inset = min(4, max(0, (min(bounds.width(), bounds.height()) - diameter) // 2))
+    return 'dot', QRect(bounds.x() + inset, bounds.y() + inset, diameter, diameter)
 
 
 def overview_tile_size(width):
@@ -60,7 +62,7 @@ class CatalogModel(QAbstractListModel):
         if role == Qt.ItemDataRole.UserRole:
             return item
         if role == Qt.ItemDataRole.ToolTipRole:
-            return str(item.image_path) + ('\n' + item.note if item.note else '')
+            return filename_tooltip(item.image_path, item.note)
         if role == Qt.ItemDataRole.DecorationRole:
             key = str(item.image_path)
             if key in self.thumbnails:
@@ -111,6 +113,15 @@ class ThumbnailDelegate(QStyledItemDelegate):
         return (overview_tile_size(self.thumbnail_width) if self.large else
                 QSize(round(self.thumbnail_height * 144 / 116), self.thumbnail_height))
 
+    def filename_layout(self, option, index):
+        """Use precisely the same elision and text bounds for painting and hits."""
+        rect = option.rect.adjusted(5, 5, -5, -5)
+        original = index.data(Qt.ItemDataRole.DisplayRole) or ''
+        displayed = option.fontMetrics.elidedText(original, Qt.TextElideMode.ElideMiddle, rect.width()-12)
+        draw_rect = rect.adjusted(6, rect.height()-24, -6, -4)
+        text_rect = option.fontMetrics.boundingRect(draw_rect, Qt.AlignmentFlag.AlignCenter, displayed)
+        return FilenameLayout(original, displayed, draw_rect, text_rect.intersected(draw_rect))
+
     def paint(self, painter, option, index):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -131,7 +142,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.drawText(image_rect, Qt.AlignmentFlag.AlignCenter, '· · ·')
         item = index.data(Qt.ItemDataRole.UserRole)
         if item.is_live:
-            mode, badge = _live_badge_layout(image_rect)
+            mode, badge = _live_badge_layout(displayed_rect, frame_rect=rect)
             if mode == 'dot' and not badge.isEmpty():
                 painter.setPen(QPen(QColor(colors['badge_background']), 2))
                 painter.setBrush(QColor(colors['badge_text']))
@@ -149,6 +160,6 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.drawText(image_rect.adjusted(0, 0, -4, -2), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, '…' if item.pending else '!')
         painter.setFont(option.font)
         painter.setPen(QColor(colors['thumbnail_selected_text' if selected else 'thumbnail_text']))
-        title = option.fontMetrics.elidedText(item.image_path.name, Qt.TextElideMode.ElideMiddle, rect.width()-12)
-        painter.drawText(rect.adjusted(6, rect.height()-24, -6, -4), Qt.AlignmentFlag.AlignCenter, title)
+        filename = self.filename_layout(option, index)
+        painter.drawText(filename.draw_rect, Qt.AlignmentFlag.AlignCenter, filename.displayed)
         painter.restore()

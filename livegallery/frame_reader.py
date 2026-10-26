@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from bisect import bisect_left
 from dataclasses import dataclass
+from fractions import Fraction
 import io
 import json
 import math
@@ -40,6 +41,9 @@ class FrameInfo:
     index: int
     pts_seconds: float
     duration_seconds: float
+    # Decoder presentation timestamp, in the movie timeline after edit lists.
+    # Unlike the UI position, this is never shifted by the first decoded PTS.
+    presentation_time: Fraction | None = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,9 @@ class VideoMetadata:
     codec: str
     start_time_seconds: float
     timestamps_estimated: bool = False
+    time_base: Fraction | None = None
+    still_image_time: Fraction | None = None
+    asset_identifier: str | None = None
 
     @property
     def frame_count(self):
@@ -72,6 +79,13 @@ def _fraction(value, fallback=0.0):
         return float(numerator) / float(denominator)
     except (ValueError, ZeroDivisionError):
         return fallback
+
+
+def _exact_fraction(value):
+    try:
+        return Fraction(str(value))
+    except (ValueError, ZeroDivisionError):
+        return None
 
 
 class FrameReader:
@@ -170,8 +184,8 @@ class FrameReader:
         command = [self._tools.ffprobe, '-v', 'error', '-threads', '1',
                    '-protocol_whitelist', 'file,pipe', '-select_streams', 'v:0',
                    '-show_frames', '-show_streams', '-show_format', '-show_entries',
-                   'frame=best_effort_timestamp_time,pkt_duration_time,duration_time,width,height:'
-                   'stream=width,height,codec_name,avg_frame_rate,duration:stream_tags=rotate:'
+                   'frame=best_effort_timestamp,pts,best_effort_timestamp_time,pkt_duration_time,duration_time,width,height:'
+                   'stream=width,height,codec_name,avg_frame_rate,duration,time_base,start_pts,start_time:stream_tags=rotate:'
                    'stream_side_data=rotation,crop_left,crop_right,crop_top,crop_bottom:format=duration',
                    '-of', 'json', str(self.path)]
         document = json.loads(self._run(command, MAX_PROBE_BYTES))
@@ -206,31 +220,58 @@ class FrameReader:
             width, height = height, width
         fps = _fraction(stream.get('avg_frame_rate'), 0.0)
         default_duration = 1.0 / fps if fps > 0 else 1.0 / 30
-        timestamps, durations, estimated = [], [], False
+        timestamps, durations, precise_times, estimated = [], [], [], False
+        time_base = _exact_fraction(stream.get('time_base'))
+        if time_base is not None and time_base <= 0:
+            time_base = None
         for frame in frames:
-            timestamp = _number(frame.get('best_effort_timestamp_time'))
+            raw_pts = _exact_fraction(frame.get('best_effort_timestamp'))
+            if raw_pts is None:
+                raw_pts = _exact_fraction(frame.get('pts'))
+            exact = raw_pts * time_base if raw_pts is not None and raw_pts.denominator == 1 and time_base is not None else None
+            timestamp = float(exact) if exact is not None else _number(frame.get('best_effort_timestamp_time'))
             duration = _number(frame.get('duration_time'), _number(frame.get('pkt_duration_time'), default_duration))
             duration = duration if duration > 0 else default_duration
             if timestamp is None:
                 timestamp = timestamps[-1] + durations[-1] if timestamps else 0.0
                 estimated = True
+            if exact is None:
+                estimated = True
             if timestamps and timestamp < timestamps[-1] - .000001:
                 raise ValueError("视频帧时间顺序异常，无法可靠逐帧选择。")
             timestamps.append(timestamp)
             durations.append(duration)
+            precise_times.append(exact)
         start = timestamps[0]
         records = []
         for index, timestamp in enumerate(timestamps):
             interval = timestamps[index + 1] - timestamp if index + 1 < len(timestamps) else durations[index]
-            records.append(FrameInfo(index, max(0.0, timestamp - start), max(0.0, interval)))
+            records.append(FrameInfo(index, max(0.0, timestamp - start), max(0.0, interval), precise_times[index]))
         duration = records[-1].pts_seconds + records[-1].duration_seconds
         if duration > MAX_DURATION_SECONDS:
             raise ValueError("视频超过 10 分钟，暂不支持在封面图编辑器中读取。")
+        still_image_time = None
+        asset_identifier = None
+        if self.path.suffix.casefold() in ('.mov', '.mp4'):
+            from .live_photo_movie import inspect_live_photo_movie
+            try:
+                movie = inspect_live_photo_movie(self.path, cancel_event=self._cancel_event)
+                if movie.supported:
+                    still_image_time = movie.photo_time
+                    asset_identifier = movie.asset_identifier
+            except InterruptedError:
+                raise
+            except (ValueError, OSError):
+                # Generic preview remains available for unsupported metadata.
+                # Saving performs its own strict pair validation and may refuse it.
+                pass
+        self._check_cancelled()
         if self._file_signature() != signature:
             raise OSError("视频文件已变化，请重新打开封面图编辑器。")
         self._signature = signature
         self._metadata = VideoMetadata(width, height, rotation, tuple(records), duration,
-                                       str(stream.get('codec_name', '')), start, estimated)
+                                       str(stream.get('codec_name', '')), start, estimated, time_base,
+                                       still_image_time, asset_identifier)
         return self._metadata
 
     def nearest_index(self, milliseconds: float) -> int:

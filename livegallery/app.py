@@ -31,6 +31,9 @@ from .jobs import JobQueue
 from .folder_picker import select_photo_folders
 from .folder_tree import FolderTree
 from .filmstrip_panel import FilmstripPanel
+from .filename_field import FilenameField, filename_tooltip
+from .photo_info_bar import PhotoInfoBar
+from .sound_button import SoundButton
 from .fullscreen_edge_gesture import FullscreenEdgeGesture
 from .detached_windows import FloatingMapWindow, PreviewWindow, TouchMapPanel
 from .library import _identifier, natural_key, scan_folder
@@ -148,25 +151,6 @@ class _PathLabel(QLabel):
         self._elide()
 
 
-class FilenameField(QLineEdit):
-    """Selectable filename text with native copy controls and no rename action."""
-
-    def __init__(self, text, parent=None):
-        super().__init__(text, parent)
-        self.setReadOnly(True)
-        self.setFrame(False)
-        self.setTextMargins(0, 0, 0, 0)
-        self.setCursorPosition(0)
-
-    def setText(self, text):
-        # Preview/pair updates can reapply the same name while the user copies
-        # it. Leave selection, cursor and horizontal scroll untouched then.
-        if text == self.text():
-            return
-        super().setText(text)
-        self.setCursorPosition(0)
-
-
 class MediaTypeFilter(QPushButton):
     """A dropdown whose independent checkboxes remain open while selecting."""
 
@@ -227,7 +211,7 @@ APP_SHORTCUTS = {
     "previous": ("Left", "上一张"),
     "next": ("Right", "下一张"),
     "fullscreen": ("F11", "切换全屏"),
-    "open_folder": ("Ctrl+O", "打开文件夹"),
+    "open_folder": ("Ctrl+O", "添加文件夹"),
     "select_folders": ("Ctrl+A", "全选侧栏文件夹"),
 }
 
@@ -252,7 +236,7 @@ def _shortcut_error(hold: QKeySequence, once: QKeySequence, filmstrip: QKeySeque
         return "请分别设置按住播放、单击播放、切换胶片条的按键或组合键。"
     for _label, sequence in sequences:
         if sequence[0].key() == Qt.Key.Key_Escape:
-            return "Esc 保留用于退出全屏和返回总览，不能设为自定义快捷键。"
+            return "Esc 保留用于退出全屏和返回全览，不能设为自定义快捷键。"
     for index, (label, sequence) in enumerate(sequences):
         for other_label, other_sequence in sequences[index + 1:]:
             if sequence == other_sequence:
@@ -275,7 +259,7 @@ def _shortcut_overrides(hold: QKeySequence, once: QKeySequence, filmstrip: QKeyS
             combination = sequence[0]
             direction = _overview_zoom_direction(combination.key(), combination.keyboardModifiers())
             if direction:
-                operation = '放大总览缩略图' if direction > 0 else '缩小总览缩略图'
+                operation = '放大全览缩略图' if direction > 0 else '缩小全览缩略图'
                 overrides.append(f"{sequence.toString(QKeySequence.SequenceFormat.NativeText)}：由“{operation}”改为“{label}”")
     return overrides
 
@@ -309,6 +293,9 @@ class SettingsDialog(QDialog):
         from .fullscreen_gesture_selector import FullscreenGestureSelector
         self.fullscreen_exit_gestures = FullscreenGestureSelector(preferences.fullscreen_exit_gestures)
         appearance_form.addRow('退出全屏手势', self.fullscreen_exit_gestures)
+        self.show_zoom_controls = PillSwitch('显示缩放按钮和比例')
+        self.show_zoom_controls.setChecked(preferences.show_zoom_controls)
+        appearance_form.addRow(self.show_zoom_controls)
         theme_help = QLabel('跟随系统时，自动响应 Windows 的应用外观变化。')
         theme_help.setObjectName('muted')
         theme_help.setWordWrap(True)
@@ -324,7 +311,7 @@ class SettingsDialog(QDialog):
         self.autoplay = PillSwitch("切换到 Live Photo 时自动播放一次")
         self.autoplay.setChecked(preferences.autoplay)
         form.addRow("自动播放", self.autoplay)
-        autoplay_help = QLabel("下次切换照片起生效；播完恢复静态照片，不受按住时循环设置影响。总览或对话框中不会自动播放。")
+        autoplay_help = QLabel("下次切换照片起生效；播完恢复静态照片，不受按住时循环设置影响。全览或对话框中不会自动播放。")
         autoplay_help.setWordWrap(True)
         autoplay_help.setObjectName("muted")
         form.addRow(autoplay_help)
@@ -361,7 +348,7 @@ class SettingsDialog(QDialog):
         self.filmstrip_key.setMaximumSequenceLength(1)
         self.filmstrip_key.setFinishingKeyCombinations([])
         form.addRow("显示／隐藏胶片条快捷键", self.filmstrip_key)
-        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n胶片条快捷键在全屏同样可用，总览中记住选择。可设置单键或组合键；输入文字时不触发。Esc 保留用于退出全屏和返回总览；全屏时 F11 始终退出全屏。")
+        help_text = QLabel("按住播放：松开立即停止。单击播放：松开后继续，播完一次恢复照片。\n胶片条快捷键在全屏同样可用，全览中记住选择。可设置单键或组合键；输入文字时不触发。Esc 保留用于退出全屏和返回全览；全屏时 F11 始终退出全屏。")
         help_text.setObjectName("muted")
         help_text.setWordWrap(True)
         form.addRow(help_text)
@@ -568,7 +555,6 @@ class MainWindow(QMainWindow):
         self.viewer.zoom_changed.connect(self._zoom_changed)
         self.viewer.playback_changed.connect(self._playback_changed)
         self.viewer.message.connect(self._show_message)
-        self.viewer.controls_toggled.connect(self._toggle_controls)
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self.toast.hide)
@@ -595,7 +581,6 @@ class MainWindow(QMainWindow):
         self.fullscreen_edge_gesture.escapeRequested.connect(self._fullscreen_edge_escape)
         QApplication.instance().screenRemoved.connect(self._recover_auxiliary_windows)
         self._update_hint()
-        self.statusBar().showMessage("本地浏览 · JPG / JPEG / HEIC + MOV · 支持触屏与普通图片")
         bind_theme(self, self._apply_theme)
 
     def _apply_theme(self, _scheme):
@@ -632,23 +617,18 @@ class MainWindow(QMainWindow):
         self.header = QFrame()
         self.header.setObjectName("header")
         header = QHBoxLayout(self.header)
-        header.setContentsMargins(22, 14, 20, 14)
+        header.setContentsMargins(20, 6, 20, 6)
         header.setSpacing(10)
-        brand_column = QVBoxLayout()
-        brand_column.setSpacing(0)
-        brand = QLabel("LiveViewer")
-        brand.setObjectName("brand")
-        brand_column.addWidget(brand)
-        subtitle = QLabel("让照片中的瞬间，再动起来")
-        subtitle.setObjectName("subtitle")
-        brand_column.addWidget(subtitle)
-        header.addLayout(brand_column)
+        self._header_layout = header
+        self.brand_label = QLabel("LiveViewer")
+        self.brand_label.setObjectName("brand")
+        header.addWidget(self.brand_label)
         header.addStretch()
-        self.open_button = self._button("＋  打开文件夹", self.choose_folder, name="primary")
+        self.open_button = self._button("＋  添加文件夹", self.choose_folder, name="primary")
         header.addWidget(self.open_button)
         self.sidebar_button = self._button("隐藏列表", self._toggle_sidebar, checkable=True)
         self.sidebar_button.setChecked(True)
-        self.grid_button = self._button("▦  总览", self._toggle_grid, checkable=True)
+        self.grid_button = self._button("▦  全览", self._toggle_grid, checkable=True)
         header.addWidget(self.grid_button)
         self.strip_button = self._button("胶片条", self._toggle_strip, checkable=True)
         self.strip_button.setChecked(self._remembered_strip)
@@ -725,11 +705,22 @@ class MainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._folder_context_menu)
         side.addWidget(self.tree)
-        side_note = QLabel("勾选多选 · Shift 选范围 · Ctrl+A 全选\n图片与视频仅在保存封面图时更改\n缓存按设置位置存放")
-        side_note.setObjectName("muted")
-        side_note.setWordWrap(True)
-        side_note.setStyleSheet("font-size:11px;padding:5px")
-        side.addWidget(side_note)
+        statistics = QVBoxLayout()
+        statistics.setContentsMargins(5, 0, 5, 0)
+        statistics.setSpacing(2)
+        self.library_label = QLabel('尚未加载照片')
+        self.analysis_label = QLabel('按需加载 · 本机缓存')
+        for label in (self.library_label, self.analysis_label):
+            label.setObjectName('muted')
+            label.setWordWrap(True)
+            label.setStyleSheet('font-size:10px;')
+            statistics.addWidget(label)
+        side.addLayout(statistics)
+        self.hint_label = QLabel()
+        self.hint_label.setObjectName("muted")
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet("font-size:11px;padding:5px")
+        side.addWidget(self.hint_label)
         self.sidebar.setMinimumWidth(170)
         self.sidebar.setMaximumWidth(370)
         splitter.addWidget(self.sidebar)
@@ -737,35 +728,40 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
-        self.infobar = QFrame()
-        self.infobar.setObjectName("infobar")
-        info = QHBoxLayout(self.infobar)
-        info.setContentsMargins(20, 10, 18, 10)
+        self.infobar = PhotoInfoBar()
+        info = self.infobar.row
+        self._info_layout = info
+        self.photo_title = QWidget()
+        self.photo_title.setObjectName('photoTitle')
+        title_layout = QVBoxLayout(self.photo_title)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(0)
         self.filename_label = FilenameField("你的本地照片库")
         self.filename_label.setObjectName("filename")
-        self.filename_label.setMinimumWidth(80)
+        self.filename_label.setMinimumWidth(96)
         self.filename_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        info.addWidget(self.filename_label, 1)
+        title_layout.addWidget(self.filename_label)
+        self.resolution_label = QLabel()
+        self.resolution_label.setObjectName('muted')
+        self.resolution_label.setStyleSheet('font-size:11px;')
+        title_layout.addWidget(self.resolution_label)
+        info.addWidget(self.photo_title, 1)
         self.live_badge = QLabel("◉ LIVE")
         self.live_badge.setObjectName("liveBadge")
         self.live_badge.hide()
         info.addWidget(self.live_badge)
         self.detach_button = self._button('独立预览窗', self._toggle_detached_preview)
         info.addWidget(self.detach_button)
-        self.map_button = self._button('虚拟触控板', self._toggle_touch_map, checkable=True)
+        self.map_button = self._button('触控板', self._toggle_touch_map, checkable=True)
         self.map_button.setVisible(False)
         info.addWidget(self.map_button)
         self.counter_label = QLabel("0 / 0")
         self.counter_label.setObjectName("muted")
         info.addWidget(self.counter_label)
-        self.previous_button = self._button("‹", lambda: self._navigate(-1))
-        self.previous_button.setToolTip("上一张 · ←")
-        self.next_button = self._button("›", lambda: self._navigate(1))
-        self.next_button.setToolTip("下一张 · →")
-        info.addWidget(self.previous_button)
-        info.addWidget(self.next_button)
         self.more_button = self._button("•••", self._show_item_menu)
+        self.more_button.setToolTip('更多照片操作')
         info.addWidget(self.more_button)
+        self.infobar.set_overflow_widget(self.detach_button)
         right_layout.addWidget(self.infobar)
 
         self.model = CatalogModel(self)
@@ -783,6 +779,10 @@ class MainWindow(QMainWindow):
         self.empty_title.setObjectName("emptyTitle")
         self.empty_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty.addWidget(self.empty_title)
+        self.welcome_tagline = QLabel("让照片中的瞬间，再动起来")
+        self.welcome_tagline.setObjectName("subtitle")
+        self.welcome_tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.addWidget(self.welcome_tagline)
         self.empty_body = QLabel("静止时，欣赏照片。按住时，重温瞬间。\n支持 JPG / JPEG / HEIC + MOV，以及常用图片格式。")
         self.empty_body.setObjectName("emptyBody")
         self.empty_body.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -824,30 +824,35 @@ class MainWindow(QMainWindow):
         self._photo_layout.addWidget(self._content_host, 1)
         right_layout.addWidget(self.photo_area, 1)
 
-        self.viewer_tools = QFrame()
-        tools = QHBoxLayout(self.viewer_tools)
-        tools.setContentsMargins(18, 7, 18, 7)
-        self.hint_label = QLabel()
-        self.hint_label.setObjectName("muted")
-        tools.addWidget(self.hint_label, 1)
-        self.sound_button = self._button("静音", self._toggle_sound, checkable=True)
-        self.sound_button.setChecked(self.preferences.muted)
-        tools.addWidget(self.sound_button)
-        tools.addWidget(self._button("－", self.viewer.zoom_out))
+        self.sound_button = SoundButton(muted=self.preferences.muted)
+        self.sound_button.clicked.connect(self._toggle_sound)
+        self.zoom_controls = QWidget()
+        self.zoom_controls.setObjectName('zoomControls')
+        tools = QHBoxLayout(self.zoom_controls)
+        tools.setContentsMargins(0, 0, 0, 0)
+        tools.setSpacing(6)
+        self.zoom_out_button = self._button("－", self.viewer.zoom_out)
+        self.zoom_out_button.setToolTip('缩小图片')
+        tools.addWidget(self.zoom_out_button)
         self.zoom_label = QLabel("适应窗口")
         self.zoom_label.setMinimumWidth(72)
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         tools.addWidget(self.zoom_label)
-        tools.addWidget(self._button("＋", self.viewer.zoom_in))
-        tools.addWidget(self._button("适应", self.viewer.fit_image))
-        right_layout.addWidget(self.viewer_tools)
+        self.zoom_in_button = self._button("＋", self.viewer.zoom_in)
+        self.zoom_in_button.setToolTip('放大图片')
+        tools.addWidget(self.zoom_in_button)
+        self.fit_button = self._button("适应", self.viewer.fit_image)
+        self.fit_button.setToolTip('让整张图片适应窗口')
+        for button in (self.zoom_out_button, self.zoom_in_button, self.fit_button, self.more_button):
+            button.setMinimumWidth(38)
+        for index, widget in enumerate((self.sound_button, self.zoom_controls, self.fit_button), 1):
+            info.insertWidget(index, widget)
+        self.zoom_controls.setVisible(self.preferences.show_zoom_controls)
 
         self.film = FilmstripPanel(self.model)
         self.strip = self.film.strip
         self.film_resize_handle = self.film.resize_handle
         self.collapse_strip_button = self.film.hide_button
-        self.library_label = self.film.library_label
-        self.analysis_label = self.film.analysis_label
         self.film.hideRequested.connect(self._hide_strip)
         self.film.layoutRequested.connect(self._set_film_layout)
         self.film.thicknessRequested.connect(self._set_film_thickness)
@@ -933,12 +938,15 @@ class MainWindow(QMainWindow):
             else:
                 self.viewer.setTransform(transform)
                 self.viewer.centerOn(center)
-                # centerOn uses the view's half-pixel geometric center while
-                # our saved point is the integer viewport center. Correct the
-                # scroll pixels once so repeated reparenting cannot drift.
+                # QGraphicsView.centerOn uses the fractional viewport centre,
+                # while our saved scene centre is the actual integer centre
+                # pixel. Correct that rounding bias so repeated preview
+                # detach/return cycles do not gradually pan the photo.
                 offset = self.viewer.mapFromScene(center) - self.viewer.viewport().rect().center()
-                self.viewer.horizontalScrollBar().setValue(self.viewer.horizontalScrollBar().value() + offset.x())
-                self.viewer.verticalScrollBar().setValue(self.viewer.verticalScrollBar().value() + offset.y())
+                horizontal = self.viewer.horizontalScrollBar()
+                vertical = self.viewer.verticalScrollBar()
+                horizontal.setValue(horizontal.value() + offset.x())
+                vertical.setValue(vertical.value() + offset.y())
                 self.viewer._fit_mode = False
                 self.viewer.zoom_changed.emit(self.viewer.zoom_factor())
 
@@ -959,8 +967,6 @@ class MainWindow(QMainWindow):
         self._detached_generation += 1
         generation = self._detached_generation
         preview = self.preview_window = PreviewWindow()
-        preview.initialGeometryReady.connect(
-            lambda: self._restore_view_after_move(transform, center, fitted, generation, identity))
         preview.returnRequested.connect(self._redock_preview)
         preview.geometryRemembered.connect(lambda geometry, screen: self._remember_auxiliary_geometry('preview', geometry, screen))
         preview.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -972,11 +978,11 @@ class MainWindow(QMainWindow):
         self.grid_button.setChecked(True)
         self._toggle_grid(True)
         self.grid_button.setEnabled(False)
-        self.detach_button.setText('收回预览窗')
+        self.detach_button.setText('返回主窗口')
         self.map_button.setVisible(True)
         self.map_button.setChecked(False)
         self._update_window_group()
-        preview.show_initial_maximized(self.preferences.preview_screen)
+        preview.showMaximized()
         self._sync_preview_state()
         QTimer.singleShot(0, lambda: self._restore_view_after_move(transform, center, fitted, generation, identity))
 
@@ -1433,7 +1439,7 @@ class MainWindow(QMainWindow):
         self._cache_warning = packet.warning
         self._cache_location = packet.location
         self.cache.max_bytes = self.preferences.cache_mb * 1024 ** 2
-        self.analysis_label.setText('按需加载 · ' + {'library': '图库缓存', 'program': '软件目录缓存'}.get(packet.location, '本机缓存'))
+        self._update_library_statistics()
         if previous is not self.cache:
             self._retire_cache(previous)
 
@@ -1486,6 +1492,7 @@ class MainWindow(QMainWindow):
             self._preview_bytes = 0
             self.viewer.clear()
         self.model.set_items([])
+        self._update_library_statistics()
         self.model.pending.clear()
         self.model.failures.clear()
         self.model.thumbnails.clear()
@@ -1501,6 +1508,7 @@ class MainWindow(QMainWindow):
         self._update_path_label()
         if not preserved:
             self.filename_label.setText("正在建立照片索引…" if folders else "你的本地照片库")
+            self.resolution_label.clear()
         self.live_badge.hide()
         self.preferences.last_folders = [str(folder) for folder in folders]
         self.preferences.last_folder = str(self.folder) if self.folder else ''
@@ -1525,7 +1533,6 @@ class MainWindow(QMainWindow):
     def _scan_progress(self, generation, count):
         if generation == self._scan_generation and not self._closed:
             self.empty_body.setText(f"已发现 {count:,} 张图片，正在扫描目录…\n完整图片和视频不会同时读入内存。")
-            self.statusBar().showMessage(f"正在扫描 · 已发现 {count:,} 张图片")
 
     def _scan_complete(self, generation, items, error):
         if generation != self._scan_generation or self._closed:
@@ -1549,6 +1556,7 @@ class MainWindow(QMainWindow):
             self._current_id = None
             self._displayed_item = None
             self._shown_image_path = None
+            self.resolution_label.clear()
             self.viewer.clear()
             self._build_tree()
             self._set_empty("无法打开此文件夹", "请检查文件夹权限或移动硬盘连接。\n" + str(error), "!")
@@ -1571,6 +1579,7 @@ class MainWindow(QMainWindow):
             self._current_id = None
             self._displayed_item = None
             self._shown_image_path = None
+            self.resolution_label.clear()
             self.viewer.clear()
             self._set_empty("此文件夹中没有支持的图片", "支持 JPG、JPEG、HEIC、PNG、WebP、BMP、GIF、TIFF 和 AVIF。\n可在设置中开启扫描子文件夹。", "◉")
             self.empty_open.show()
@@ -1666,7 +1675,6 @@ class MainWindow(QMainWindow):
         self.model.set_items(visible)
         self.grid.verticalScrollBar().setValue(grid_scroll)
         self.strip.current_scrollbar().setValue(strip_scroll)
-        self.library_label.setText(f"{len(visible):,} / {len(self._items):,} 项 · {sum(i.is_live for i in visible):,} 个 LIVE")
         current_row = next((row for row, item in enumerate(visible) if item.id == self._current_id), None)
         if current_row is not None:
             self._sync_selection(current_row, scroll=False)
@@ -1677,13 +1685,19 @@ class MainWindow(QMainWindow):
             self._current_id = None
             self._displayed_item = None
             self.filename_label.setText("没有符合条件的图片")
+            self.resolution_label.clear()
             self.live_badge.hide()
             self._set_empty("没有符合条件的图片", "试试清除搜索、切换筛选，或选择其他文件夹。", "⌕")
             self.empty_open.hide()
         self._update_navigation()
+        self._update_library_statistics()
+        self._update_live_overlay()
+
+    def _update_library_statistics(self):
+        visible = self.model.items
+        self.library_label.setText(f"共 {len(visible):,} 项 · {sum(i.is_live for i in visible):,} 个 LIVE")
         cache_label = {'library': '图库缓存', 'program': '软件目录缓存'}.get(self._cache_location, '本机缓存')
         self.analysis_label.setText(f"待分析 {sum(item.pending for item in self._primary_items):,} 项 · {cache_label}")
-        self._update_live_overlay()
 
     def _sort_changed(self, index):
         self.preferences.sort_by = "time" if index == 1 else "name"
@@ -1727,8 +1741,8 @@ class MainWindow(QMainWindow):
         self._deferred_upgrade = None
         self._is_playing = False
         self._sync_selection(row)
-        self.filename_label.setText(item.image_path.name)
-        self.filename_label.setToolTip(str(item.image_path))
+        self.filename_label.set_file_path(item.image_path)
+        self.resolution_label.clear()
         self.live_badge.setVisible(item.is_live)
         self.live_badge.setText("◉ LIVE")
         self.preferences.last_image = str(item.image_path)
@@ -1750,8 +1764,9 @@ class MainWindow(QMainWindow):
             self.strip.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def _load_current(self, item):
-        self.filename_label.setText(item.image_path.name)
-        self.filename_label.setToolTip(str(item.image_path))
+        self.filename_label.set_file_path(item.image_path)
+        if self._shown_image_path != item.image_path:
+            self.resolution_label.clear()
         self._displayed_item = item
         cached = self._previews.get(str(item.image_path))
         if cached:
@@ -1784,12 +1799,13 @@ class MainWindow(QMainWindow):
             self.viewer.set_photo(image, item.video_path)
         self._shown_image_path = item.image_path
         self.content.setCurrentWidget(self.grid if self._grid_mode or self._detached else self.viewer)
-        self.filename_label.setText(item.image_path.name)
+        self.filename_label.set_file_path(item.image_path)
         self.live_badge.setVisible(item.is_live)
         self.live_badge.setText("! LIVE" if item.uncertain else "◉ LIVE")
         self._update_live_overlay()
         self.preferences.last_image = str(item.image_path)
-        self.statusBar().showMessage(item.note or f"{original_size[0]:,} × {original_size[1]:,} · {item.image_path.parent}")
+        self.resolution_label.setText(f"{original_size[0]:,} × {original_size[1]:,}")
+        self.filename_label.setToolTip(filename_tooltip(item.image_path, item.note))
         self._update_hint()
         self.image_ready.emit()
         self._schedule_autoplay()
@@ -2034,11 +2050,54 @@ class MainWindow(QMainWindow):
         if row is not None and target != self._current_id:
             self._select_row(row)
 
+    def _update_library_emphasis(self):
+        name = "addFolder" if self._items else "primary"
+        if self.open_button.objectName() != name:
+            self.open_button.setObjectName(name)
+            self.open_button.style().unpolish(self.open_button)
+            self.open_button.style().polish(self.open_button)
+            self.open_button.update()
+        self.welcome_tagline.setVisible(not self.folders and not self._items)
+
+    def _fit_welcome_content(self):
+        # Keep the welcome text and touch target intact when the filmstrip
+        # leaves little vertical space. Only the decorative icon is optional.
+        if self._closed or self.content.currentWidget() is not self.empty_page:
+            return
+        layout = self.empty_page.layout()
+        labels = (self.empty_title, self.empty_body)
+        required = sum(max(label.sizeHint().height(), label.heightForWidth(label.width()))
+                       for label in labels)
+        required += self.empty_open.sizeHint().height() + self.empty_icon.sizeHint().height()
+        count = 4
+        if not self.welcome_tagline.isHidden():
+            required += self.welcome_tagline.sizeHint().height()
+            count += 1
+        margins = layout.contentsMargins()
+        required += margins.top() + margins.bottom() + layout.spacing() * (count - 1)
+        self.empty_icon.setVisible(self.content.height() >= required)
+
+    def _sync_view_actions(self):
+        # Overview dedicates its content height to the grid. Preview controls
+        # remain available in the toolbar only while that window is open.
+        target = self._header_layout if self._detached else self._info_layout
+        other = self._info_layout if self._detached else self._header_layout
+        anchor = self.fullscreen_button if self._detached else self.counter_label
+        for button in (self.detach_button, self.map_button):
+            if target.indexOf(button) < 0:
+                other.removeWidget(button)
+                target.insertWidget(target.indexOf(anchor), button)
+        if self._detached:
+            self.detach_button.setVisible(True)
+        else:
+            self.infobar.refresh()
+        self.map_button.setVisible(self._detached)
+        self.infobar.setVisible(self._chrome_visible and not self._grid_mode)
+
     def _update_navigation(self):
+        self._update_library_emphasis()
         row = next((row for row, item in enumerate(self.model.items) if item.id == self._current_id), -1)
         self.counter_label.setText(f"{row + 1:,} / {len(self.model.items):,}")
-        self.previous_button.setEnabled(row > 0)
-        self.next_button.setEnabled(row >= 0 and row < len(self.model.items) - 1)
         self.more_button.setEnabled(row >= 0)
 
     def _zoom_changed(self, factor):
@@ -2088,6 +2147,7 @@ class MainWindow(QMainWindow):
         self.empty_title.setText(title)
         self.empty_body.setText(body)
         self.empty_icon.setText(icon)
+        self._update_library_emphasis()
         if not self._grid_mode and not self._detached:
             self.content.setCurrentWidget(self.empty_page)
         self._update_live_overlay()
@@ -2097,7 +2157,6 @@ class MainWindow(QMainWindow):
             return
         self.toast.setText(str(text))
         self.toast.setVisible(not self._fullscreen_active)
-        self.statusBar().showMessage(str(text), 8000)
         self._toast_timer.start(6500)
 
     def _toggle_sidebar(self, checked):
@@ -2125,7 +2184,7 @@ class MainWindow(QMainWindow):
             self.grid_button.setChecked(True)
         self.viewer.stop_live()
         self._grid_mode = checked
-        self.grid_button.setText("◧  单张" if checked else "▦  总览")
+        self.grid_button.setText("◧  单张" if checked else "▦  全览")
         if checked:
             self.content.setCurrentWidget(self.grid)
             row = next((row for row, item in enumerate(self.model.items) if item.id == self._current_id), 0)
@@ -2137,7 +2196,6 @@ class MainWindow(QMainWindow):
             self.content.setCurrentWidget(self.empty_page)
         self.film.setVisible(self._remembered_strip and not checked)
         QTimer.singleShot(0, self._clamp_film_height)
-        self.viewer_tools.setVisible(not checked and self._chrome_visible)
         self._update_live_overlay()
 
     def _overview_size_changed(self, width):
@@ -2196,9 +2254,17 @@ class MainWindow(QMainWindow):
 
     def _set_film_height(self, requested, remember=True):
         preferred = max(160, min(480, int(requested)))
-        available = self.photo_area.height() + (self.film.height() if self.film.isVisible()
-                                               and self.film.orientation == 'horizontal' else 0)
-        maximum = max(160, min(480, available - 160))
+        # A fixed-height strip can temporarily overflow a smaller window.
+        # Budget from its parent, never from those already oversized children.
+        layout = self._right_layout
+        margins = layout.contentsMargins()
+        rows = [layout.itemAt(index).widget() for index in range(layout.count())]
+        rows = [widget for widget in rows if widget is not None and not widget.isHidden()]
+        available = layout.parentWidget().contentsRect().height() - margins.top() - margins.bottom()
+        available -= sum(widget.height() for widget in rows if widget not in (self.photo_area, self.film))
+        available -= max(0, len(rows) - 1) * max(0, layout.spacing())
+        photo_minimum = max(160, self.photo_area.minimumSizeHint().height())
+        maximum = max(160, min(480, available - photo_minimum))
         if self.film.orientation == 'horizontal':
             self.film.set_extent(min(maximum, preferred))
         if remember:
@@ -2285,13 +2351,10 @@ class MainWindow(QMainWindow):
         self._chrome_visible = visible
         self.header.setVisible(visible)
         self.filterbar.setVisible(visible)
-        self.infobar.setVisible(visible)
-        self.viewer_tools.setVisible(visible and not self._grid_mode)
+        self.infobar.setVisible(visible and not self._grid_mode)
         self.film.setVisible(self._remembered_strip and not self._grid_mode)
         QTimer.singleShot(0, self._clamp_film_height)
-        self.film.set_info_visible(visible)
         self.sidebar.setVisible(visible and self.sidebar_button.isChecked())
-        self.statusBar().setVisible(visible)
         if not visible:
             self.toast.hide()
         self._update_live_overlay()
@@ -2299,6 +2362,8 @@ class MainWindow(QMainWindow):
     def _update_live_overlay(self, *_args):
         if not hasattr(self, "fullscreen_live_badge"):
             return
+        self._sync_view_actions()
+        self._fit_welcome_content()
         self.detach_button.setEnabled(self._detached or self._displayed_item is not None)
         self._sync_preview_state()
         self.fullscreen_live_badge.fit_contents()
@@ -2316,25 +2381,17 @@ class MainWindow(QMainWindow):
             self.fullscreen_live_badge.move(16, 16)
             self.fullscreen_live_badge.raise_()
 
-    def _toggle_controls(self):
-        if self._detached:
-            return
-        if not self._fullscreen_active:
-            self.strip_button.setChecked(not self.strip_button.isChecked())
-            self._toggle_strip(self.strip_button.isChecked())
-
     def _toggle_sound(self, muted):
         self.preferences.muted = muted
         self.viewer.set_options(self.preferences.loop, muted,
                                 self.preferences.preserve_zoom, self.preferences.hold_ms,
                                 self.preferences.horizontal_scroll_mode)
         self._save_preferences()
-        self.sound_button.setText("静音" if muted else "声音开启")
+        self.sound_button.set_muted(muted)
 
     def _update_hint(self):
         key = QKeySequence(self.preferences.live_key).toString(QKeySequence.SequenceFormat.NativeText)
-        once = QKeySequence(self.preferences.live_once_key).toString(QKeySequence.SequenceFormat.NativeText)
-        self.hint_label.setText(f"按住鼠标／触屏／{key} 播放 · 松开停止 · 按 {once} 播完一次 · 左右滑动切图 · 双指缩放")
+        self.hint_label.setText(f"按住鼠标/触屏/{key}播放")
 
     def open_settings(self):
         self._navigation_timer.stop()
@@ -2346,6 +2403,9 @@ class MainWindow(QMainWindow):
             return
         self.preferences.loop = dialog.mode.currentIndex() == 1
         self.preferences.theme_mode = dialog.theme_mode.currentData()
+        self.preferences.show_zoom_controls = dialog.show_zoom_controls.isChecked()
+        self.zoom_controls.setVisible(self.preferences.show_zoom_controls)
+        self.infobar.refresh()
         self.theme_controller.set_mode(self.preferences.theme_mode)
         self.preferences.fullscreen_exit_gestures = dialog.fullscreen_exit_gestures.selected_gestures()
         self.fullscreen_edge_gesture.set_enabled_edges(self.preferences.fullscreen_exit_gestures)
@@ -2380,8 +2440,7 @@ class MainWindow(QMainWindow):
         self.viewer.set_options(self.preferences.loop, self.preferences.muted,
                                 self.preferences.preserve_zoom, self.preferences.hold_ms,
                                 self.preferences.horizontal_scroll_mode)
-        self.sound_button.setChecked(self.preferences.muted)
-        self.sound_button.setText("静音" if self.preferences.muted else "声音开启")
+        self.sound_button.set_muted(self.preferences.muted)
         self._update_hint()
         self._save_preferences()
         if cache_changed:
@@ -2415,7 +2474,7 @@ class MainWindow(QMainWindow):
         if item is None:
             if self._detached:
                 menu = QMenu(self)
-                menu.addAction('收回预览窗', self._redock_preview)
+                menu.addAction('返回主窗口', self._redock_preview)
                 menu.exec(position)
                 menu.deleteLater()
             return
@@ -2424,7 +2483,15 @@ class MainWindow(QMainWindow):
         self.viewer.stop_live()
         menu = QMenu(self)
         if self._detached:
-            menu.addAction('收回预览窗', self._redock_preview)
+            menu.addAction('返回主窗口', self._redock_preview)
+            touchpad = menu.addAction('触控板')
+            touchpad.setCheckable(True)
+            touchpad.setChecked(self._map_visible)
+            touchpad.triggered.connect(self._toggle_touch_map)
+            menu.addSeparator()
+        else:
+            preview = menu.addAction('独立预览窗', self._detach_preview)
+            preview.setEnabled(self._displayed_item is not None)
             menu.addSeparator()
         if item.is_live:
             menu.addAction("更改封面图…", lambda item=item: self._open_cover_editor(item))
@@ -2489,7 +2556,7 @@ class MainWindow(QMainWindow):
             return
         self._navigation_timer.stop()
         self._navigation_target_id = None
-        self.viewer.release_media_for_edit()
+        self.viewer.release_video_for_cover_edit()
         self._autoplay_armed = False
         self._keyboard_live_pressed = False
         versions = tuple(file_version(path) for path in (item.candidates or (item.image_path,)))
@@ -2539,11 +2606,16 @@ class MainWindow(QMainWindow):
                                 (Path(result.image_path),), note="已另存新的封面图与 Live Photo 视频")
             self._primary_items.append(updated)
         else:
-            updated = replace(original, image_path=Path(result.image_path), video_path=Path(result.video_path),
+            image_path = Path(result.image_path)
+            candidates = tuple(dict.fromkeys((image_path, *(path for path in
+                (original.candidates or (original.image_path,)) if path.is_file()))))
+            updated = replace(original, image_path=image_path, video_path=Path(result.video_path),
+                              candidates=candidates,
                               pending=False, uncertain=False, note="已更新封面图")
             self._primary_items = [updated if item.id == original.id else item for item in self._primary_items]
-            extras = {str(item.image_path): item for item in self._extras.get(original.id, [])}
-            for path in original.candidates:
+            extras = {str(item.image_path): item for item in self._extras.get(original.id, [])
+                      if item.image_path != updated.image_path and item.image_path.is_file()}
+            for path in candidates:
                 if path != updated.image_path:
                     extras.setdefault(str(path), MediaItem("extra-" + hashlib.sha256(str(path).encode()).hexdigest()[:22], path))
             self._extras[original.id] = list(extras.values())
@@ -2767,6 +2839,8 @@ class MainWindow(QMainWindow):
         if self._closed:
             return False
         kind = event.type()
+        if kind == QEvent.Type.Resize and watched is self.content:
+            QTimer.singleShot(0, self._fit_welcome_content)
         if kind == QEvent.Type.ApplicationDeactivate:
             self._cancel_viewer_input()
         elif kind == QEvent.Type.WindowDeactivate and watched in self._window_group():

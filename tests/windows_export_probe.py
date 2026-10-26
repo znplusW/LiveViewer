@@ -33,10 +33,7 @@ def click_native_save(stop, trace):
     user.IsWindow.argtypes = [wintypes.HWND]
     user.IsWindowEnabled.argtypes = [wintypes.HWND]
     user.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-    user.SendMessageTimeoutW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
-                                         wintypes.LPARAM, wintypes.UINT, wintypes.UINT,
-                                         ctypes.POINTER(ctypes.c_size_t)]
-    user.SendMessageTimeoutW.restype = wintypes.LPARAM
+    user.PostMessageW.restype = wintypes.BOOL
     def text(hwnd, class_name=False):
         value = ctypes.create_unicode_buffer(512)
         (user.GetClassNameW if class_name else user.GetWindowTextW)(hwnd, value, len(value))
@@ -64,10 +61,14 @@ def click_native_save(stop, trace):
                 continue
             trace.update(native_dialog_class=text(hwnd, True), native_dialog_title=text(hwnd),
                          save_button_class=text(button, True), save_button_text=text(button),
-                         real_native_save_clicked=True)
-            result = ctypes.c_size_t()
-            trace['click_dispatch_result'] = int(user.SendMessageTimeoutW(
-                button, 0x00F5, 0, 0, 0x0002, 5000, ctypes.byref(result)))
+                         dispatch_method='PostMessageW')
+            # Shell's Save handler can call COM. A cross-thread synchronous
+            # BM_CLICK dispatch puts it inside an input-synchronous call where
+            # COM rejects callouts; let the UI thread handle its queued message.
+            posted = bool(user.PostMessageW(button, 0x00F5, 0, 0))
+            trace.update(click_dispatch_result=int(posted), native_save_click_posted=posted)
+            if not posted:
+                raise ctypes.WinError(ctypes.get_last_error())
             return
         if not stop.is_set():
             trace['error'] = 'A real native SaveAs dialog with an enabled Save button was not found'
@@ -157,7 +158,7 @@ def main():
                           files=[p.name for p in folder.iterdir() if p.is_file()],
                           export_files=[p.name for p in export_folder.iterdir() if p.is_file()])
             assert not report.get('error'), report.get('error')
-            assert report['real_native_save_clicked'], 'Native Save button was not clicked'
+            assert report.get('native_save_click_posted'), 'Native Save button click was not posted'
             assert dialog.last_export_path is not None, dialog.status_label.text()
             target = Path(dialog.last_export_path)
             assert target.is_file(), 'Exported output file is absent'
@@ -176,7 +177,8 @@ def main():
                 attributes = int(kernel.GetFileAttributesW(str(target)))
                 report['output_attributes'] = attributes
                 assert attributes != 0xffffffff and not attributes & (0x2 | 0x4), 'Export is hidden/system'
-            report.update(status='passed', frame_index=4, full_size=list(image.size),
+            report.update(status='passed', real_native_save_clicked=True,
+                          frame_index=4, full_size=list(image.size),
                           output_bytes=target.stat().st_size)
         except Exception as error:
             report.update(error=str(error), traceback=traceback.format_exc())

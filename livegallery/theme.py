@@ -90,8 +90,9 @@ QFrame#header { background: #161b22; border-bottom: 1px solid #2a3039; }
 QFrame#filterbar { background: #14191f; border-bottom: 1px solid #262d36; }
 QFrame#sidebar { background: #151a20; border-right: 1px solid #29303a; }
 QFrame#infobar { background: #151a20; border-bottom: 1px solid #242b34; }
+QWidget#photoTitle, QWidget#zoomControls { background: transparent; }
 QFrame#film { background: #14191f; border-top: 1px solid #2a313b; }
-QLabel#brand { color: #f1d19b; font-size: 25px; font-weight: 700; }
+QLabel#brand { color: #f1d19b; font-size: 18px; font-weight: 700; }
 QLabel#subtitle, QLabel#muted { color: #83909f; }
 QLabel#emptyTitle { color: #e7edf5; font-size: 25px; font-weight: 600; }
 QLabel#emptyIcon { color: #e6ba72; font-size: 66px; }
@@ -142,8 +143,9 @@ QFrame#header { background: #ffffff; border-bottom: 1px solid #cbd3dc; }
 QFrame#filterbar { background: #eef2f6; border-bottom: 1px solid #cbd3dc; }
 QFrame#sidebar { background: #f9fafb; border-right: 1px solid #cbd3dc; }
 QFrame#infobar { background: #ffffff; border-bottom: 1px solid #cbd3dc; }
+QWidget#photoTitle, QWidget#zoomControls { background: transparent; }
 QFrame#film { background: #f0f3f7; border-top: 1px solid #cbd3dc; }
-QLabel#brand { color: #805113; font-size: 25px; font-weight: 700; }
+QLabel#brand { color: #805113; font-size: 18px; font-weight: 700; }
 QLabel#subtitle, QLabel#muted { color: #566474; }
 QLabel#emptyTitle { color: #202833; font-size: 25px; font-weight: 600; }
 QLabel#emptyIcon { color: #97631b; font-size: 66px; }

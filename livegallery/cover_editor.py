@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+from fractions import Fraction
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPointF, Qt, Signal
@@ -83,7 +84,8 @@ class _EditorWorker:
         self._save_cancel = threading.Event()
         self._reader = None
         self._preview = None
-        self._retiring_previews = []
+        self._preview_options = None
+        self._metadata = None
         self._pending = None
         self._busy = None
         self._sequence = 0
@@ -122,6 +124,8 @@ class _EditorWorker:
 
     def _preview_failed(self, text):
         with self._condition:
+            if self._closing.is_set() or self._busy == "save":
+                return
             sequence = self._sequence
         self.signals.failed.emit("preview", sequence, str(text))
 
@@ -133,6 +137,25 @@ class _EditorWorker:
             if sequence is None:
                 return
         self.signals.frame.emit(sequence, index, _qimage(image))
+
+    def _pause_preview_for_overwrite(self):
+        preview = self._preview
+        if preview is None:
+            return False
+        preview.close()
+        wait = getattr(preview, 'wait', None)
+        if wait is not None and wait(5) is False:
+            raise CoverSaveError("视频预览尚未释放文件，未覆盖原组；请稍后重试。")
+        self._preview = None
+        return True
+
+    def _resume_preview_after_failure(self):
+        if self._preview_factory is None or self._preview_options is None or self._closing.is_set():
+            return
+        self._preview = self._preview_factory(self._item.video_path, self._metadata,
+                                             **self._preview_options)
+        self._preview.start()
+        self._preview.request(self._selected_index)
 
     def request_save(self, index, mode):
         self._save_cancel.clear()
@@ -153,56 +176,9 @@ class _EditorWorker:
         preview = self._preview
         if preview is not None:
             preview.close()
-        for preview in self._retiring_previews:
-            preview.close()
         with self._condition:
             self._pending = None
             self._condition.notify()
-
-    def _start_preview(self, metadata):
-        if self._preview_factory is None or self._closing.is_set():
-            return
-        options = dict(image_path=self._item.image_path, on_frame=self._cached_frame,
-                       on_position=self.signals.position.emit, on_error=self._preview_failed,
-                       cancel_event=self._closing)
-        if (getattr(self._preview_factory, "supports_reader_fork", False)
-                and callable(getattr(self._reader, "fork", None))):
-            options["reader"] = self._reader
-        self._preview = self._preview_factory(self._item.video_path, metadata, **options)
-        self._preview.start()
-
-    def _release_movie_readers(self):
-        # Windows can deny replacement while FFmpeg still owns the MOV. Closing
-        # alone requests cancellation; waiting confirms every preview reader is
-        # gone before the transaction can replace either member of the pair.
-        if self._preview is not None:
-            preview, self._preview = self._preview, None
-            self._retiring_previews.append(preview)
-            preview.close()
-        for preview in list(self._retiring_previews):
-            wait = getattr(preview, "wait", None)
-            if callable(wait) and not wait(5):
-                # The primary reader remains open. Subsequent navigation uses
-                # its on-demand path, while another save retries this join.
-                raise CoverSaveError("预览视频尚未释放，请稍后重试保存。")
-            self._retiring_previews.remove(preview)
-        self._reader.close()
-
-    def _resume_after_failed_save(self):
-        if self._closing.is_set():
-            return
-        restored = CoverSource.capture(self._item, self._closing)
-        # Rolling back with temporary originals legitimately changes inode/time
-        # identity. Refresh that identity only if both contents are unchanged;
-        # never silently adopt an external edit as this editor's source.
-        if (restored.image.sha256 != self.source.image.sha256
-                or restored.video.sha256 != self.source.video.sha256):
-            raise CoverSaveError("源图片或视频已发生变化，请关闭编辑器后重新打开。")
-        self.source = restored
-        self._reader = self._reader_factory(self._item.video_path, cancel_event=self._closing)
-        metadata = self._reader.open()
-        self._start_preview(metadata)
-        return restored
 
     def _run(self):
         try:
@@ -210,10 +186,25 @@ class _EditorWorker:
             source = CoverSource.capture(self._item, self._closing)
             self.source = source
             metadata = self._reader.open()
+            self._metadata = metadata
             if self._closing.is_set():
                 return
+            if self._preview_factory is not None:
+                options = dict(image_path=self._item.image_path,
+                               on_frame=self._cached_frame,
+                               on_position=self.signals.position.emit,
+                               on_error=self._preview_failed,
+                               cancel_event=self._closing)
+                if (getattr(self._preview_factory, "supports_reader_fork", False)
+                        and callable(getattr(self._reader, "fork", None))):
+                    # Reuse verified frame metadata, while the session forks an
+                    # independent decoder/process and cancellation lifetime.
+                    options["reader"] = self._reader
+                self._preview_options = options
+                self._preview = self._preview_factory(self._item.video_path, metadata, **options)
             self.signals.opened.emit(metadata)
-            self._start_preview(metadata)
+            if self._preview is not None:
+                self._preview.start()
             while not self._closing.is_set():
                 with self._condition:
                     while self._pending is None and not self._closing.is_set():
@@ -223,8 +214,8 @@ class _EditorWorker:
                     kind, sequence, index, mode = self._pending
                     self._pending = None
                     self._busy = kind
-                readers_released = False
-                save_completed = False
+                paused_preview = False
+                save_succeeded = False
                 try:
                     if kind == "preview":
                         if self._preview is not None:
@@ -240,18 +231,15 @@ class _EditorWorker:
                     else:
                         if self._save_cancel.is_set():
                             raise InterruptedError("已取消保存。")
-                        if getattr(metadata, 'timestamps_estimated', False):
-                            raise CoverSaveError("无法确认所选帧的准确视频时刻，未更改原文件。")
-                        image = self._reader.export(index)
                         if mode == 'overwrite':
-                            self._release_movie_readers()
-                            readers_released = True
-                        frame = metadata.frames[index]
-                        result = self._save_function(
-                            source, image, mode, cancel_event=self._save_cancel,
-                            frame_time_seconds=frame.pts_seconds + getattr(metadata, 'start_time_seconds', 0.0),
-                            frame_duration_seconds=frame.duration_seconds)
-                        save_completed = True
+                            paused_preview = self._pause_preview_for_overwrite()
+                        image = self._reader.export(index)
+                        photo_time = getattr(metadata.frames[index], 'presentation_time', None)
+                        if not isinstance(photo_time, Fraction):
+                            raise CoverSaveError("所选帧缺少真实时间戳，无法同步保存 Live Photo，请重新读取视频。")
+                        result = self._save_function(source, image, mode, photo_time=photo_time,
+                                                     cancel_event=self._save_cancel)
+                        save_succeeded = True
                         self.signals.saved.emit(result)
                 except (FrameCancelled, InterruptedError):
                     if kind == "save" and not self._closing.is_set():
@@ -260,28 +248,25 @@ class _EditorWorker:
                     if not self._closing.is_set():
                         self.signals.failed.emit(kind, sequence, str(error))
                 finally:
-                    if readers_released and not save_completed:
+                    preview_resume_error = None
+                    if paused_preview and not save_succeeded and not self._save_cancel.is_set():
                         try:
-                            restored = self._resume_after_failed_save()
-                            if restored is not None:
-                                source = restored
+                            self._resume_preview_after_failure()
                         except Exception as error:
-                            if not self._closing.is_set():
-                                self.signals.failed.emit('preview', sequence, str(error))
+                            preview_resume_error = "视频预览恢复失败，请重新打开编辑器。" + str(error)
                     with self._condition:
                         self._busy = None
+                    if preview_resume_error is not None:
+                        self._preview_failed(preview_resume_error)
         except (FrameCancelled, InterruptedError):
             pass
         except Exception as error:
             if not self._closing.is_set():
                 self.signals.failed.emit("open", 0, str(error))
         finally:
-            previews = list(self._retiring_previews)
             if self._preview is not None:
-                previews.append(self._preview)
-            for preview in previews:
-                preview.close()
-                wait = getattr(preview, "wait", None)
+                self._preview.close()
+                wait = getattr(self._preview, "wait", None)
                 if wait is not None:
                     wait(2)
             if self._reader is not None:
@@ -451,7 +436,7 @@ class SaveModeDialog(QDialog):
         group = QGroupBox("保存方式")
         choices = QVBoxLayout(group)
         self.copy_choice = QRadioButton("创建副本（保留原图片和原视频）")
-        self.overwrite_choice = QRadioButton("覆盖原图（不保留备份）")
+        self.overwrite_choice = QRadioButton("覆盖原组（不保留备份）")
         self.copy_choice.setChecked(True)
         choices.addWidget(self.copy_choice)
         choices.addWidget(self.overwrite_choice)
@@ -477,13 +462,11 @@ class SaveModeDialog(QDialog):
 
     def _update_warning(self):
         if self.overwrite_choice.isChecked():
-            self.warning_label.setText(
-                f"图片和视频配对校验通过后，替换「{self._item.image_path.name}」及对应视频。不保留备份，保存后无法在 LiveViewer 中撤销。视频画面和声音保持不变，并更新 Live Photo 配对与封面时间信息。"
-            )
+            self.warning_label.setText("覆盖原图，无法撤销")
             self.warning_label.setStyleSheet(f"color:{tokens_for(self)['badge_text']}")
         else:
             self.warning_label.setText(
-                "图片与视频一起创建 v1、v2… 副本，使用同一个版本号。图片格式、视频画面和声音保持不变，并更新 Live Photo 配对与封面时间信息。原文件不变。"
+                "统一保存为 HEIC 封面，与 MOV 视频一起创建 v1、v2… 副本，使用同一个版本号和新的共同标识。视频封面时间设为所选帧；音视频内容不变，原文件不变。"
             )
             self.warning_label.setStyleSheet(f"color:{tokens_for(self)['muted']}")
 
@@ -718,7 +701,8 @@ class EditorDialog(QDialog):
         approximate = bool(getattr(position, "approximate", True))
         suffix = "（近似匹配）" if approximate else ""
         self.original_label.setText(f"◆ 原封面图：第 {index + 1:,} 帧 · {seconds:.3f} 秒{suffix}")
-        explanation = "根据当前静态图片与视频画面匹配。静态照片与视频可能存在裁切或拍摄时刻差异，标记为匹配位置。"
+        explanation = ("根据当前静态图片与视频画面匹配。静态照片与视频可能存在裁切或拍摄时刻差异，标记为匹配位置。"
+                       if approximate else "读取视频中的实际封面时间标记，定位到对应的视频帧。")
         self.original_label.setToolTip(explanation)
         self.timeline.setToolTip(self.original_label.text() + "\n" + explanation)
 
@@ -977,11 +961,12 @@ class EditorDialog(QDialog):
     def _failed(self, kind, sequence, text):
         if kind == "preview" and sequence != self._request_sequence:
             return
-        if self._cancel_pending:
-            self._saving = False
-            super().reject()
+        # An already queued preview failure cannot end an in-flight save.
+        if self._saving and kind != "save":
             return
         self._saving = False
+        self._cancel_pending = False
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setEnabled(True)
         self.status_label.setText("无法完成操作：" + text)
         self._update_controls()
         self.save_button.setEnabled(kind == "save" and self._loaded_sequence == self._request_sequence)

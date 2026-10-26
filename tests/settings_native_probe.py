@@ -19,11 +19,12 @@ import traceback
 from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, QObject, QPoint, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import QApplication
 
 from livegallery.app import MainWindow, SettingsDialog
-from livegallery.selftest import _check_settings_controls
+from livegallery.selftest import _check_settings_controls, _wait
 
 
 def identity(widget):
@@ -229,6 +230,11 @@ def main():
         window = MainWindow()
         window.show()
         settings = SettingsDialog(window.preferences, window)
+        # Only this standalone probe needs desktop hit-testing of a child
+        # without a native handle. Keep its test window unobscured even when
+        # Windows refuses a background process's foreground activation request.
+        settings.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        report['test_window_topmost'] = bool(settings.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         settings.show()
         settings.activateWindow()
         app.processEvents()
@@ -249,6 +255,7 @@ def main():
                     'control_window_handle': control.windowHandle() is not None,
                     'settings_exposed': handle is not None and handle.isExposed(),
                     'settings_active': settings.isActiveWindow(),
+                    'global_window_is_settings': QGuiApplication.topLevelAt(global_point) is handle,
                     'active_window': identity(app.activeWindow()),
                     'active_modal': identity(app.activeModalWidget()),
                     'global_point': [global_point.x(), global_point.y()],
@@ -266,8 +273,29 @@ def main():
             QTest.qWait(30)
             control.setChecked(False)
             toggled, clicked = QSignalSpy(control.toggled), QSignalSpy(control.clicked)
-            result = {'route': route, 'geometry': geometry()}
+            result = {'route': route, 'geometry_before_ready': geometry(),
+                      'target_ready': False, 'input_commits': 0}
             try:
+                # A non-native child has no windowHandle(): QTest's QWidget
+                # overload selects its QWindow through global hit-testing.
+                # Qt active/exposed alone does not establish that precondition.
+                # Make this test's window visible, then wait for the actual
+                # target before sending one press/release pair (never retry it).
+                settings.raise_()
+                settings.activateWindow()
+                def target_ready():
+                    state = geometry()
+                    result['geometry'] = state
+                    return all(state[name] for name in (
+                        'control_visible', 'control_enabled', 'point_in_visible_region',
+                        'point_in_scroll_viewport', 'settings_exposed', 'settings_active',
+                        'global_window_is_settings', 'widget_at_point_is_control'))
+                try:
+                    _wait(target_ready, seconds=1)
+                except TimeoutError as failure:
+                    raise AssertionError('Settings touch target is not globally visible/hittable') from failure
+                result['target_ready'] = target_ready()
+                assert result['target_ready'], 'Settings touch target is not globally visible/hittable'
                 device = QTest.createTouchDevice()
                 if route == 'child-widget':
                     target, point = control, position
@@ -276,7 +304,9 @@ def main():
                     point = control.mapTo(settings, position)
                 sequence = QTest.touchEvent(target, device, False)
                 sequence.press(0, point, target).commit()
+                result['input_commits'] += 1
                 sequence.release(0, point, target).commit()
+                result['input_commits'] += 1
                 result['checked_after_commit'] = control.isChecked()
                 app.processEvents()
                 QTest.qWait(80)

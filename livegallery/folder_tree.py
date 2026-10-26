@@ -65,7 +65,7 @@ class FolderTree(QTreeWidget):
         self.setUniformRowHeights(True)
         self.setItemDelegate(_FolderDelegate(self))
         self.setAccessibleName('已选文件夹')
-        self.setToolTip('每个勾选框只控制本层图片。空白处拖框多选，Ctrl 增减，Shift 选范围，Ctrl+A 全选。')
+        self.setToolTip('每个勾选框只控制本层图片。点击名称记录范围起点；Shift 点选范围，按住 Ctrl 拖框反选，Ctrl+A 全选。')
         self._nodes = {}
         self._checked = set()
         self._anchor = None
@@ -319,9 +319,15 @@ class FolderTree(QTreeWidget):
         if gesture is None:
             super().mouseMoveEvent(event)
             return
+        can_band = (gesture['kind'] in ('text', 'blank')
+                    and gesture['modifiers'] & Qt.KeyboardModifier.ControlModifier)
+        if can_band and not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.cancel_gesture()
+            event.accept()
+            return
         point = event.position().toPoint()
         if (point - gesture['start']).manhattanLength() >= QApplication.startDragDistance():
-            if gesture['kind'] == 'blank':
+            if can_band:
                 gesture['dragged'] = True
             else:
                 gesture['cancel_click'] = True
@@ -331,10 +337,14 @@ class FolderTree(QTreeWidget):
         event.accept()
 
     def _commit_click(self, gesture, point):
+        if gesture['kind'] == 'blank':
+            return
         path = gesture['path']
         if gesture['aggregate']:
             if self.itemAt(point) is self.all_item:
-                self.set_all_checked(gesture['baseline'] != set(self._nodes))
+                self.setCurrentItem(self.all_item)
+                if gesture['kind'] == 'checkbox':
+                    self.set_all_checked(gesture['baseline'] != set(self._nodes))
             return
         if path is None or path not in self._nodes or self.itemAt(point) is not self._nodes[path]:
             return
@@ -348,13 +358,14 @@ class FolderTree(QTreeWidget):
             if modifiers & Qt.KeyboardModifier.ControlModifier:
                 selected |= baseline
         else:
-            toggle = gesture['kind'] == 'checkbox' or modifiers & Qt.KeyboardModifier.ControlModifier
-            selected = set(baseline) if toggle else set()
-            if toggle and path in selected:
+            self._anchor = path
+            if gesture['kind'] != 'checkbox':
+                return
+            selected = set(baseline)
+            if path in selected:
                 selected.remove(path)
             else:
                 selected.add(path)
-            self._anchor = path
         self.set_checked_directories(selected)
 
     def mouseReleaseEvent(self, event):
@@ -374,15 +385,11 @@ class FolderTree(QTreeWidget):
         if gesture is not None and gesture['generation'] == self._generation:
             point = event.position().toPoint()
             if gesture['dragged']:
-                band = QRect(gesture['start'], point).normalized().intersected(self.viewport().rect())
-                covered = {path for path in self._visible_paths()
-                           if self.visualItemRect(self._nodes[path]).intersects(band)}
-                modifiers, baseline = gesture['modifiers'], gesture['baseline']
-                if modifiers & Qt.KeyboardModifier.ShiftModifier:
-                    covered |= baseline
-                elif modifiers & Qt.KeyboardModifier.ControlModifier:
-                    covered ^= baseline
-                self.set_checked_directories(covered)
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    band = QRect(gesture['start'], point).normalized().intersected(self.viewport().rect())
+                    covered = {path for path in self._visible_paths()
+                               if self.visualItemRect(self._nodes[path]).intersects(band)}
+                    self.set_checked_directories(gesture['baseline'] ^ covered)
             elif not gesture['cancel_click']:
                 self._commit_click(gesture, point)
         # Every custom left sequence is consumed in full. A late release must
@@ -415,3 +422,11 @@ class FolderTree(QTreeWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        gesture = self._pointer
+        if (event.key() == Qt.Key.Key_Control and gesture is not None
+                and gesture['kind'] in ('text', 'blank')
+                and gesture['modifiers'] & Qt.KeyboardModifier.ControlModifier):
+            self.cancel_gesture()
+        super().keyReleaseEvent(event)

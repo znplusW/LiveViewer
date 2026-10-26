@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QListView
 
 from .catalog_model import (OVERVIEW_DEFAULT_WIDTH, OVERVIEW_MIN_WIDTH, OVERVIEW_MAX_WIDTH,
                             overview_tile_size)
+from .filename_field import ElidedFilenameMouseHandler
 
 
 class OverviewGrid(QListView):
@@ -30,6 +31,8 @@ class OverviewGrid(QListView):
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self._touch_active = False
+        self._touch_device = None
+        self._touch_contacts = set()
         self._touch_cancelled = False
         self._touch_moved = False
         self._touch_origin = QPointF()
@@ -43,6 +46,7 @@ class OverviewGrid(QListView):
         self._pinch_distance = 0.0
         self._pinch_width = float(self._thumbnail_width)
         self._pinch_anchor = None
+        self._filename_mouse = ElidedFilenameMouseHandler(self)
 
     @property
     def thumbnail_width(self):
@@ -98,7 +102,7 @@ class OverviewGrid(QListView):
         return self.set_thumbnail_width(self.thumbnail_width + (self.ZOOM_STEP if direction > 0 else -self.ZOOM_STEP))
 
     def _pinch(self, points):
-        first, second = points[:2]
+        first, second = sorted(points, key=lambda point: point.id())[:2]
         center = (first.position() + second.position()) / 2
         distance = math.hypot(first.position().x() - second.position().x(),
                               first.position().y() - second.position().y())
@@ -120,6 +124,8 @@ class OverviewGrid(QListView):
 
     def _end_touch(self):
         self._touch_active = False
+        self._touch_device = None
+        self._touch_contacts.clear()
         self._touch_index = QPersistentModelIndex()
         self._pinch_ids = ()
         self._pinch_distance = 0.0
@@ -134,40 +140,59 @@ class OverviewGrid(QListView):
                     and (self._touch_active or time.monotonic() < self._suppress_touch_mouse_until)):
                 event.accept()
                 return True
+        filename_mouse = getattr(self, '_filename_mouse', None)
+        if filename_mouse is not None and filename_mouse.handle(event):
+            return True
         if kind not in (QEvent.Type.TouchBegin, QEvent.Type.TouchUpdate,
                         QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
             return super().viewportEvent(event)
 
         event.accept()
+        device = event.pointingDevice()
         if kind == QEvent.Type.TouchCancel:
-            self._touch_cancelled = True
-            self._end_touch()
+            if not self._touch_active or device == self._touch_device:
+                self._touch_cancelled = True
+                self._end_touch()
+            return True
+        if self._touch_active and device != self._touch_device:
             return True
         points = event.points()
-        active = [point for point in points if point.state() != QEventPoint.State.Released]
-        if kind == QEvent.Type.TouchBegin:
+        if kind == QEvent.Type.TouchBegin and self._touch_active:
+            self._end_touch()
+        pressed = [point for point in points if point.state() == QEventPoint.State.Pressed]
+        if not self._touch_active:
+            # A fresh contact can arrive as TouchUpdate when another widget's
+            # old contact still belongs to the Qt window. Only explicit presses
+            # start our gesture; unknown updated/stationary tails are not ours.
+            if not pressed:
+                return True
             self._touch_active = True
+            self._touch_device = device
+            self._touch_contacts = {point.id() for point in pressed}
             self._touch_cancelled = False
             self._touch_had_multi = False
             self._touch_moved = False
             self._touch_index = QPersistentModelIndex()
             self._suppress_touch_mouse_until = time.monotonic() + .8
-            if points:
-                self._touch_origin = QPointF(points[0].position())
+            if pressed:
+                self._touch_origin = QPointF(pressed[0].position())
                 self._touch_scroll_origin = self.verticalScrollBar().value()
                 self._touch_index = QPersistentModelIndex(self.indexAt(self._touch_origin.toPoint()))
             self.setFocus(Qt.FocusReason.MouseFocusReason)
-            if len(active) >= 2:
-                self._pinch(active)
+            if self._touch_active and len(pressed) >= 2:
+                self._pinch(pressed)
             return True
-        if not self._touch_active:
-            return True
+        self._touch_contacts.update(point.id() for point in pressed)
+        points = [point for point in points if point.id() in self._touch_contacts]
+        active = [point for point in points if point.state() != QEventPoint.State.Released]
+        self._touch_contacts.difference_update(
+            point.id() for point in points if point.state() == QEventPoint.State.Released)
         if len(active) >= 2 and not self._touch_cancelled:
             self._pinch(active)
             return True
         if self._touch_had_multi:
             # A remaining finger cannot turn the end of a pinch into a tap.
-            if kind == QEvent.Type.TouchEnd or not active:
+            if not self._touch_contacts:
                 self._end_touch()
             return True
         if points and not self._touch_cancelled:
@@ -177,7 +202,7 @@ class OverviewGrid(QListView):
                 self._touch_moved = True
             if self._touch_moved:
                 self.verticalScrollBar().setValue(self._touch_scroll_origin - round(delta.y()))
-            if kind == QEvent.Type.TouchEnd:
+            if not self._touch_contacts:
                 pressed = self._touch_index
                 index = self.indexAt(position.toPoint())
                 activate = (not self._touch_moved and pressed.isValid() and index.isValid()
@@ -190,7 +215,7 @@ class OverviewGrid(QListView):
                     )
                     self.clicked.emit(index)
                 return True
-        if kind == QEvent.Type.TouchEnd:
+        if not self._touch_contacts:
             self._end_touch()
         return True
 

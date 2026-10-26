@@ -1,10 +1,14 @@
 import errno
+import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -14,29 +18,42 @@ from PIL import Image
 from livegallery import cover_save
 from livegallery.cover_save import CoverSaveError, CoverSource, SourceChangedError, WORK_DIRECTORY, save_cover
 from livegallery.models import MediaItem
-from livegallery.livephoto_metadata import photo_identifier, validate_pair
-from tests.movie_helpers import assert_video_media_preserved
+from tests.live_photo_fixtures import create_live_photo_pair, prepare_live_photo_pair, apple_exif
 
 
 class CoverSaveTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.folder = Path(self.directory.name)
-        self.photo = self.folder / "Holiday.JPEG"
+        self.photo = self.folder / "Holiday.HEIC"
         self.video = self.folder / "Holiday.MOV"
-        Image.new("RGB", (80, 60), "blue").save(self.photo, "JPEG")
-        self.video.write_bytes((Path(__file__).parent / "fixtures" / "JPEG_PAIR.mov").read_bytes())
+        create_live_photo_pair(self.photo, self.video)
         self.original_image = self.photo.read_bytes()
         self.original_video = self.video.read_bytes()
+        from livegallery.live_photo_movie import media_payload_digests
+        self.original_payloads = media_payload_digests(self.video)
         self.item = MediaItem("photo", self.photo, self.video)
         self.source = CoverSource.capture(self.item)
         self.frame = Image.new("RGB", (120, 90), "red")
 
     def tearDown(self):
-        self.photo.chmod(0o600)
-        self.video.chmod(0o600)
+        if self.photo.exists():
+            self.photo.chmod(0o600)
         self.folder.chmod(0o700)
         self.directory.cleanup()
+
+    def assert_pair(self, image, movie, photo_time=Fraction(0)):
+        from livegallery.live_photo_image import read_content_identifier
+        from livegallery.live_photo_movie import inspect_live_photo_movie, media_payload_digests
+        identifier = read_content_identifier(image)
+        info = inspect_live_photo_movie(movie)
+        self.assertTrue(identifier)
+        self.assertTrue(info.supported, info.unsupported_reason)
+        self.assertEqual(info.asset_identifier, identifier)
+        self.assertEqual(info.photo_time, photo_time)
+        self.assertEqual(info.marker_count, 1)
+        self.assertEqual(media_payload_digests(movie), self.original_payloads)
+        return identifier
 
     def assert_originals(self):
         self.assertEqual(self.photo.read_bytes(), self.original_image)
@@ -59,37 +76,40 @@ class CoverSaveTests(unittest.TestCase):
             with self.assertRaises(CoverSaveError):
                 cover_save._writable(regular)
 
-    def test_copy_pair_shares_version_extension_and_live_photo_metadata(self):
-        result = save_cover(self.source, self.frame)
-        self.assertEqual(result.image_path.name, "Holiday v1.JPEG")
+    def test_copy_pair_shares_new_identifier_marker_version_and_preserves_media_payload(self):
+        result = save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertEqual(result.image_path.name, "Holiday v1.HEIC")
         self.assertEqual(result.video_path.name, "Holiday v1.MOV")
         self.assertTrue(result.created_copy)
         self.assertIsNone(result.backup_path)
         with Image.open(result.image_path) as image:
-            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.format, "HEIF")
             self.assertEqual(image.size, self.frame.size)
-        assert_video_media_preserved(self, self.original_video, result.video_path.read_bytes())
-        validate_pair(result.image_path, result.video_path, photo_identifier(result.image_path), 0)
+        self.assertNotEqual(result.video_path.read_bytes(), self.original_video)
+        self.assert_pair(result.image_path, result.video_path)
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_overwrite_replaces_validated_pair_and_keeps_no_backup(self):
+    def test_overwrite_commits_both_resources_and_keeps_no_backup(self):
         original_replace = cover_save.os.replace
         observations = []
 
         def replace(staged, target):
-            observations.append((Path(target), self.photo.read_bytes(), Path(staged).read_bytes()[:3]))
+            if Path(target) in (self.photo, self.video):
+                observations.append((Path(target), self.photo.read_bytes(), self.video.read_bytes()))
             return original_replace(staged, target)
 
         with patch.object(cover_save.os, "replace", side_effect=replace):
-            result = save_cover(self.source, self.frame, "overwrite")
+            result = save_cover(self.source, self.frame, "overwrite", photo_time=Fraction(0))
         self.assertEqual([row[0] for row in observations], [self.photo, self.video])
-        self.assertEqual(observations[0][1:], (self.original_image, b"\xff\xd8\xff"))
+        self.assertEqual(observations[0][1:], (self.original_image, self.original_video))
+        self.assertNotEqual(observations[1][1], self.original_image)
+        self.assertEqual(observations[1][2], self.original_video)
         self.assertEqual(result.image_path, self.photo)
         self.assertFalse(result.created_copy)
         self.assertIsNone(result.backup_path)
-        assert_video_media_preserved(self, self.original_video, self.video.read_bytes())
-        validate_pair(self.photo, self.video, photo_identifier(self.photo), 0)
+        self.assertNotEqual(self.video.read_bytes(), self.original_video)
+        self.assert_pair(self.photo, self.video)
         with Image.open(self.photo) as image:
             self.assertEqual(image.size, self.frame.size)
         self.assert_no_pending_files()
@@ -97,10 +117,10 @@ class CoverSaveTests(unittest.TestCase):
 
     def test_case_insensitive_collision_any_extension_and_literal_version_stem(self):
         (self.folder / "HOLIDAY V1.PNG").write_bytes(b"existing")
-        result = save_cover(self.source, self.frame)
+        result = save_cover(self.source, self.frame, photo_time=Fraction(0))
         self.assertEqual(result.image_path.stem, "Holiday v2")
         second = CoverSource.capture(MediaItem("copy", result.image_path, result.video_path))
-        nested = save_cover(second, self.frame)
+        nested = save_cover(second, self.frame, photo_time=Fraction(0))
         self.assertEqual(nested.image_path.stem, "Holiday v2 v1")
         self.assertEqual(nested.video_path.stem, nested.image_path.stem)
         self.assert_originals()
@@ -111,8 +131,8 @@ class CoverSaveTests(unittest.TestCase):
         self.video = lower_video
         self.item = MediaItem("photo", self.photo, self.video)
         self.source = CoverSource.capture(self.item)
-        result = save_cover(self.source, self.frame)
-        self.assertEqual(result.image_path.name, "Holiday v1.JPEG")
+        result = save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertEqual(result.image_path.name, "Holiday v1.HEIC")
         self.assertEqual(result.video_path.name, "holiday v1.MOV")
         self.assertEqual(result.image_path.stem.casefold(), result.video_path.stem.casefold())
         self.assert_originals()
@@ -120,20 +140,20 @@ class CoverSaveTests(unittest.TestCase):
     def test_source_mutation_since_edit_open_is_rejected(self):
         self.video.write_bytes(self.original_video + b"changed")
         with self.assertRaises(SourceChangedError):
-            save_cover(self.source, self.frame, "overwrite")
+            save_cover(self.source, self.frame, "overwrite", photo_time=Fraction(0))
         self.assertEqual(self.photo.read_bytes(), self.original_image)
         self.assert_no_pending_files()
 
     def test_source_mutation_during_encode_is_rejected_before_commit(self):
         encode = cover_save._encode_image
 
-        def mutate(*args):
-            encode(*args)
+        def mutate(*args, **kwargs):
+            encode(*args, **kwargs)
             self.video.write_bytes(self.original_video + b"changed")
 
         with patch.object(cover_save, "_encode_image", side_effect=mutate):
             with self.assertRaises(SourceChangedError):
-                save_cover(self.source, self.frame, "overwrite")
+                save_cover(self.source, self.frame, "overwrite", photo_time=Fraction(0))
         self.assertEqual(self.photo.read_bytes(), self.original_image)
         self.assert_no_pending_files()
 
@@ -149,7 +169,7 @@ class CoverSaveTests(unittest.TestCase):
 
         with patch.object(cover_save, "_publish_no_replace", side_effect=fail_second):
             with self.assertRaises(OSError):
-                save_cover(self.source, self.frame)
+                save_cover(self.source, self.frame, photo_time=Fraction(0))
         self.assertFalse(any(self.folder.glob("Holiday v1.*")))
         self.assert_originals()
         self.assert_no_pending_files()
@@ -163,8 +183,8 @@ class CoverSaveTests(unittest.TestCase):
 
         with patch.object(cover_save, "_publish_no_replace", side_effect=race):
             with self.assertRaises(FileExistsError):
-                save_cover(self.source, self.frame)
-        self.assertEqual((self.folder / "Holiday v1.JPEG").read_bytes(), b"created by another program")
+                save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertEqual((self.folder / "Holiday v1.HEIC").read_bytes(), b"created by another program")
         self.assertFalse((self.folder / "Holiday v1.MOV").exists())
         self.assert_originals()
         self.assert_no_pending_files()
@@ -174,13 +194,13 @@ class CoverSaveTests(unittest.TestCase):
 
         def race(staged, target):
             publish(staged, target)
-            (self.folder / "HOLIDAY V1.HEIC").write_bytes(b"other creator")
+            (self.folder / "HOLIDAY V1.JPG").write_bytes(b"other creator")
 
         with patch.object(cover_save, "_publish_no_replace", side_effect=race):
             with self.assertRaises(FileExistsError):
-                save_cover(self.source, self.frame)
-        self.assertFalse((self.folder / "Holiday v1.JPEG").exists())
-        self.assertEqual((self.folder / "HOLIDAY V1.HEIC").read_bytes(), b"other creator")
+                save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertFalse((self.folder / "Holiday v1.HEIC").exists())
+        self.assertEqual((self.folder / "HOLIDAY V1.JPG").read_bytes(), b"other creator")
         self.assert_originals()
         self.assert_no_pending_files()
 
@@ -194,58 +214,26 @@ class CoverSaveTests(unittest.TestCase):
 
         with patch.object(cover_save, "_publish_no_replace", side_effect=cancelled):
             with self.assertRaises(InterruptedError):
-                save_cover(self.source, self.frame, cancel_event=cancel)
+                save_cover(self.source, self.frame, cancel_event=cancel, photo_time=Fraction(0))
         self.assertFalse(any(self.folder.glob("Holiday v1.*")))
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_interrupt_after_either_exclusive_publication_leaves_no_orphan_copy(self):
-        publish = cover_save._publish_no_replace
-        for interruption in (KeyboardInterrupt, SystemExit):
-            for stop_after in (1, 2):
-                with self.subTest(interruption=interruption.__name__, stop_after=stop_after):
-                    calls = []
-                    def interrupt_after_publication(staged, target):
-                        publish(staged, target)
-                        calls.append(target)
-                        if len(calls) == stop_after:
-                            raise interruption('interrupted immediately after exclusive publication')
-                    with patch.object(cover_save, '_publish_no_replace', side_effect=interrupt_after_publication):
-                        with self.assertRaises(interruption):
-                            save_cover(self.source, self.frame)
-                    self.assertFalse(list(self.folder.glob('Holiday v*.*')))
-                    self.assert_originals()
-                    self.assert_no_pending_files()
-
-    def test_concurrent_video_creator_survives_second_publication_collision(self):
-        publish = cover_save._publish_no_replace
-        def create_before_movie(staged, target):
-            if Path(target).suffix == '.MOV':
-                Path(target).write_bytes(b'video from concurrent creator')
-            publish(staged, target)
-        with patch.object(cover_save, '_publish_no_replace', side_effect=create_before_movie):
-            with self.assertRaises(FileExistsError):
-                save_cover(self.source, self.frame)
-        self.assertEqual((self.folder / 'Holiday v1.MOV').read_bytes(), b'video from concurrent creator')
-        self.assertFalse((self.folder / 'Holiday v1.JPEG').exists())
-        self.assert_originals()
-        self.assert_no_pending_files()
-
     def test_disk_full_or_encoder_failure_cleans_staging(self):
-        def fail(image, target, *_args):
+        def fail(image, target, *_args, **_kwargs):
             Path(target).write_bytes(b"partial image")
             raise OSError(errno.ENOSPC, "disk full")
 
         with patch.object(cover_save, "_encode_image", side_effect=fail):
             with self.assertRaises(OSError):
-                save_cover(self.source, self.frame, "overwrite")
+                save_cover(self.source, self.frame, "overwrite", photo_time=Fraction(0))
         self.assert_originals()
         self.assert_no_pending_files()
 
     def test_read_only_original_is_not_replaced(self):
         self.photo.chmod(0o444)
         with self.assertRaises(CoverSaveError):
-            save_cover(self.source, self.frame, "overwrite")
+            save_cover(self.source, self.frame, "overwrite", photo_time=Fraction(0))
         self.assert_originals()
         self.assert_no_pending_files()
 
@@ -253,13 +241,13 @@ class CoverSaveTests(unittest.TestCase):
         cancel = threading.Event()
         cancel.set()
         with self.assertRaises(InterruptedError):
-            save_cover(self.source, self.frame, cancel_event=cancel)
+            save_cover(self.source, self.frame, cancel_event=cancel, photo_time=Fraction(0))
         self.assert_originals()
         self.assert_no_pending_files()
 
     def test_heic_cannot_be_saved_as_disguised_jpeg(self):
         heic = self.folder / "Holiday.HEIC"
-        heic.write_bytes((Path(__file__).parent / "fixtures" / "Live_H264.heic").read_bytes())
+        # Use the complete synthetic Apple source, then inject a fake encoder.
         original_heic = heic.read_bytes()
         source = CoverSource.capture(MediaItem("heic", heic, self.video))
 
@@ -268,7 +256,7 @@ class CoverSaveTests(unittest.TestCase):
 
         for mode in ("copy", "overwrite"):
             with self.assertRaises(CoverSaveError):
-                save_cover(source, self.frame, mode, heic_encoder=fake_heic)
+                save_cover(source, self.frame, mode, heic_encoder=fake_heic, photo_time=Fraction(0))
             self.assertEqual(heic.read_bytes(), original_heic)
             self.assert_no_pending_files()
         self.assert_originals()
@@ -281,18 +269,18 @@ class CoverSaveTests(unittest.TestCase):
         except OSError:
             self.skipTest("symbolic links unavailable")
         with self.assertRaises(CoverSaveError):
-            save_cover(self.source, self.frame)
+            save_cover(self.source, self.frame, photo_time=Fraction(0))
         self.assertEqual(list(outside.iterdir()), [])
         self.assert_originals()
 
     def test_two_concurrent_saves_reserve_distinct_complete_pairs(self):
         with ThreadPoolExecutor(max_workers=2) as workers:
-            results = list(workers.map(lambda _: save_cover(self.source, self.frame), range(2)))
+            results = list(workers.map(lambda _: save_cover(self.source, self.frame, photo_time=Fraction(0)), range(2)))
         self.assertEqual({result.image_path.stem for result in results}, {"Holiday v1", "Holiday v2"})
         for result in results:
             self.assertEqual(result.video_path.stem, result.image_path.stem)
-            assert_video_media_preserved(self, self.original_video, result.video_path.read_bytes())
-            validate_pair(result.image_path, result.video_path, photo_identifier(result.image_path), 0)
+            self.assertNotEqual(result.video_path.read_bytes(), self.original_video)
+            self.assert_pair(result.image_path, result.video_path)
         self.assert_originals()
         self.assert_no_pending_files()
 
@@ -304,120 +292,529 @@ class CoverSaveTests(unittest.TestCase):
             nonlocal count
             count += 1
             if count == 2:
-                (self.folder / "Holiday v1.JPEG").write_bytes(b"new data from another program")
+                (self.folder / "Holiday v1.HEIC").write_bytes(b"new data from another program")
                 raise OSError("video output failed")
             publish(staged, target)
 
         with patch.object(cover_save, "_publish_no_replace", side_effect=fail_after_other_edit):
-            with self.assertRaisesRegex(CoverSaveError, "已保留"):
-                save_cover(self.source, self.frame)
-        self.assertEqual((self.folder / "Holiday v1.JPEG").read_bytes(), b"new data from another program")
+            with self.assertRaisesRegex(CoverSaveError, "已保留") as caught:
+                save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertNotIn('已保留恢复资料：', str(caught.exception))
+        self.assertIn('外部修改的文件', str(caught.exception))
+        self.assertEqual((self.folder / "Holiday v1.HEIC").read_bytes(), b"new data from another program")
         self.assert_originals()
         self.assert_no_pending_files()
 
     def test_atomic_replace_failure_leaves_original_and_no_backup(self):
         with patch.object(cover_save.os, "replace", side_effect=PermissionError("file in use")):
             with self.assertRaises(PermissionError):
-                save_cover(self.source, self.frame, "overwrite")
+                save_cover(self.source, self.frame, "overwrite", photo_time=Fraction(0))
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_selected_time_and_fresh_identifier_are_written_into_both_outputs(self):
-        first = save_cover(self.source, self.frame, frame_time_seconds=.4, frame_duration_seconds=.08)
-        first_id = photo_identifier(first.image_path)
-        validate_pair(first.image_path, first.video_path, first_id, .4)
-        second = save_cover(self.source, self.frame, 'overwrite',
-                            frame_time_seconds=.8, frame_duration_seconds=.04)
-        second_id = photo_identifier(second.image_path)
-        self.assertNotEqual(first_id, second_id)
-        validate_pair(second.image_path, second.video_path, second_id, .8)
-        assert_video_media_preserved(self, self.original_video, self.video.read_bytes())
+    def test_save_requires_exact_frame_time_and_rejects_non_frame_time(self):
+        for value in (None, .04, Fraction(-1), Fraction(1, 1000)):
+            error = ValueError if value == Fraction(1, 1000) else CoverSaveError
+            with self.subTest(value=value), self.assertRaises(error):
+                save_cover(self.source, self.frame, 'overwrite', photo_time=value)
+            self.assert_originals()
+            self.assert_no_pending_files()
 
-    def test_pair_validation_failure_happens_before_any_publication(self):
-        with patch.object(cover_save, 'validate_pair', side_effect=ValueError('invalid pairing')), \
-                patch.object(cover_save.os, 'replace') as replace, \
-                patch.object(cover_save, '_publish_no_replace') as publish:
-            for mode in ('copy', 'overwrite'):
-                with self.assertRaisesRegex(ValueError, 'invalid pairing'):
-                    save_cover(self.source, self.frame, mode)
-            replace.assert_not_called()
-            publish.assert_not_called()
+    def test_every_copy_and_overwrite_gets_new_shared_identifier(self):
+        identifier = 'Existing Apple association 字符串'
+        prepare_live_photo_pair(self.photo, self.video, identifier=identifier)
+        original_pair = (self.photo.read_bytes(), self.video.read_bytes())
+        source = CoverSource.capture(self.item)
+        copied = save_cover(source, self.frame, photo_time=Fraction(1, 25))
+        identifiers = {identifier, self.assert_pair(copied.image_path, copied.video_path, Fraction(1, 25))}
+        self.assertEqual(len(identifiers), 2)
+        self.assertEqual((self.photo.read_bytes(), self.video.read_bytes()), original_pair)
+        for point in (Fraction(4, 25), Fraction(11, 25)):
+            changed = save_cover(CoverSource.capture(self.item), self.frame, 'overwrite', photo_time=point)
+            current = self.assert_pair(changed.image_path, changed.video_path, point)
+            self.assertNotIn(current, identifiers)
+            self.assertEqual(changed.asset_identifier, current)
+            identifiers.add(current)
+        self.assert_no_pending_files()
+
+    def test_mismatched_or_missing_identifier_gets_new_shared_identifier(self):
+        from livegallery.heic_encoder import encode_heic
+        prepare_live_photo_pair(self.photo, self.video, identifier='other-movie')
+        stage = self.folder / 'image-stage.HEIC'
+        encode_heic(self.frame, stage, exif=apple_exif('image-only'))
+        stage.replace(self.photo)
+        changed = save_cover(CoverSource.capture(self.item), self.frame, 'overwrite', photo_time=Fraction(1, 5))
+        self.assertNotIn(self.assert_pair(changed.image_path, changed.video_path, Fraction(1, 5)),
+                         ('image-only', 'other-movie'))
+        self.assert_no_pending_files()
+
+    def _crash_after_first_publication(self, mode='overwrite', after=1):
+        # A separate process exits without Python finally/except cleanup. Its
+        # next opener must recover the journal, not rely on this test's stack.
+        code = '''
+import os, sys
+from pathlib import Path
+from fractions import Fraction
+from PIL import Image
+from livegallery import cover_save as c
+from livegallery.models import MediaItem
+from tests.live_photo_fixtures import create_live_photo_pair, prepare_live_photo_pair, apple_exif
+image, video, mode, count = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], int(sys.argv[4])
+source = c.CoverSource.capture(MediaItem('crash', image, video))
+replace_original, publish_original = c.os.replace, c._publish_no_replace
+def observed(target):
+    global count
+    if Path(target).suffix.lower() in ('.jpg', '.jpeg', '.heic', '.mov') and Path(target).parent == image.parent:
+        count -= 1
+        if count == 0: os._exit(73)
+def replace(staged, target):
+    replace_original(staged, target)
+    observed(target)
+def publish(staged, target):
+    publish_original(staged, target)
+    observed(target)
+c.os.replace, c._publish_no_replace = replace, publish
+c.save_cover(source, Image.new('RGB',(120,90),'red'), mode, photo_time=Fraction(1,25))
+'''
+        completed = subprocess.run([sys.executable, '-c', code, str(self.photo), str(self.video), mode, str(after)],
+                                   capture_output=True, timeout=30,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        self.assertEqual(completed.returncode, 73, completed.stderr.decode('utf8', errors='replace'))
+        transactions = list((self.folder / WORK_DIRECTORY).glob('*/journal.json'))
+        self.assertEqual(len(transactions), 1)
+        return transactions[0]
+
+    def _use_jpeg_source(self):
+        old = self.photo
+        self.photo = self.folder / 'Holiday.JPEG'
+        Image.new('RGB', (80, 60), 'blue').save(self.photo, 'JPEG', exif=apple_exif())
+        old.unlink()
+        self.original_image = self.photo.read_bytes()
+        self.item = MediaItem('photo', self.photo, self.video)
+        self.source = CoverSource.capture(self.item)
+
+    def _extra_jpeg(self, name='holiday.jpg'):
+        path = self.folder / name
+        Image.new('RGB', (30, 20), 'green').save(path, 'JPEG', exif=apple_exif())
+        return path
+
+    def test_jpeg_overwrite_publishes_heic_then_retires_all_same_stem_jpegs(self):
+        self._use_jpeg_source()
+        extra = self._extra_jpeg()
+        unrelated = self.folder / 'Holiday.PNG'
+        unrelated.write_bytes(b'other image format is not retired')
+        result = save_cover(self.source, self.frame, 'overwrite', photo_time=Fraction(1, 25))
+        self.assertEqual(result.image_path, self.folder / 'Holiday.HEIC')
+        self.assertFalse(self.photo.exists())
+        self.assertFalse(extra.exists())
+        self.assertTrue(unrelated.exists())
+        self.assert_pair(result.image_path, result.video_path, Fraction(1, 25))
+        self.assertEqual(result.source_image_path, self.photo)
+        self.assert_no_pending_files()
+
+    def test_heic_overwrite_retires_same_stem_jpg_and_jpeg_only(self):
+        extras = [self._extra_jpeg('Holiday.JPG'), self._extra_jpeg('holiday.jpeg')]
+        other = self._extra_jpeg('Different.JPG')
+        result = save_cover(self.source, self.frame, 'overwrite', photo_time=Fraction(0))
+        self.assertEqual(result.image_path, self.photo)
+        self.assertTrue(self.photo.exists())
+        self.assertTrue(other.exists())
+        self.assertTrue(all(not path.exists() for path in extras))
+        self.assert_pair(result.image_path, result.video_path)
+        self.assert_no_pending_files()
+
+    def test_copy_from_jpeg_keeps_all_original_jpeg_candidates(self):
+        self._use_jpeg_source()
+        extra = self._extra_jpeg()
+        before = extra.read_bytes()
+        result = save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertEqual(result.image_path.name, 'Holiday v1.HEIC')
+        self.assertEqual(extra.read_bytes(), before)
+        self.assert_originals()
+        self.assert_pair(result.image_path, result.video_path)
+        self.assert_no_pending_files()
+
+    def test_jpeg_overwrite_refuses_existing_heic_without_touching_any_resource(self):
+        self._use_jpeg_source()
+        collision = self.folder / 'HOLIDAY.heic'
+        collision.write_bytes(b'preexisting HEIC owned by another program')
+        with self.assertRaises(FileExistsError):
+            save_cover(self.source, self.frame, 'overwrite', photo_time=Fraction(0))
+        self.assertEqual(collision.read_bytes(), b'preexisting HEIC owned by another program')
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_overwrite_second_replace_failure_restores_original_pair(self):
-        replace = cover_save.os.replace
-        def fail_movie(staged, target):
-            if Path(target) == self.video:
-                raise PermissionError('MOV still in use')
-            replace(staged, target)
-        with patch.object(cover_save.os, 'replace', side_effect=fail_movie):
-            with self.assertRaisesRegex(PermissionError, 'MOV still in use'):
-                save_cover(self.source, self.frame, 'overwrite')
+    def test_cancel_after_each_jpeg_retirement_restores_all_originals(self):
+        self._use_jpeg_source()
+        extra = self._extra_jpeg()
+        extra_bytes = extra.read_bytes()
+        publish = cover_save._publish_no_replace
+        for position in (1, 2):
+            with self.subTest(position=position):
+                cancel = threading.Event()
+                count = 0
+                def retire(staged, target):
+                    nonlocal count
+                    publish(staged, target)
+                    if Path(target).name.startswith('retired-image-'):
+                        count += 1
+                        if count == position:
+                            cancel.set()
+                with patch.object(cover_save, '_publish_no_replace', side_effect=retire):
+                    with self.assertRaises(InterruptedError):
+                        save_cover(CoverSource.capture(self.item), self.frame, 'overwrite',
+                                   photo_time=Fraction(0), cancel_event=cancel)
+                self.assert_originals()
+                self.assertEqual(extra.read_bytes(), extra_bytes)
+                self.assertFalse((self.folder / 'Holiday.HEIC').exists())
+                self.assert_no_pending_files()
+
+    def test_failure_retiring_second_candidate_restores_first_and_movie(self):
+        self._use_jpeg_source()
+        extra = self._extra_jpeg()
+        extra_bytes = extra.read_bytes()
+        publish = cover_save._publish_no_replace
+        def retire(staged, target):
+            if Path(target).name == 'retired-image-1':
+                raise PermissionError('candidate occupied')
+            publish(staged, target)
+        with patch.object(cover_save, '_publish_no_replace', side_effect=retire), self.assertRaises(PermissionError):
+            save_cover(self.source, self.frame, 'overwrite', photo_time=Fraction(0))
+        self.assert_originals()
+        self.assertEqual(extra.read_bytes(), extra_bytes)
+        self.assertFalse((self.folder / 'Holiday.HEIC').exists())
+        self.assert_no_pending_files()
+
+    def test_jpeg_conversion_crash_after_each_publication_recovers_original_pair(self):
+        self._use_jpeg_source()
+        for position in (1, 2):
+            with self.subTest(position=position):
+                self._crash_after_first_publication(after=position)
+                self.assertTrue((self.folder / 'Holiday.HEIC').exists())
+                cover_save.recover_cover_transactions(self.folder)
+                self.assert_originals()
+                self.assertFalse((self.folder / 'Holiday.HEIC').exists())
+                self.assert_no_pending_files()
+
+    def _crash_during_retirement(self, phase):
+        code = '''
+import os, sys
+from pathlib import Path
+from fractions import Fraction
+from PIL import Image
+from livegallery import cover_save as c
+from livegallery.models import MediaItem
+image, video, phase = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+source = c.CoverSource.capture(MediaItem('crash', image, video))
+original = c._publish_no_replace
+def publish(staged, target):
+    original(staged, target)
+    if Path(target).name == phase: os._exit(74)
+c._publish_no_replace = publish
+unlink = Path.unlink
+def remove(path, *args, **kwargs):
+    unlink(path, *args, **kwargs)
+    if phase == 'committed-cleanup' and path.name == 'original-image': os._exit(74)
+Path.unlink = remove
+c.save_cover(source, Image.new('RGB',(120,90),'red'), 'overwrite', photo_time=Fraction(1,25))
+'''
+        result = subprocess.run([sys.executable, '-c', code, str(self.photo), str(self.video), phase],
+                                capture_output=True, timeout=45,
+                                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        self.assertEqual(result.returncode, 74, result.stderr.decode('utf8', errors='replace'))
+        journals = list((self.folder / WORK_DIRECTORY).glob('*/journal.json'))
+        self.assertEqual(len(journals), 1)
+        return journals[0]
+
+    def test_crash_after_each_retirement_is_recoverable_without_deleting_external_files(self):
+        self._use_jpeg_source()
+        extra = self._extra_jpeg()
+        extra_bytes = extra.read_bytes()
+        for phase in ('retired-image-0', 'retired-image-1'):
+            with self.subTest(phase=phase):
+                self._crash_during_retirement(phase)
+                cover_save.recover_cover_transactions(self.folder)
+                self.assert_originals()
+                self.assertEqual(extra.read_bytes(), extra_bytes)
+                self.assertFalse((self.folder / 'Holiday.HEIC').exists())
+                self.assert_no_pending_files()
+
+    def test_committed_cleanup_crash_preserves_new_pair_and_finishes_retired_cleanup(self):
+        self._use_jpeg_source()
+        extra = self._extra_jpeg()
+        journal = self._crash_during_retirement('committed-cleanup')
+        self.assertEqual(json.loads(journal.read_text('utf8'))['state'], 'committed')
+        self.assertFalse(self.photo.exists())
+        self.assertFalse(extra.exists())
+        new = self.folder / 'Holiday.HEIC'
+        self.assert_pair(new, self.video, Fraction(1, 25))
+        final_bytes = new.read_bytes(), self.video.read_bytes()
+        cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual((new.read_bytes(), self.video.read_bytes()), final_bytes)
+        self.assert_no_pending_files()
+
+    def test_external_edit_of_additional_jpeg_during_encoding_is_preserved(self):
+        extra = self._extra_jpeg()
+        encode = cover_save._encode_image
+        def changed(*args, **kwargs):
+            encode(*args, **kwargs)
+            extra.write_bytes(b'external edit of candidate')
+        with patch.object(cover_save, '_encode_image', side_effect=changed), self.assertRaises(SourceChangedError):
+            save_cover(self.source, self.frame, 'overwrite', photo_time=Fraction(0))
+        self.assertEqual(extra.read_bytes(), b'external edit of candidate')
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_overwrite_cancellation_between_replacements_restores_original_pair(self):
-        replace, cancel = cover_save.os.replace, threading.Event()
-        def cancel_after_first(staged, target):
-            replace(staged, target)
-            if Path(staged).name.startswith('cover'):
-                cancel.set()
-        with patch.object(cover_save.os, 'replace', side_effect=cancel_after_first):
-            with self.assertRaises(InterruptedError):
-                save_cover(self.source, self.frame, 'overwrite', cancel_event=cancel)
+    def test_external_recreation_at_retired_jpeg_name_is_never_overwritten(self):
+        self._use_jpeg_source()
+        journal = self._crash_during_retirement('retired-image-0')
+        self.photo.write_bytes(b'external new source path')
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(self.photo.read_bytes(), b'external new source path')
+        self.assertEqual((journal.parent / 'retired-image-0').read_bytes(), self.original_image)
+        self.assertEqual((journal.parent / 'original-image').read_bytes(), self.original_image)
+        self.assertTrue(journal.exists())
+
+    def test_retirement_journal_rejects_wrong_stem_extension_and_duplicate_names(self):
+        self._use_jpeg_source()
+        journal = self._crash_during_retirement('retired-image-0')
+        valid = json.loads(journal.read_text('utf8'))
+        for key, value in (('name', '../elsewhere.JPG'), ('name', 'Other.JPG'),
+                           ('name', 'Holiday.MOV'), ('retired', 'original-video')):
+            document = json.loads(json.dumps(valid))
+            document['retired_images'][0][key] = value
+            journal.write_text(json.dumps(document), encoding='utf8')
+            with self.subTest(key=key, value=value), self.assertRaises(CoverSaveError):
+                cover_save.recover_cover_transactions(self.folder)
+            self.assertTrue((journal.parent / 'retired-image-0').exists())
+        document = json.loads(json.dumps(valid))
+        document['retired_images'].append(dict(document['retired_images'][0], retired='retired-image-1'))
+        journal.write_text(json.dumps(document), encoding='utf8')
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        journal.write_text(json.dumps(valid), encoding='utf8')
+        cover_save.recover_cover_transactions(self.folder)
+        self.assert_originals()
+
+    def test_version_one_journal_still_recovers_same_path_overwrite(self):
+        journal = self._crash_after_first_publication()
+        document = json.loads(journal.read_text('utf8'))
+        document['schema'] = 'liveviewer.cover-pair-transaction.v1'
+        document.pop('retired_images')
+        document.pop('staging_records')
+        for row in document['entries']:
+            row.pop('source')
+        journal.write_text(json.dumps(document), encoding='utf8')
+        cover_save.recover_cover_transactions(self.folder)
         self.assert_originals()
         self.assert_no_pending_files()
 
-    def test_interrupt_immediately_after_os_replace_restores_both_originals(self):
-        replace = cover_save.os.replace
-        for interruption in (KeyboardInterrupt, SystemExit):
-            with self.subTest(interruption=interruption.__name__):
-                source = CoverSource.capture(self.item)
-                def interrupt_after_replace(staged, target):
-                    replace(staged, target)
-                    if Path(staged).name.startswith('cover'):
-                        raise interruption('interrupted between replacement and tracking')
-                with patch.object(cover_save.os, 'replace', side_effect=interrupt_after_replace):
-                    with self.assertRaises(interruption):
-                        save_cover(source, self.frame, 'overwrite')
+    def test_cleanup_rejects_case_renamed_modified_owned_backup(self):
+        journal = self._crash_after_first_publication()
+        backup = journal.parent / 'original-video'
+        renamed = journal.parent / 'ORIGINAL-VIDEO'
+        backup.rename(renamed)
+        renamed.write_bytes(b'external content under case alias')
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(renamed.read_bytes(), b'external content under case alias')
+        self.assertTrue(journal.exists())
+
+    def test_staging_recovery_preserves_unproven_content_even_with_known_role_name(self):
+        journal = self._crash_after_first_publication()
+        document = json.loads(journal.read_text('utf8'))
+        document['state'], document['entries'], document['staging_records'] = 'staging', [], {}
+        journal.write_text(json.dumps(document), encoding='utf8')
+        backup = journal.parent / 'original-video'
+        before = backup.read_bytes()
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(backup.read_bytes(), before)
+        self.assertTrue(journal.exists())
+
+    def test_copy_recovery_preserves_untracked_backup_role_file(self):
+        journal = self._crash_after_first_publication('copy')
+        unexpected = journal.parent / 'original-image'
+        unexpected.write_bytes(b'unrelated external recovery material')
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(unexpected.read_bytes(), b'unrelated external recovery material')
+        self.assertTrue(journal.exists())
+        self.assert_originals()
+
+    def test_copy_journal_cannot_claim_overwrite_backup_role(self):
+        journal = self._crash_after_first_publication('copy')
+        extra = journal.parent / 'original-image'
+        extra.write_bytes(b'external copy-only recovery material')
+        document = json.loads(journal.read_text('utf8'))
+        document['staging_records']['original-image'] = cover_save._record(cover_save.FileFingerprint.capture(extra))
+        journal.write_text(json.dumps(document), encoding='utf8')
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(extra.read_bytes(), b'external copy-only recovery material')
+        self.assertTrue(journal.exists())
+
+    def test_case_renamed_journal_is_removed_only_after_every_owned_data_file(self):
+        journal = self._crash_after_first_publication()
+        renamed = journal.parent / 'JOURNAL.JSON'
+        journal.rename(renamed)
+        removed = []
+        unlink = Path.unlink
+        def observed(path, *args, **kwargs):
+            if path.parent == journal.parent:
+                removed.append(path.name)
+            return unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', observed):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(removed[-1], 'JOURNAL.JSON')
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_existing_lowercase_heic_overwrite_keeps_exact_source_path(self):
+        renamed = self.folder / 'Holiday.heic'
+        self.photo.rename(renamed)
+        self.photo = renamed
+        self.item = MediaItem('lower', self.photo, self.video)
+        result = save_cover(CoverSource.capture(self.item), self.frame, 'overwrite', photo_time=Fraction(0))
+        self.assertEqual(str(result.image_path), str(renamed))
+        self.assert_pair(result.image_path, result.video_path)
+        self.assert_no_pending_files()
+
+    def test_process_interruption_recovers_overwrite_before_new_capture(self):
+        self._crash_after_first_publication()
+        self.assertNotEqual(self.photo.read_bytes(), self.original_image)
+        recovered = CoverSource.capture(self.item)
+        self.assertEqual(recovered.image.sha256, self.source.image.sha256)
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_process_interruption_removes_only_owned_copy(self):
+        self._crash_after_first_publication('copy')
+        self.assertTrue((self.folder / 'Holiday v1.HEIC').exists())
+        cover_save.recover_cover_transactions(self.folder)
+        self.assertFalse(any(self.folder.glob('Holiday v1.*')))
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_process_interruption_after_second_replace_still_restores_both(self):
+        self._crash_after_first_publication(after=2)
+        self.assertNotEqual(self.video.read_bytes(), self.original_video)
+        cover_save.recover_cover_transactions(self.folder)
+        self.assert_originals()
+        self.assert_no_pending_files()
+
+    def test_committed_recovery_hash_does_not_discard_backup_after_external_edit(self):
+        journal = self._crash_after_first_publication(after=2)
+        document = json.loads(journal.read_text('utf8'))
+        document['state'] = 'committed'
+        journal.write_text(json.dumps(document), encoding='utf8')
+        matches = cover_save._matches
+        def changed_during_hash(path, record):
+            result = matches(path, record)
+            if Path(path) == self.video and result:
+                self.photo.write_bytes(b'External edit during committed recovery')
+            return result
+        with patch.object(cover_save, '_matches', side_effect=changed_during_hash):
+            with self.assertRaises(CoverSaveError):
+                cover_save.recover_cover_transactions(self.folder)
+        self.assertTrue(journal.exists())
+        self.assertEqual((journal.parent / 'original-image').read_bytes(), self.original_image)
+        self.assertEqual(self.photo.read_bytes(), b'External edit during committed recovery')
+
+    def test_cleanup_refuses_modified_recovery_file_even_when_original_is_already_restored(self):
+        journal = self._crash_after_first_publication()
+        self.photo.unlink()
+        (journal.parent / 'original-image').replace(self.photo)
+        (journal.parent / 'original-video').write_bytes(b'External material in recovery directory')
+        with self.assertRaises(CoverSaveError):
+            cover_save.recover_cover_transactions(self.folder)
+        self.assertTrue(journal.exists())
+        self.assertEqual((journal.parent / 'original-video').read_bytes(), b'External material in recovery directory')
+        self.assert_originals()
+
+    def test_second_overwrite_failure_and_keyboard_interrupt_restore_pair(self):
+        original = cover_save.os.replace
+        for error in (PermissionError('MOV occupied'), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                def replace(staged, target):
+                    if Path(target) == self.video and Path(staged).name == 'video.MOV':
+                        raise error
+                    return original(staged, target)
+                with patch.object(cover_save.os, 'replace', side_effect=replace), self.assertRaises(type(error)):
+                    save_cover(CoverSource.capture(self.item), self.frame, 'overwrite', photo_time=Fraction(0))
                 self.assert_originals()
                 self.assert_no_pending_files()
 
-    def test_failed_rollback_retains_verified_originals_and_recovery_record(self):
-        replace = cover_save.os.replace
-        def fail_commit_and_restore(staged, target):
-            if Path(target) == self.video or Path(staged).name.startswith('original-'):
-                raise PermissionError('simulated locked destination')
-            replace(staged, target)
-        with patch.object(cover_save.os, 'replace', side_effect=fail_commit_and_restore):
-            with self.assertRaisesRegex(CoverSaveError, '恢复副本已保留'):
-                save_cover(self.source, self.frame, 'overwrite')
-        recovery = list((self.folder / WORK_DIRECTORY).glob('*/recovery.json'))
-        self.assertEqual(len(recovery), 1)
-        transaction = recovery[0].parent
-        self.assertEqual((transaction / 'original-image.JPEG').read_bytes(), self.original_image)
-        self.assertEqual((transaction / 'original-video.MOV').read_bytes(), self.original_video)
-        self.assertEqual(self.video.read_bytes(), self.original_video)
+    def test_failed_rollback_keeps_journal_and_can_be_retried(self):
+        journal = self._crash_after_first_publication()
+        with patch.object(cover_save.os, 'replace', side_effect=PermissionError('restore occupied')):
+            with self.assertRaises(PermissionError):
+                cover_save.recover_cover_transactions(self.folder)
+        self.assertTrue(journal.exists())
+        self.assertEqual((journal.parent / 'original-image').read_bytes(), self.original_image)
+        cover_save.recover_cover_transactions(self.folder)
+        self.assert_originals()
+        self.assert_no_pending_files()
 
-    def test_overwrite_rollback_does_not_replace_concurrently_modified_output(self):
-        replace = cover_save.os.replace
-        def external_edit_then_fail(staged, target):
-            if Path(target) == self.video:
-                self.photo.write_bytes(b'external editor changed image')
-                raise PermissionError('video unavailable')
-            replace(staged, target)
-        with patch.object(cover_save.os, 'replace', side_effect=external_edit_then_fail):
-            with self.assertRaisesRegex(CoverSaveError, '恢复副本已保留'):
-                save_cover(self.source, self.frame, 'overwrite')
-        self.assertEqual(self.photo.read_bytes(), b'external editor changed image')
-        self.assertEqual(self.video.read_bytes(), self.original_video)
-        self.assertEqual(len(list((self.folder / WORK_DIRECTORY).glob('*/original-image.JPEG'))), 1)
+    def test_recovery_rechecks_target_after_backup_hash_and_preserves_external_edit(self):
+        journal = self._crash_after_first_publication()
+        matches = cover_save._matches
+        def changed_during_hash(path, record):
+            result = matches(path, record)
+            if Path(path).name == 'original-image' and result:
+                self.photo.write_bytes(b'External edit during long backup hash')
+            return result
+        with patch.object(cover_save, '_matches', side_effect=changed_during_hash):
+            with self.assertRaises(CoverSaveError):
+                cover_save.recover_cover_transactions(self.folder)
+        self.assertEqual(self.photo.read_bytes(), b'External edit during long backup hash')
+        self.assertTrue(journal.exists())
+        self.assertEqual((journal.parent / 'original-image').read_bytes(), self.original_image)
 
-    def test_read_only_video_is_not_replaced(self):
-        self.video.chmod(0o444)
-        with self.assertRaises(CoverSaveError):
-            save_cover(self.source, self.frame, 'overwrite')
+    def test_final_pair_hash_cannot_report_success_after_external_image_edit(self):
+        matches = cover_save._matches
+        changed = False
+        def changed_during_hash(path, record):
+            nonlocal changed
+            result = matches(path, record)
+            if Path(path).name == 'Holiday v1.MOV' and result and not changed:
+                changed = True
+                (self.folder / 'Holiday v1.HEIC').write_bytes(b'External edit during final MOV hash')
+            return result
+        with patch.object(cover_save, '_matches', side_effect=changed_during_hash):
+            with self.assertRaises(CoverSaveError):
+                save_cover(self.source, self.frame, photo_time=Fraction(0))
+        self.assertTrue(changed)
+        self.assertEqual((self.folder / 'Holiday v1.HEIC').read_bytes(), b'External edit during final MOV hash')
+        self.assertFalse((self.folder / 'Holiday v1.MOV').exists())
+        self.assert_originals()
+
+    def test_journal_rejects_windows_aliases_roles_and_reparse_without_touching_targets(self):
+        journal = self._crash_after_first_publication()
+        valid = journal.read_text('utf8')
+        new_image = self.photo.read_bytes()
+        for target in ('../outside.jpg', 'Holiday.JPEG:payload', 'Holiday.JPEG.', 'Holiday.JPEG ', 'CON.jpg'):
+            document = json.loads(valid)
+            document['entries'][0]['target'] = target
+            journal.write_text(json.dumps(document), encoding='utf8')
+            with self.subTest(target=target), self.assertRaises(CoverSaveError):
+                cover_save.recover_cover_transactions(self.folder)
+            self.assertEqual(self.photo.read_bytes(), new_image)
+        for key, value in (('backup', 'original-video'), ('staged', 'video.MOV'), ('target', self.video.name)):
+            document = json.loads(valid)
+            document['entries'][0][key] = value
+            journal.write_text(json.dumps(document), encoding='utf8')
+            with self.subTest(key=key), self.assertRaises(CoverSaveError):
+                cover_save.recover_cover_transactions(self.folder)
+        journal.write_text(valid, encoding='utf8')
+        real_reparse = cover_save._is_reparse
+        for linked in (journal.parent, journal.parent / 'original-image'):
+            with patch.object(cover_save, '_is_reparse', side_effect=lambda path: Path(path) == linked or real_reparse(path)):
+                with self.assertRaises(CoverSaveError):
+                    cover_save.recover_cover_transactions(self.folder)
+            self.assertEqual(self.photo.read_bytes(), new_image)
+        cover_save.recover_cover_transactions(self.folder)
         self.assert_originals()
         self.assert_no_pending_files()
 
@@ -436,24 +833,36 @@ class CoverSaveTests(unittest.TestCase):
         movie = self.folder / "Portrait.MOV"
         heic.write_bytes((fixtures / "Live_H264.heic").read_bytes())
         movie.write_bytes((fixtures / "Portrait_HEVC.MOV").read_bytes())
+        prepare_live_photo_pair(heic, movie)
         original_heic, original_movie = heic.read_bytes(), movie.read_bytes()
         reader = FrameReader(movie)
         try:
             selected = reader.export(9)
+            selected_time = reader.metadata.frames[9].presentation_time
         finally:
             reader.close()
         self.assertLess(selected.width, selected.height)
         source = CoverSource.capture(MediaItem("portrait", heic, movie))
-        copied = save_cover(source, selected, "copy")
+        copied = save_cover(source, selected, "copy", photo_time=selected_time)
         self.assertEqual(copied.image_path.name, "Portrait v1.HEIC")
         self.assertEqual(copied.video_path.name, "Portrait v1.MOV")
         self.assertEqual(heic.read_bytes(), original_heic)
         self.assertEqual(movie.read_bytes(), original_movie)
-        assert_video_media_preserved(self, original_movie, copied.video_path.read_bytes())
-        overwritten = save_cover(source, selected, "overwrite")
+        from livegallery.live_photo_movie import media_payload_digests, inspect_live_photo_movie
+        from livegallery.live_photo_native_image import verify_native_movie_payload_preserved
+        from livegallery.live_photo_image import read_content_identifier
+        self.assertEqual(media_payload_digests(movie), media_payload_digests(copied.video_path))
+        verify_native_movie_payload_preserved(movie, copied.video_path)
+        self.assertEqual(inspect_live_photo_movie(copied.video_path).photo_time, selected_time)
+        self.assertEqual(inspect_live_photo_movie(copied.video_path).asset_identifier, read_content_identifier(copied.image_path))
+        overwritten = save_cover(source, selected, "overwrite", photo_time=selected_time)
         self.assertEqual(overwritten.image_path, heic)
         self.assertIsNone(overwritten.backup_path)
-        assert_video_media_preserved(self, original_movie, movie.read_bytes())
+        self.assertNotEqual(movie.read_bytes(), original_movie)
+        self.assertEqual(inspect_live_photo_movie(movie).photo_time, selected_time)
+        self.assertEqual(inspect_live_photo_movie(movie).asset_identifier, read_content_identifier(heic))
+        self.assertEqual(media_payload_digests(copied.video_path), media_payload_digests(movie))
+        verify_native_movie_payload_preserved(copied.video_path, movie)
         self.assertNotEqual(heic.read_bytes(), original_heic)
         for path in (copied.image_path, heic):
             header = path.read_bytes()[:128]

@@ -23,17 +23,25 @@ def _executable() -> Path:
 
 
 def encode_heic(image: Image.Image, destination: Path, *,
-                cancel_event: threading.Event | None = None, exif: bytes = b'') -> None:
+                cancel_event: threading.Event | None = None,
+                exif: bytes | None = None) -> None:
     """Write genuine HEIC bytes; caller owns staging and final validation/commit."""
     if cancel_event is not None and cancel_event.is_set():
         raise InterruptedError('已取消 HEIC 保存。')
     if image.width < 1 or image.height < 1 or image.width * image.height > 100_000_000:
         raise ValueError('图片尺寸超出 HEIC 保存范围。')
+    if exif is not None:
+        if (not isinstance(exif, bytes) or not 14 <= len(exif) <= 60 * 1024
+                or exif[:6] != b'Exif\x00\x00'
+                or exif[6:10] not in (b'II*\x00', b'MM\x00*')):
+            raise ValueError('HEIC EXIF 数据格式或长度无效。')
     rgb = image.convert('RGB')
     executable = _executable()
-    if len(exif) > 1_048_576:
-        raise ValueError('HEIC 元信息过大。')
-    pixels = rgb.tobytes() + exif
+    pixels = rgb.tobytes()
+    arguments = [str(executable), str(rgb.width), str(rgb.height), '95']
+    if exif is not None:
+        arguments.append(str(len(exif)))
+        pixels += exif
     # stdout goes directly to the private stage, avoiding another encoded-file
     # copy in memory and preventing encoder diagnostics from becoming pixels.
     process = None
@@ -42,7 +50,7 @@ def encode_heic(image: Image.Image, destination: Path, *,
         with Path(destination).open('xb') as target:
             created = True
             flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            process = subprocess.Popen([str(executable), str(rgb.width), str(rgb.height), '95', str(len(exif))],
+            process = subprocess.Popen(arguments,
                                        stdin=subprocess.PIPE, stdout=target, stderr=subprocess.PIPE,
                                        creationflags=flags)
             started = time.monotonic()

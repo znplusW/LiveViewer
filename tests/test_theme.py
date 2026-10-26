@@ -103,6 +103,7 @@ class ThemeTests(unittest.TestCase):
         controller = self.controller('system', system_provider=provider, poll_interval_ms=10)
         changed = QSignalSpy(controller.schemeChanged)
         state[0] = 'light'
+        self.assertTrue(changed.wait(50), 'System-theme polling did not deliver its change signal during the 50 ms wait')
         QTest.qWait(50)
         self.assertEqual(controller.effective_theme, 'light')
         self.assertEqual(changed.count(), 1)

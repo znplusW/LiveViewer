@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QModelIndex, QPersistentModelIndex, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QListView, QPushButton, QStyle, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QBoxLayout, QFrame, QGridLayout, QHBoxLayout,
+                               QListView, QPushButton, QStyle, QWidget)
 
 from .catalog_model import ThumbnailDelegate
 from .touch_filmstrip import FilmstripResizeHandle, TouchFilmstrip
@@ -28,10 +28,12 @@ class FilmstripPanel(QFrame):
         self.resize_handle.thicknessRequested.connect(
             lambda value: self.thicknessRequested.emit(self.orientation, value))
         self._body = QWidget(self)
-        body = QVBoxLayout(self._body)
+        body = QGridLayout(self._body)
+        self._body_layout = body
         body.setContentsMargins(8, 3, 8, 5)
         body.setSpacing(3)
-        buttons = QHBoxLayout()
+        self.controls = QWidget(self._body)
+        buttons = QHBoxLayout(self.controls)
         self._button_layout = buttons
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(5)
@@ -47,19 +49,6 @@ class FilmstripPanel(QFrame):
         self.side_button.clicked.connect(self._request_side)
         buttons.addWidget(self.side_button)
         buttons.addStretch()
-        body.addLayout(buttons)
-        self._info = QWidget(self._body)
-        self._info_layout = QGridLayout(self._info)
-        self._info_layout.setContentsMargins(0, 0, 0, 0)
-        self._info_layout.setHorizontalSpacing(6)
-        self._info_layout.setVerticalSpacing(0)
-        self.library_label = QLabel('尚未加载照片')
-        self.library_label.setObjectName('muted')
-        self.analysis_label = QLabel('按需加载 · 本机缓存')
-        self.analysis_label.setObjectName('muted')
-        for label in (self.library_label, self.analysis_label):
-            label.setStyleSheet('font-size:11px;')
-        body.addWidget(self._info)
         self.strip = TouchFilmstrip()
         self.strip.setModel(model)
         self.strip.setItemDelegate(ThumbnailDelegate(self.strip))
@@ -71,7 +60,6 @@ class FilmstripPanel(QFrame):
         self.strip.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.strip.setSpacing(0)
         self.strip.setMinimumSize(64, 64)
-        body.addWidget(self.strip, 1)
         self._relayout_timer = QTimer(self)
         self._relayout_timer.setSingleShot(True)
         self._relayout_timer.timeout.connect(self._relayout)
@@ -101,9 +89,6 @@ class FilmstripPanel(QFrame):
     def _request_side(self):
         self.layoutRequested.emit('vertical', 'left' if self.orientation == 'horizontal' or self.side == 'right' else 'right')
 
-    def set_info_visible(self, visible):
-        self._info.setVisible(bool(visible))
-
     def set_top_inset(self, pixels):
         """Reserve a fixed display-corner overlay without changing preferences."""
         pixels = max(0, int(pixels))
@@ -128,13 +113,40 @@ class FilmstripPanel(QFrame):
 
     def _configure(self):
         horizontal = self.orientation == 'horizontal'
+        self._body_layout.setContentsMargins(8, 0 if horizontal else 3, 8, 5)
+        self._body_layout.setSpacing(2 if horizontal else 3)
+        self._body_layout.setHorizontalSpacing(8 if horizontal else 3)
+        for widget in (self.controls, self.strip):
+            self._body_layout.removeWidget(widget)
+        for row in range(2):
+            self._body_layout.setRowStretch(row, 0)
+        for column in range(2):
+            self._body_layout.setColumnStretch(column, 0)
+        if horizontal:
+            # Controls have their own column beside the list, outside its
+            # scrolling viewport. Both begin directly below the divider.
+            self.controls.setFixedWidth(38)
+            self._body_layout.addWidget(self.strip, 0, 0)
+            self._body_layout.addWidget(self.controls, 0, 1, alignment=Qt.AlignmentFlag.AlignTop)
+            self._body_layout.setRowStretch(0, 1)
+            self._body_layout.setColumnStretch(0, 1)
+        else:
+            self.controls.setMinimumWidth(0)
+            self.controls.setMaximumWidth(16777215)
+            self._body_layout.addWidget(self.controls, 0, 0)
+            self._body_layout.addWidget(self.strip, 1, 0)
+            self._body_layout.setRowStretch(1, 1)
+            self._body_layout.setColumnStretch(0, 1)
         self.strip.setLayoutDirection(Qt.LayoutDirection.RightToLeft
                                       if not horizontal and self.side == 'left'
                                       else Qt.LayoutDirection.LeftToRight)
         while self._button_layout.count():
             self._button_layout.takeAt(0)
-        self._button_layout.addStretch()
-        order = ((self.side_button, self.hide_button, self.orientation_button) if horizontal else
+        self._button_layout.setDirection(QBoxLayout.Direction.TopToBottom if horizontal
+                                         else QBoxLayout.Direction.LeftToRight)
+        if not horizontal:
+            self._button_layout.addStretch()
+        order = ((self.hide_button, self.side_button, self.orientation_button) if horizontal else
                  (self.side_button, self.orientation_button, self.hide_button) if self.side == 'right' else
                  (self.hide_button, self.orientation_button, self.side_button))
         for button in order:
@@ -170,12 +182,6 @@ class FilmstripPanel(QFrame):
             self._outer.addWidget(self.resize_handle, 0, 1 - body_column)
             self._outer.setRowStretch(0, 1)
             self._outer.setColumnStretch(body_column, 1)
-        for label in (self.library_label, self.analysis_label):
-            self._info_layout.removeWidget(label)
-        self._info_layout.addWidget(self.library_label, 0, 0)
-        self._info_layout.addWidget(self.analysis_label, 0 if horizontal else 1, 1 if horizontal else 0)
-        self._info_layout.setColumnStretch(0, 1)
-        self._info_layout.setColumnStretch(1, 0)
         self._layout_dirty = True
         self._queue_relayout()
 

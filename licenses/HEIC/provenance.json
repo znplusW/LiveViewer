@@ -21,11 +21,11 @@
     "requirements-build.txt": "7822e21a0e90738766ad0634aaea62489f4560eabb3661d473eba329497d7713",
     "requirements.txt": "3adec26d8e808decc1ec6ba9a72f266322ba44635663585b3cb338296a634378",
     "native/heic_encoder/CMakeLists.txt": "d5ac1433493bbac11c40a4e1a2d47da90a25b78502465123822771915f718230",
-    "native/heic_encoder/main.cpp": "d799dc197e9447ff60c8b9a95a3078aa150e77c9514b8890eaac6a12dd4e500b"
+    "native/heic_encoder/main.cpp": "c617bc47b29a558308af3453d144219dba5340b1df516aa86769ade131849203"
   },
   "build_platform": {
-    "platform": "darwin",
-    "machine": "arm64",
+    "platform": "win32",
+    "machine": "amd64",
     "pointer_bits": 64,
     "image_os": "",
     "image_version": ""
@@ -37,17 +37,21 @@
   "runtime_version": "LiveViewer.HeicEncoder libheif 1.23.4 / Kvazaar",
   "recipe": "scripts/build_heic_encoder.py",
   "binaries": {
-    "libheif.1.23.4.dylib": "9c2bcbe7812f7e8a241b99765bab999873a1d4c6beaedf6d918d59014ee7d6f1",
-    "libkvazaar.dylib": "628381e3763906016ec120f1e99f3cf840481d90cd1fa7d61f2e3c7d6964b16e",
-    "libheif.dylib": "9c2bcbe7812f7e8a241b99765bab999873a1d4c6beaedf6d918d59014ee7d6f1",
-    "libheif.1.dylib": "9c2bcbe7812f7e8a241b99765bab999873a1d4c6beaedf6d918d59014ee7d6f1",
-    "libkvazaar.7.4.0.dylib": "628381e3763906016ec120f1e99f3cf840481d90cd1fa7d61f2e3c7d6964b16e",
-    "libkvazaar.7.dylib": "628381e3763906016ec120f1e99f3cf840481d90cd1fa7d61f2e3c7d6964b16e",
-    "LiveViewer.HeicEncoder": "2eab494342c8bff07f6cef85726c1c07ebcb44705f57893e8e1a094214ae602c"
+    "concrt140.dll": "2405355f0a58067b258f8df33c327e3a3d716eaac5a3a5aebb757842d85bd376",
+    "heif.dll": "e676e6225b34a75cb0ec2d3053274043c321d7aa3508c0eb32f552d73485beff",
+    "kvazaar.dll": "2e43b24d06d2ebefc531d4afab3c08fe675e07870f83ae7f4f5c4f1573711845",
+    "LiveViewer.HeicEncoder.exe": "7a1a57e9335ee66057b8f784726c9adbe0c931ccd0ad4abdb5f693b1dd18f090",
+    "msvcp140.dll": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+    "msvcp140_1.dll": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d",
+    "msvcp140_2.dll": "3ea06f0ee098b4823cb79599df3780e7f23cce52c19aac31d2a0d47efe33a5e9",
+    "msvcp140_atomic_wait.dll": "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479",
+    "msvcp140_codecvt_ids.dll": "f2069a52880ec885ee7f0511186100eb7fada0411a2b4948fafea7735b878a18",
+    "vcruntime140.dll": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+    "vcruntime140_1.dll": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
   },
   "license_files": {
     "Kvazaar-LICENSE.txt": "3c1dc3d7f8a3d08c14f4fbe9942f45764d8a21a3296e8d83446f33fd65f21c38",
-    "README.txt": "2ae42007dd2665d2f0d87241b71a713b4817b57298324d96296b23660a4816be",
-    "libheif-COPYING.txt": "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596"
+    "libheif-COPYING.txt": "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596",
+    "README.txt": "c6b48bca0c8c14fff75ace008015c8ba6cf3700a53b0c2f48ef4dd06377b085a"
   }
 }

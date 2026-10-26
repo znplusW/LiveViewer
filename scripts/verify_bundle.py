@@ -3,11 +3,75 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import struct
 
+if __package__:
+    from . import build_windows, fetch_exiftool
+else:
+    import build_windows
+    import fetch_exiftool
+
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def inspect_exiftool(folder: Path, pin: dict | None = None) -> list[str]:
+    errors = []
+    pin = pin if pin is not None else fetch_exiftool.load_pin()
+    internal = folder / '_internal'
+    isolated = internal / 'tools/exiftool'
+    try:
+        fetch_exiftool.validate(isolated, pin)
+    except (OSError, ValueError) as error:
+        errors.append(str(error))
+    private_names = {Path(name).name.casefold() for name in pin['runtime_files']
+                     if Path(name).suffix.casefold() in ('.dll', '.exe')
+                     and len(Path(name).parts) <= 2}
+    for path in internal.rglob('*'):
+        if path.is_file() and path.name.casefold() in private_names and not path.is_relative_to(isolated):
+            errors.append(f'ExifTool/Perl binary escaped its isolated directory: {path.relative_to(internal).as_posix()}')
+    notices = internal / 'licenses/ExifTool'
+    expected = fetch_exiftool.provenance(pin)
+    provenance = notices / 'PROVENANCE.json'
+    try:
+        if json.loads(provenance.read_text(encoding='utf8')) != expected:
+            errors.append('ExifTool provenance differs from the accepted dependency pin')
+    except (OSError, ValueError):
+        errors.append('ExifTool provenance is absent or invalid')
+    for name, expected_hash in expected['license_files'].items():
+        path = notices / name
+        if not path.is_file() or fetch_exiftool.sha256(path) != expected_hash:
+            errors.append(f'ExifTool original notice is missing or changed: {name}')
+    return errors
+
+
+def inspect_media_isolation(folder: Path, qt_source: Path) -> list[str]:
+    """Verify both DLL namespaces and Qt's original bytes, not just names."""
+    errors = []
+    internal = folder / '_internal'
+    qt_folder = internal / 'PySide6'
+    media_prefixes = ('avcodec-', 'avformat-', 'avutil-', 'avdevice-', 'avfilter-',
+                      'swresample-', 'swscale-')
+    for path in internal.rglob('*.dll'):
+        name = path.name.casefold()
+        relative = path.relative_to(internal).as_posix()
+        if name.startswith(media_prefixes) and path.parent not in (qt_folder, internal / 'tools/ffmpeg'):
+            errors.append(f'Media DLL escaped its isolated directory: {relative}')
+        if name in {'heif.dll', 'kvazaar.dll'} and path.parent != internal / 'tools/heic':
+            errors.append(f'HEIC encoder DLL escaped its isolated directory: {relative}')
+    for pattern in ('avcodec-*.dll', 'avformat-*.dll', 'avutil-*.dll', 'swresample-*.dll', 'swscale-*.dll'):
+        expected = list(qt_source.glob(pattern))
+        actual = list(qt_folder.glob(pattern))
+        if len(expected) != 1 or {p.name for p in actual} != {p.name for p in expected}:
+            errors.append(f'Qt media DLL set differs from the installed Qt distribution: {pattern}')
+    for path in qt_folder.rglob('*.dll'):
+        relative = path.relative_to(qt_folder)
+        original = qt_source / relative
+        if not original.is_file() or hashlib.sha256(path.read_bytes()).digest() != hashlib.sha256(original.read_bytes()).digest():
+            errors.append(f'Qt DLL differs from the installed Qt distribution: {relative.as_posix()}')
+    return errors
 
 
 def inspect(folder: Path) -> dict:
@@ -35,8 +99,8 @@ def inspect(folder: Path) -> dict:
     for path in files:
         relative = path.relative_to(folder)
         lowered = str(relative).lower()
-        if (any(part.casefold() in {"data", "liveviewer cache", ".liveviewer-work"}
-                for part in relative.parts) or path.name.casefold() == 'portable.flag'):
+        if (build_windows.is_runtime_path(relative)
+                and not build_windows.is_pinned_perl_data_file(path, relative)):
             errors.append(f"Runtime user data must not be distributed: {relative.as_posix()}")
         if "av.libs" in lowered or path.name.lower().startswith(("libx264", "libx265")):
             errors.append(f"Development-only GPL encoder library leaked into bundle: {lowered}")
@@ -52,6 +116,7 @@ def inspect(folder: Path) -> dict:
         "exact_frame_ffmpeg": "ffmpeg.exe",
         "exact_frame_ffprobe": "ffprobe.exe",
         "heic_encoder": "LiveViewer.HeicEncoder.exe",
+        "live_photo_metadata_tool": "exiftool.exe",
     }
     found = {}
     for label, pattern in patterns.items():
@@ -63,6 +128,11 @@ def inspect(folder: Path) -> dict:
     qt_codec = [p for p in files if p.name.startswith("avcodec-") and p.parent.name == "PySide6"]
     if not qt_codec:
         errors.append("Qt's own FFmpeg DLLs were not retained under PySide6")
+    qt_spec = importlib.util.find_spec('PySide6')
+    if qt_spec is None or qt_spec.origin is None:
+        errors.append('Installed PySide6 distribution is required to verify Qt DLL sources')
+    else:
+        errors.extend(inspect_media_isolation(folder, Path(qt_spec.origin).parent))
     frame_folder = folder / '_internal/tools/ffmpeg'
     provenance_path = frame_folder / 'PROVENANCE.json'
     frame_tools = None
@@ -92,6 +162,7 @@ def inspect(folder: Path) -> dict:
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
                 errors.append(f'HEIC encoder binary differs from its source-build provenance: {name}')
     licenses = [p for p in files if "licenses" in p.parts and p.suffix.lower() in {".txt", ".md"}]
+    errors.extend(inspect_exiftool(folder))
     if len(licenses) < 5:
         errors.append("Third-party license collection is incomplete")
     return {

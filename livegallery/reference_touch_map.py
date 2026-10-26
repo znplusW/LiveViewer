@@ -1,15 +1,15 @@
-"""Bounded static viewport reference and explicit indirect image input.
+"""A full-surface touchpad that explicitly controls the preview image.
 
-Only the existing decoded photo is sampled. The real ViewerCanvas owns the
-scene, video decoder and gesture state; no OS pointer events are synthesized.
+The real ViewerCanvas owns the image, video decoder and gesture state. This
+widget keeps no image copy and never synthesizes OS pointer events.
 """
 from __future__ import annotations
 
+import math
 import time
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import (QColor, QEventPoint, QMouseEvent, QPainter, QPen,
-                           QPixmap, QWheelEvent)
+from PySide6.QtGui import QColor, QEventPoint, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import QWidget
 
 from .native_touch import TouchContextMenuGuard, install_image_touch_filter
@@ -51,26 +51,21 @@ class _MappedTouch:
 
 class ReferenceTouchMap(QWidget):
     contextMenuRequested = Signal(QPoint)  # Global location beside the map finger.
-    MAX_THUMBNAIL_EDGE = 1024
-    PADDING = 6
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
         self.setObjectName('referenceTouchMap')
-        self.setAccessibleName('预览触控区')
+        self.setAccessibleName('预览触控板')
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.setMinimumSize(80, 80)
         self._colors = tokens_for(self)
-        self._thumbnail = QPixmap()
-        self._photo_key = None
-        self.thumbnail_revision = 0
-        self._active = self._mouse_active = self._navigation = False
+        self._active = self._mouse_active = False
+        self._gesture_target_rect = QRectF()
         self._touch_device = None
         self._touch_ids = set()
         self._last_global = QPoint()
-        self._nav_offset = QPointF()
         self._ignore_mouse_until = 0.0
         self._last_physical_right = 0.0
         self._menu_seen = False
@@ -90,81 +85,75 @@ class ReferenceTouchMap(QWidget):
         self.update()
 
     def _refresh(self):
-        pixmap = self.viewer._photo.pixmap()
-        key = pixmap.cacheKey() if not pixmap.isNull() else None
-        if key != self._photo_key:
-            self._photo_key = key
-            self._thumbnail = (QPixmap() if key is None else pixmap.scaled(
-                min(self.MAX_THUMBNAIL_EDGE, pixmap.width()), min(self.MAX_THUMBNAIL_EDGE, pixmap.height()),
-                Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-            self._thumbnail.setDevicePixelRatio(1)
-            self.thumbnail_revision += 1
         self.update()
 
     def mapped_rect(self):
-        area = QRectF(self.rect()).adjusted(self.PADDING, self.PADDING, -self.PADDING, -self.PADDING)
-        size = self.viewer.viewport().size()
-        if area.isEmpty() or size.width() <= 0 or size.height() <= 0:
+        return QRectF(self.rect())
+
+    def _current_target_rect(self):
+        """Visible photo pixels, excluding preview letterboxing and overlays."""
+        viewport = self.viewer.viewport()
+        image = self.viewer.viewportTransform().mapRect(self.viewer._image_rect)
+        visible = image.intersected(QRectF(viewport.rect()))
+        if visible.isEmpty():
             return QRectF()
-        scale = min(area.width() / size.width(), area.height() / size.height())
-        width, height = size.width() * scale, size.height() * scale
-        return QRectF(area.center().x() - width / 2, area.center().y() - height / 2, width, height)
+        # ViewerCanvas hit-tests rounded integer viewport positions. Keep the
+        # outer touchpad pixels inside the photo even at fractional fit scales.
+        left, top = math.ceil(visible.left()), math.ceil(visible.top())
+        right = min(math.floor(visible.right()), viewport.width() - 1)
+        bottom = min(math.floor(visible.bottom()), viewport.height() - 1)
+        return QRectF(QPointF(left, top), QPointF(right, bottom))
+
+    def _target_rect(self):
+        # A changing crop must not move the coordinate system underneath an
+        # active pan or pinch. The next gesture adopts the new visible crop.
+        return self._gesture_target_rect if self._active else self._current_target_rect()
 
     def map_to_viewer(self, point):
-        area, size = self.mapped_rect(), self.viewer.viewport().size()
-        if area.isEmpty():
+        area, target = self.mapped_rect(), self._target_rect()
+        if area.isEmpty() or target.isEmpty():
             return QPointF()
-        return QPointF((point.x() - area.left()) * size.width() / area.width(),
-                       (point.y() - area.top()) * size.height() / area.height())
+        return QPointF(target.left() + (point.x() - area.left()) * target.width() / area.width(),
+                       target.top() + (point.y() - area.top()) * target.height() / area.height())
 
     def map_from_viewer(self, point):
-        area, size = self.mapped_rect(), self.viewer.viewport().size()
-        return QPointF(area.left() + point.x() * area.width() / max(1, size.width()),
-                       area.top() + point.y() * area.height() / max(1, size.height()))
+        area, target = self.mapped_rect(), self._target_rect()
+        if target.isEmpty():
+            return QPointF()
+        return QPointF(area.left() + (point.x() - target.left()) * area.width() / target.width(),
+                       area.top() + (point.y() - target.top()) * area.height() / target.height())
 
     def image_contains_viewport_point(self, position):
-        return (self.mapped_rect().contains(position)
+        return (self.viewer.isVisible() and not self.viewer.window().isMinimized()
+                and not self._target_rect().isEmpty() and self.mapped_rect().contains(position)
                 and self.viewer.image_contains_viewport_point(self.map_to_viewer(position)))
 
     def navigator_rect(self):
-        navigator = self.viewer.zoom_navigator
-        if not navigator.isVisible():
-            return QRectF()
-        return QRectF(self.map_from_viewer(QPointF(navigator.pos())),
-                      self.map_from_viewer(QPointF(navigator.geometry().bottomRight()) + QPointF(1, 1)))
+        """The preview navigator has no duplicate or hidden touchpad hotspot."""
+        return QRectF()
 
     def _start(self, position):
         if (self._active or not self.viewer.isVisible() or self.viewer.window().isMinimized()
-                or not self.mapped_rect().contains(position) or self._thumbnail.isNull()):
+                or not self.mapped_rect().contains(position)):
+            return False
+        target = self._current_target_rect()
+        if target.isEmpty():
             return False
         if not self.viewer.begin_remote_input(self):
             return False
         self._active, self._menu_seen = True, False
+        self._gesture_target_rect = target
         mapped = self.map_to_viewer(position)
         self._started_on_image = self.viewer.image_contains_viewport_point(mapped)
-        self._navigation = self.navigator_rect().contains(position)
-        if self._navigation:
-            navigator = self.viewer.zoom_navigator
-            self.viewer._hold_timer.stop()
-            self.viewer._blank_hold_timer.stop()
-            self.viewer._stop_playback()
-            self.viewer._cancel_zoom_animation()
-            point = navigator._scene_point(mapped - QPointF(navigator.pos()))
-            self._nav_offset = point - navigator._view.center() if navigator._view.contains(point) else QPointF()
-            self._navigate(position)
         return True
-
-    def _navigate(self, position):
-        navigator = self.viewer.zoom_navigator
-        point = self.map_to_viewer(position) - QPointF(navigator.pos())
-        self.viewer._navigate_from_thumbnail(navigator._scene_point(point) - self._nav_offset)
 
     def _finish(self):
         self.viewer.end_remote_input(self)
         self._cancel_local()
 
     def _cancel_local(self):
-        self._active = self._mouse_active = self._navigation = False
+        self._active = self._mouse_active = False
+        self._gesture_target_rect = QRectF()
         self._touch_device = None
         self._touch_ids.clear()
         if QWidget.mouseGrabber() is self:
@@ -233,13 +222,16 @@ class ReferenceTouchMap(QWidget):
             self._last_global = points[0].globalPosition().toPoint()
         if kind == QEvent.Type.TouchCancel:
             self.cancel_interaction()
-        elif self._navigation:
-            if len(points) != 1:
-                self.cancel_interaction()
-            elif points:
-                self._navigate(points[0].position())
         else:
-            self.viewer.remote_touch(self, _MappedTouch(event, self.map_to_viewer, kind))
+            # Full-surface position mapping can have different X/Y scales.
+            # Measure spreading fingers before that mapping so rotating an
+            # equally spaced pair cannot become an unintended pinch zoom.
+            distance = None
+            if len(active) >= 2:
+                delta = active[0].position() - active[1].position()
+                distance = math.hypot(delta.x(), delta.y())
+            self.viewer.remote_touch(self, _MappedTouch(event, self.map_to_viewer, kind),
+                                     pinch_distance=distance)
         if kind == QEvent.Type.TouchEnd or not active:
             self._finish()
         return True
@@ -260,14 +252,11 @@ class ReferenceTouchMap(QWidget):
         if not self._active or not self._mouse_active:
             return
         self._last_global = event.globalPosition().toPoint()
-        if self._navigation:
-            self._navigate(event.position())
-        else:
-            point = self.map_to_viewer(event.position())
-            mapped = QMouseEvent(kind, point, point, event.globalPosition(), event.button(),
-                                 event.buttons(), event.modifiers(), event.source(), event.pointingDevice())
-            mapped.setTimestamp(event.timestamp())
-            self.viewer.remote_mouse(self, mapped)
+        point = self.map_to_viewer(event.position())
+        mapped = QMouseEvent(kind, point, point, event.globalPosition(), event.button(),
+                             event.buttons(), event.modifiers(), event.source(), event.pointingDevice())
+        mapped.setTimestamp(event.timestamp())
+        self.viewer.remote_mouse(self, mapped)
         if kind == QEvent.Type.MouseButtonRelease:
             self._finish()
 
@@ -288,7 +277,7 @@ class ReferenceTouchMap(QWidget):
 
     def wheelEvent(self, event):
         if (not self._active and self.viewer.isVisible() and not self.viewer.window().isMinimized()
-                and self.mapped_rect().contains(event.position())):
+                and not self._current_target_rect().isEmpty() and self.mapped_rect().contains(event.position())):
             point = self.map_to_viewer(event.position())
             mapped = QWheelEvent(point, event.globalPosition(), event.pixelDelta(), event.angleDelta(),
                                  event.buttons(), event.modifiers(), event.phase(), event.inverted(), event.source())
@@ -305,30 +294,7 @@ class ReferenceTouchMap(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         painter.fillRect(self.rect(), QColor(self._colors['surface']))
         area = self.mapped_rect()
-        painter.fillRect(area, self.viewer.backgroundBrush())
-        if self._thumbnail.isNull() or area.isEmpty() or not self.viewer.isVisible():
-            return
-        image = self.viewer.viewportTransform().mapRect(self.viewer._image_rect)
-        destination = QRectF(self.map_from_viewer(image.topLeft()), self.map_from_viewer(image.bottomRight()))
-        painter.save()
-        painter.setClipRect(area)
-        painter.drawPixmap(destination, self._thumbnail, QRectF(self._thumbnail.rect()))
-        navigator = self.viewer.zoom_navigator
-        if navigator.isVisible():
-            target = self.navigator_rect()
-            painter.save()
-            painter.translate(target.topLeft())
-            painter.scale(target.width() / navigator.width(), target.height() / navigator.height())
-            painter.fillRect(QRectF(navigator.rect()), QColor(self._colors['surface']))
-            painter.drawPixmap(navigator.image_rect(), navigator._thumbnail, QRectF(navigator._thumbnail.rect()))
-            painter.setPen(QPen(QColor('#ffffff'), 3))
-            painter.drawRect(navigator.visible_rect())
-            painter.setPen(QPen(QColor(self._colors['focus']), 1))
-            painter.drawRect(navigator.visible_rect())
-            painter.restore()
-        painter.restore()
         painter.setPen(QPen(QColor(self._colors['border']), 1))
         painter.drawRect(area.adjusted(.5, .5, -.5, -.5))

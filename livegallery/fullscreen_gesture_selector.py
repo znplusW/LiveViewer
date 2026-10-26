@@ -1,12 +1,13 @@
-"""Independent checkboxes for the edges that may exit fullscreen."""
+"""Cancellable top-edge fullscreen exit option."""
 from PySide6.QtCore import QEvent, QSignalBlocker, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import QMenu, QPushButton, QWidgetAction
 
 from .settings_controls import TickCheckBox
+from .settings import normalize_fullscreen_exit_gestures
 from .ui_theme import tokens_for
 
 
-GESTURES = (('top', '上沿向下滑'), ('left', '左侧边缘向右滑'), ('right', '右侧边缘向左滑'))
+GESTURES = (('top', '屏幕上沿下滑'),)
 
 
 class _GestureMenu(QMenu):
@@ -24,7 +25,7 @@ class _GestureMenu(QMenu):
 class FullscreenGestureSelector(QPushButton):
     selectionChanged = Signal(object)
 
-    def __init__(self, values=('left',), parent=None):
+    def __init__(self, values=('top',), parent=None):
         super().__init__(parent)
         self.setAccessibleName('退出全屏手势')
         self.setMinimumWidth(200)
@@ -54,7 +55,7 @@ class FullscreenGestureSelector(QPushButton):
         return [key for key, _label in GESTURES if self.checkboxes[key].isChecked()]
 
     def set_selected_gestures(self, values):
-        selected = set(values) if isinstance(values, (list, tuple, set, frozenset)) else {'left'}
+        selected = normalize_fullscreen_exit_gestures(values)
         for key, checkbox in self.checkboxes.items():
             with QSignalBlocker(checkbox):
                 checkbox.setChecked(key in selected)
@@ -67,7 +68,7 @@ class FullscreenGestureSelector(QPushButton):
     def _update_summary(self):
         labels = [label for key, label in GESTURES if self.checkboxes[key].isChecked()]
         self._summary = '、'.join(labels) if labels else '不启用退出手势'
-        self.setToolTip(self._summary + '\n可多选；全部取消可关闭手势退出。Esc／F11 仍可退出全屏。')
+        self.setToolTip(self._summary + '\n取消勾选可关闭手势退出。Esc／F11 仍可退出全屏。')
         self.setAccessibleDescription(self._summary)
         self.setText(self.fontMetrics().elidedText(self._summary, Qt.TextElideMode.ElideRight,
                                                   max(1, self.width() - 36)))
